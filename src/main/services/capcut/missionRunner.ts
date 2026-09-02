@@ -80,7 +80,6 @@ export const TASK_ENTRY_SELECTORS = [
   '[data-id="TitleBarTaskList"]',
   '#TitleBarTaskList',
   '[class*="Lv_Task-wrapper"]',
-  'button.credit-section',
   'button:has-text("Free credits")',
   '[class*="entry-"]:has-text("Free credits")',
   // ĐỂ CUỐI: trên /my-edit đây chỉ là div bọc một span rỗng.
@@ -90,6 +89,13 @@ export const TASK_ENTRY_SELECTORS = [
 /**
  * Lối vào đầu tiên CÓ KÍCH THƯỚC THẬT. `boundingBox()` trả null cho element ẩn
  * và 0×0 cho vỏ rỗng, nên nó lọc đúng cái bẫy nói trên.
+ *
+ * `button.credit-section` ĐÃ BỊ LOẠI khỏi danh sách: đo được trên account vừa
+ * đăng ký (rklqbfsgcvuemg55910, 2026-09-03 04:1x) rằng nó là nút **credits +
+ * Upgrade** — chẩn đoán in ra `button.credit-section "552200Upgrade"` (số 520 bị
+ * rolling-digits nhân đôi, kèm chữ Upgrade). `trial.ts` dùng đúng nút đó để mở
+ * modal nâng cấp. Để nó trong danh sách này thì nó vừa che mất lối vào thật, vừa
+ * làm nhánh dự phòng `/my-edit` không bao giờ chạy vì "đã tìm được lối vào".
  */
 export async function findTaskEntry(page: Page): Promise<Locator | null> {
   for (const sel of TASK_ENTRY_SELECTORS) {
@@ -239,34 +245,14 @@ export async function withTaskPopover<T>(
     // nhiệm vụ "bật thông báo" mở TAB MỚI nên hay rơi vào đúng cảnh này.
     await page.bringToFront().catch(() => {});
 
-    const entryOnPage = await findTaskEntry(page);
-    let entry = entryOnPage;
-    if (!entry) {
-      /**
-       * Trang hiện tại KHÔNG có lối vào nhiệm vụ nào — `/ai-design` là đúng ca
-       * đó: header chỉ có chip `credit-balance`, và dump
-       * `.debug/005_task_row_ambiguous.html` (2026-09-02 19:06) cho
-       * `TitleBarTaskList=0`, `taskRow=0`.
-       *
-       * Đó là lý do task CHA `capcut_web_design_studio_picture_creation` (+80)
-       * của yrqfvwwk67499 mắc ở `status=2` mà không ai nhận được: `claimIfPending`
-       * chạy trên `/ai-design`, nơi popover không thể mở. Ở tình huống này thì
-       * không còn gì để mất — sang `/my-edit` nơi có icon nhiệm vụ.
-       */
-      log('   ℹ️  Trang hiện tại không có lối vào nhiệm vụ — sang /my-edit');
-      await page.goto(URLS.main, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-      await page.waitForTimeout(5000);
-      entry = await findTaskEntry(page);
-    }
+    /** Bấm lối vào của TRANG HIỆN TẠI rồi chờ có dòng thật. Trả về số dòng. */
+    const tryOpenHere = async (): Promise<number> => {
+      const entry = await findTaskEntry(page);
+      if (!entry) {
+        log('   ℹ️  Trang này không có lối vào nhiệm vụ nào có kích thước thật');
+        return 0;
+      }
 
-    if (!entry) {
-      log('   ℹ️  Không có lối vào nhiệm vụ nào có kích thước thật trên trang này');
-    } else if ((await countTaskRows(page)) === 0) {
-      /**
-       * NÓI RÕ element nào bị bấm — trước đây `.first()` trên selector gộp bốc
-       * trúng `[data-id="TitleBarFreeCredits"]` là div bọc một span RỖNG, nên
-       * bấm 2 lần vẫn 0 dòng (jksqtiqa24961, 2026-09-02 19:00).
-       */
       const what = await entry
         .evaluate((el: Element) => {
           const cls = (el.getAttribute('class') ?? '').split(' ').slice(0, 2).join('.');
@@ -290,12 +276,54 @@ export async function withTaskPopover<T>(
           await page.waitForTimeout(500);
         }
         const rows = await countTaskRows(page);
-        if (rows > 0) {
-          log(`   ℹ️  Sau lần bấm ${attempt}: ${rows} dòng nhiệm vụ trong popover`);
-          break;
-        }
-        log(`   ℹ️  Sau lần bấm ${attempt}: popover vẫn 0 dòng`);
+        log(
+          rows > 0
+            ? `   ℹ️  Sau lần bấm ${attempt}: ${rows} dòng nhiệm vụ trong popover`
+            : `   ℹ️  Sau lần bấm ${attempt}: popover vẫn 0 dòng`
+        );
+        if (rows > 0) return rows;
       }
+      return 0;
+    };
+
+    let rows = await tryOpenHere();
+
+    /**
+     * KIỂM THEO KẾT QUẢ, KHÔNG THEO SỰ TỒN TẠI CỦA NÚT.
+     *
+     * Bản trước chỉ sang `/my-edit` khi KHÔNG tìm được lối vào nào. Đo được trên
+     * account vừa đăng ký (rklqbfsgcvuemg55910, 2026-09-03 04:1x): trang
+     * `/ai-design` của account mới không có `TitleBarTaskList` lẫn
+     * `TitleBarFreeCredits`, nên `findTaskEntry` rơi xuống một nút KHÁC, bấm mãi
+     * popover vẫn 0 dòng — mà vì "đã tìm được lối vào" nên nhánh `/my-edit`
+     * không bao giờ chạy. Giờ tiêu chí là popover CÓ MỌC hay không.
+     *
+     * `/my-edit` là nơi widget nhiệm vụ luôn có (dump lượt mở được: taskRow=19,
+     * TitleBarTaskList=2) — NHƯNG chỉ thế là chưa đủ: cùng lượt đó, ở nhiệm vụ
+     * `push_authorize` nó đã bấm ĐÚNG `div[data-id=TitleBarTaskList]` trên
+     * `/my-edit?start_tab=video` mà popover vẫn 0 dòng. Nên nhánh dự phòng đi
+     * vào `URLS.tasks` (có `enter_source=web_task_earn_credit`) — đường mà tài
+     * liệu làm tay chỉ định — và chờ popover tự mọc trước khi bấm gì.
+     */
+    if (rows === 0 && !page.url().includes('enter_source=web_task_earn_credit')) {
+      log('   ℹ️  Popover không mở được ở trang này — vào trang nhiệm vụ (enter_source=web_task_earn_credit)');
+      await page.goto(URLS.tasks, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+
+      // Trang nhiệm vụ có thể TỰ mở popover; chờ dòng xuất hiện trước khi bấm gì.
+      const deadline = Date.now() + 12000;
+      while (Date.now() < deadline && (await countTaskRows(page)) === 0) {
+        await page.waitForTimeout(500);
+      }
+      rows = await countTaskRows(page);
+      if (rows > 0) {
+        log(`   ℹ️  Trang nhiệm vụ tự mở popover: ${rows} dòng`);
+      } else {
+        rows = await tryOpenHere();
+      }
+    }
+
+    if (rows === 0) {
+      log('   ℹ️  Vẫn không mở được popover — bước sau sẽ báo lỗi kèm hiện trường');
     }
   }
 
