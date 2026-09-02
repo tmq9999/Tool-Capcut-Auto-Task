@@ -1,0 +1,9 @@
+{"el":"03:11","reqBody":"{\"action_key\":\"capcut_web_pwa_install\",\"op_id\":\"capcut_web_pwa_install_7680688177493312520_2026-09-01\"}","resBody":"{\"data\":{},\"err_no\":0,\"err_tips\":\"\"}"}
+{"el":"03:37","reqBody":"{\"action_key\":\"capcut_web_push_authorize\",\"op_id\":\"capcut_web_push_authorize_7680688177493312520_2026-09-01\"}","resBody":"{\"data\":{},\"err_no\":0,\"err_tips\":\"\"}"}
+{"el":"04:53","reqBody":"{\"action_key\":\"capcut_web_inspiration_generate_done\",\"op_id\":\"capcut_web_inspiration_generate_done_7680688177493312520_2026-09-01\"}","resBody":"{\"data\":{},\"err_no\":0,\"err_tips\":\"\"}"}
+{"el":"06:11","reqBody":"{\"action_key\":\"capcut_web_design_studio_ai_chat\",\"op_id\":\"capcut_web_design_studio_ai_chat_7680688177493312520_2026-09-01\"}","resBody":"{\"data\":{},\"err_no\":0,\"err_tips\":\"\"}"}
+{"el":"06:39","reqBody":"{\"action_key\":\"capcut_web_design_studio_upload_img\",\"op_id\":\"capcut_web_design_studio_upload_img_7680688177493312520_2026-09-01\"}","resBody":"{\"data\":{},\"err_no\":0,\"err_tips\":\"\"}"}
+{"el":"07:04","reqBody":"{\"action_key\":\"capcut_web_design_studio_canvas_edit\",\"op_id\":\"capcut_web_design_studio_canvas_edit_7680688177493312520_2026-09-01\"}","resBody":"{\"data\":{},\"err_no\":0,\"err_tips\":\"\"}"}
+{"el":"08:03","reqBody":"{\"action_key\":\"capcut_web_video_studio_send_msg\",\"op_id\":\"capcut_web_video_studio_send_msg_7680688177493312520_2026-09-01\"}","resBody":"{\"data\":{},\"err_no\":0,\"err_tips\":\"\"}"}
+{"el":"08:40","reqBody":"{\"action_key\":\"capcut_web_video_studio_generate_done\",\"op_id\":\"capcut_web_video_studio_generate_done_7680688177493312520_2026-09-01\"}","resBody":"{\"data\":{},\"err_no\":0,\"err_tips\":\"\"}"}
+{"el":"08:51","reqBody":"{\"action_key\":\"capcut_web_video_studio_export\",\"op_id\":\"capcut_web_video_studio_export_7680688177493312520_2026-09-01\"}","resBody":"{\"data\":{},\"err_no\":0,\"err_tips\":\"\"}"}

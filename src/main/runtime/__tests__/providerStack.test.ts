@@ -1,0 +1,126 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
+import type Database from 'better-sqlite3';
+import { createDatabaseConnection } from '../../database/connection';
+import { runMigrations } from '../../database/migrator';
+import { createProviderStack, createProviderStackRepositories } from '../providerStack';
+import type { HttpClient, HttpRequest, HttpResponse } from '../../providers/HttpClient';
+import type { ICredentialVault } from '../../security/CredentialVault';
+
+class PlainVault implements ICredentialVault {
+  isAvailable(): boolean { return true; }
+  encrypt(plainText: string): Buffer { return Buffer.from('enc:' + plainText, 'utf8'); }
+  decrypt(encrypted: Buffer): string {
+    const raw = encrypted.toString('utf8');
+    return raw.startsWith('enc:') ? raw.slice(4) : raw;
+  }
+}
+
+class RecordingHttp implements HttpClient {
+  public requests: HttpRequest[] = [];
+  async send(request: HttpRequest): Promise<HttpResponse> {
+    this.requests.push(request);
+    return { status: 200, ok: true, body: { success: true, data: { money: '1000' } }, rawText: '' };
+  }
+}
+
+let tmpDir: string;
+let db: Database.Database;
+
+beforeEach(() => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'am-stack-'));
+  db = createDatabaseConnection(path.join(tmpDir, 'test.db'));
+  runMigrations(db);
+});
+
+afterEach(() => {
+  if (db && db.open) db.close();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+describe('createProviderStack', () => {
+  it('registers connectivity probes only for the four implemented services', () => {
+    const stack = createProviderStack(createProviderStackRepositories(db), new PlainVault(), new RecordingHttp());
+
+    expect(stack.providerRegistry.registeredServices().sort()).toEqual([
+      'dongvanfb', 'gmail94', 'kiotproxy', 'multilogin'
+    ]);
+    expect(stack.providerRegistry.has('gologin')).toBe(false);
+  });
+
+  it('exposes the services the IPC layer needs', () => {
+    const stack = createProviderStack(createProviderStackRepositories(db), new PlainVault(), new RecordingHttp());
+
+    expect(typeof stack.accountService.list).toBe('function');
+    expect(typeof stack.automationRunService.start).toBe('function');
+    expect(typeof stack.emailPurchaseService.getProviderConfigs).toBe('function');
+    expect(typeof stack.logBus.emit).toBe('function');
+  });
+
+  it('reports both email providers as unconfigured on a fresh database', () => {
+    const stack = createProviderStack(createProviderStackRepositories(db), new PlainVault(), new RecordingHttp());
+
+    expect(stack.emailPurchaseService.getProviderConfigs()).toEqual([
+      { provider: 'gmail94', isConfigured: false, maskedHint: '••••••••' },
+      { provider: 'dongvanfb', isConfigured: false, maskedHint: '••••••••' }
+    ]);
+  });
+
+  it('routes a Gmail94 connectivity probe through the injected http client', async () => {
+    const http = new RecordingHttp();
+    const repositories = createProviderStackRepositories(db);
+    const vault = new PlainVault();
+    repositories.credentialRepo.saveCredential('gmail94', vault.encrypt('GM-KEY'), {
+      maskedHint: '••••••••',
+      status: 'unknown'
+    });
+    const stack = createProviderStack(repositories, vault, http);
+
+    const probe = stack.providerRegistry.get('gmail94');
+    await probe?.testConnection();
+
+    expect(http.requests[0].url).toContain('/profile?token=GM-KEY');
+  });
+
+  it('refuses to start a run for a browser that is not implemented yet', async () => {
+    const stack = createProviderStack(createProviderStackRepositories(db), new PlainVault(), new RecordingHttp());
+
+    await expect(
+      stack.automationRunService.start({
+        threadCount: 1,
+        browser: 'gologin',
+        headless: false,
+        retryCount: 0,
+        stepDelayMinMs: 0,
+        stepDelayMaxMs: 0,
+        typeDelayMinMs: 0,
+        typeDelayMaxMs: 0,
+        module: 'trial',
+        emailSource: { mode: 'manual', entries: ['a@b.com|p'] },
+        proxy: { mode: 'direct', entries: [] },
+        password: { mode: 'random', length: 12, uppercase: true, numbers: true, special: false },
+        testDurationMs: 0
+      })
+    ).resolves.toMatchObject({ runId: expect.any(String) });
+
+    const summary = await stack.automationRunService.waitForCompletion();
+    expect(summary.threadsFailed).toBe(1);
+  });
+
+  it('tạo AccountTaskRepository trên cùng database của stack', () => {
+    const stack = createProviderStack(createProviderStackRepositories(db), new PlainVault(), new RecordingHttp());
+
+    stack.repositories.accountTaskRepo.upsertMany('acc-1', [
+      { key: 'capcut_web_pwa_install', title: 'Install app', reward: 30, status: 4, opId: 'op-1' }
+    ]);
+
+    // Ghi qua repository của stack thì đọc lại được từ chính connection đó — bảng
+    // `account_tasks` của migration 004 đã có mặt trong DB mà stack đang dùng.
+    const rows = db.prepare('SELECT account_id, task_key, status, op_id FROM account_tasks').all();
+    expect(rows).toEqual([
+      { account_id: 'acc-1', task_key: 'capcut_web_pwa_install', status: 4, op_id: 'op-1' }
+    ]);
+  });
+});

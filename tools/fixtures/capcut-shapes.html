@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CapCut shapes fixture</title>
+<style>
+  body { font: 13px system-ui; margin: 0; display: flex; gap: 8px; }
+  .col { padding: 8px; border: 1px solid #ddd; }
+  [role="button"] { border: 1px solid #999; padding: 6px 10px; display: inline-block; cursor: pointer; }
+  #tools-layer { position: relative; }
+</style>
+
+<div class="col" id="tools-layer">
+  <h4>tools-layer</h4>
+
+  <!-- Khung chat Design Studio: nút Send Ở ĐÂY là cái code cũ bấm nhầm -->
+  <div id="ai-design-chat-panel-container" role="complementary" aria-label="Design with AI panel">
+    <div id="chat-panel">
+      <div class="footer-b2oyKX">
+        <div class="rightSlot-WeDa_d">
+          <div class="button-cmQyUp" role="button" aria-label="Send message">chat send</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Panel canvas prompt: phần expanded là inert + aria-hidden khi đang thu gọn -->
+  <div class="promptEditorContainer-wyIeqp collapsed-ugFVmP promptEditor-Eu1RTB"
+       role="region" aria-label="Canvas prompt panel" aria-expanded="false">
+    <div class="collapsedContent-HmPTQU" role="button" aria-label="Open canvas prompt">Tab to design</div>
+    <div class="expandedWrapper-QfEkUA" inert aria-hidden="true">
+      <div class="tiptap ProseMirror" contenteditable="true"><p data-placeholder="Describe your design ideas"></p></div>
+      <div class="rightSlot-WeDa_d">
+        <div class="button-cmQyUp" role="button" aria-label="Send message">canvas send</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="col">
+  <h4>studio</h4>
+  <div id="studio-chat" class="chatPage-K_l1LV">
+    <div class="skeletonBody-xel9lu"><div class="skeletonBar-NHXW7E"></div></div>
+    <div class="inputEditor-Dmr0Tl">Enter ideas, scenes, or screenplay for your short drama or film</div>
+    <svg class="sendButton-MvqpUD disabled-XKGrKB" width="20" height="20"><rect width="20" height="20"/></svg>
+  </div>
+</div>
+
+<div class="col">
+  <h4>popover</h4>
+  <div class="taskList-Zc4Mvb">
+    <div class="taskRow-qBqCmZ">
+      <span class="taskTitle-Bd8Nra">Edit on canvas</span>
+      <span class="reward-Ls2Pqe">+160</span>
+      <button class="actionBtn-Kq3Vzm">Claim</button>
+    </div>
+  </div>
+</div>
+
+<div class="col">
+  <h4>form</h4>
+  <input type="email" name="email" placeholder="Enter email">
+  <input type="password" name="password" placeholder="Password">
+  <div data-onboarding-anchor="onboarding-upload-toolbar" role="button" aria-label="Upload image">upload</div>
+</div>

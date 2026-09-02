@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="vi"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>NHẬT KÝ LOGS - AutoManager</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "on-error": "#690005",
+                        "outline": "#404040",
+                        "on-error-container": "#ffdad6",
+                        "surface-dim": "#131313",
+                        "primary": "#b4c5ff",
+                        "surface-container": "#201f1f",
+                        "surface-variant": "#353534",
+                        "background": "#131313",
+                        "on-surface": "#fafafa",
+                        "on-secondary-fixed": "#0d1c2d",
+                        "surface-tint": "#b4c5ff",
+                        "on-background": "#e5e2e1",
+                        "surface-container-lowest": "#0e0e0e",
+                        "on-tertiary-fixed-variant": "#7d2d00",
+                        "error-container": "#93000a",
+                        "tertiary-container": "#bc4800",
+                        "warning": "#f59e0b",
+                        "surface-container-high": "#2a2a2a",
+                        "on-primary-fixed": "#00174b",
+                        "on-primary-fixed-variant": "#003ea8",
+                        "surface-container-highest": "#353534",
+                        "on-secondary-container": "#a7b6cc",
+                        "tertiary-fixed": "#ffdbcd",
+                        "on-surface-variant": "#c3c6d7",
+                        "error": "#ef4444",
+                        "on-secondary": "#233143",
+                        "on-tertiary-fixed": "#360f00",
+                        "surface-container-low": "#1c1b1b",
+                        "inverse-on-surface": "#313030",
+                        "outline-variant": "#434655",
+                        "secondary-fixed": "#d4e4fa",
+                        "on-tertiary-container": "#ffede6",
+                        "tertiary": "#ffb596",
+                        "secondary-container": "#39485a",
+                        "surface": "#0a0a0a",
+                        "tertiary-fixed-dim": "#ffb596",
+                        "on-tertiary": "#581e00",
+                        "surface-bright": "#3a3939",
+                        "secondary-fixed-dim": "#b9c8de",
+                        "on-primary-container": "#eeefff",
+                        "primary-container": "#2563eb",
+                        "success": "#22c55e",
+                        "on-primary": "#002a78",
+                        "on-secondary-fixed-variant": "#39485a",
+                        "primary-fixed-dim": "#b4c5ff",
+                        "inverse-primary": "#0053db",
+                        "inverse-surface": "#e5e2e1",
+                        "secondary": "#b9c8de",
+                        "primary-fixed": "#dbe1ff"
+                    },
+                    borderRadius: {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    spacing: {
+                        "unit": "4px",
+                        "lg": "16px",
+                        "xl": "24px",
+                        "xs": "4px",
+                        "sidebar": "240px",
+                        "md": "12px",
+                        "sm": "8px",
+                        "gutter": "16px"
+                    },
+                    fontFamily: {
+                        "body-md": ["Geist"],
+                        "code": ["JetBrains Mono"],
+                        "title-md": ["Geist"],
+                        "headline-md": ["Geist"],
+                        "label-xs": ["Geist"],
+                        "display-lg": ["Geist"],
+                        "body-sm": ["Geist"],
+                        "label-md": ["Geist"]
+                    },
+                    fontSize: {
+                        "body-md": ["13px", { lineHeight: "18px", fontWeight: "400" }],
+                        "code": ["12px", { lineHeight: "18px", fontWeight: "400" }],
+                        "title-md": ["14px", { lineHeight: "20px", fontWeight: "600" }],
+                        "headline-md": ["18px", { lineHeight: "24px", letterSpacing: "-0.01em", fontWeight: "600" }],
+                        "label-xs": ["11px", { lineHeight: "14px", letterSpacing: "0.02em", fontWeight: "600" }],
+                        "display-lg": ["24px", { lineHeight: "32px", letterSpacing: "-0.02em", fontWeight: "600" }],
+                        "body-sm": ["12px", { lineHeight: "16px", fontWeight: "400" }],
+                        "label-md": ["12px", { lineHeight: "16px", letterSpacing: "0.01em", fontWeight: "500" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #0a0a0a;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #353534;
+            border-radius: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #404040;
+        }
+    </style>
+</head>
+<body class="bg-surface text-on-surface font-body-md h-screen flex overflow-hidden selection:bg-primary-container selection:text-on-primary-container">
+<!-- TopNavBar (Web) -->
+<header class="hidden md:flex justify-between items-center w-full px-lg h-md bg-surface-container dark:bg-surface-container border-b border-outline dark:border-outline fixed top-0 left-0 z-50">
+<div class="flex items-center gap-md">
+<span class="font-headline-md text-headline-md font-bold text-primary dark:text-primary">AutoManager</span>
+</div>
+<div class="flex items-center gap-md">
+<span class="material-symbols-outlined text-on-surface-variant hover:text-primary cursor-pointer transition-colors duration-200" data-icon="notifications">notifications</span>
+<span class="material-symbols-outlined text-on-surface-variant hover:text-primary cursor-pointer transition-colors duration-200" data-icon="settings">settings</span>
+<span class="material-symbols-outlined text-on-surface-variant hover:text-primary cursor-pointer transition-colors duration-200" data-icon="account_circle">account_circle</span>
+</div>
+</header>
+<!-- SideNavBar (Docked Left) -->
+<nav class="hidden md:flex flex-col w-sidebar fixed left-0 top-[48px] h-[calc(100vh-48px-32px)] z-40 bg-surface-container-low dark:bg-surface-container-low border-r border-outline dark:border-outline justify-between pb-sm pt-md">
+<div class="flex flex-col gap-unit px-sm">
+<a class="flex items-center gap-sm px-md py-sm rounded text-on-surface-variant dark:text-on-surface-variant hover:bg-surface-container-high dark:hover:bg-surface-container-high transition-all duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="dashboard">dashboard</span>
+<span class="font-label-md text-label-md">Dashboard</span>
+</a>
+<a class="flex items-center gap-sm px-md py-sm rounded text-on-surface-variant dark:text-on-surface-variant hover:bg-surface-container-high dark:hover:bg-surface-container-high transition-all duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="manage_accounts">manage_accounts</span>
+<span class="font-label-md text-label-md">Accounts</span>
+</a>
+<a class="flex items-center gap-sm px-md py-sm rounded text-on-surface-variant dark:text-on-surface-variant hover:bg-surface-container-high dark:hover:bg-surface-container-high transition-all duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+<span class="font-label-md text-label-md">Settings</span>
+</a>
+<a class="flex items-center gap-sm px-md py-sm rounded bg-secondary-container dark:bg-secondary-container text-on-secondary-container dark:text-on-secondary-container border-l-2 border-primary transition-all duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="terminal">terminal</span>
+<span class="font-label-md text-label-md font-bold">Logs</span>
+</a>
+</div>
+<div class="flex flex-col gap-unit px-sm mt-auto">
+<a class="flex items-center gap-sm px-md py-sm rounded text-on-surface-variant dark:text-on-surface-variant hover:bg-surface-container-high dark:hover:bg-surface-container-high transition-all duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="help">help</span>
+<span class="font-label-md text-label-md">Help</span>
+</a>
+<a class="flex items-center gap-sm px-md py-sm rounded text-on-surface-variant dark:text-on-surface-variant hover:bg-surface-container-high dark:hover:bg-surface-container-high transition-all duration-150" href="#">
+<span class="material-symbols-outlined" data-icon="logout">logout</span>
+<span class="font-label-md text-label-md">Logout</span>
+</a>
+</div>
+</nav>
+<!-- Main Content Canvas -->
+<main class="flex-1 md:ml-sidebar mt-[48px] mb-[32px] overflow-hidden flex flex-col bg-background">
+<!-- Page Header -->
+<div class="px-xl py-lg border-b border-outline bg-surface-container-lowest flex justify-between items-center shrink-0">
+<div>
+<h1 class="font-headline-md text-headline-md text-on-surface">NHẬT KÝ LOGS</h1>
+<p class="font-body-sm text-body-sm text-on-surface-variant mt-unit">Theo dõi runtime và debug lỗi Automation</p>
+</div>
+<div class="flex gap-sm">
+<button class="h-[32px] px-md rounded flex items-center gap-xs border border-outline text-on-surface bg-transparent hover:bg-surface-container-high transition-colors font-label-md text-label-md">
+<span class="material-symbols-outlined text-[16px]" data-icon="pause">pause</span>
+                    Pause
+                </button>
+<button class="h-[32px] px-md rounded flex items-center gap-xs border border-outline text-error bg-transparent hover:bg-surface-container-high transition-colors font-label-md text-label-md">
+<span class="material-symbols-outlined text-[16px]" data-icon="delete">delete</span>
+                    Clear Logs
+                </button>
+</div>
+</div>
+<!-- Filter Bar -->
+<div class="px-xl py-sm bg-surface flex items-center gap-md border-b border-outline shrink-0">
+<div class="relative flex-1 max-w-[300px]">
+<span class="material-symbols-outlined absolute left-sm top-1/2 -translate-y-1/2 text-on-surface-variant text-[16px]" data-icon="search">search</span>
+<input class="w-full h-[32px] bg-surface-dim border border-outline rounded pl-xl pr-sm text-body-sm focus:border-primary focus:ring-2 focus:ring-primary/20 text-on-surface placeholder:text-on-surface-variant outline-none transition-all" placeholder="Tìm email hoặc nội dung log..." type="text"/>
+</div>
+<div class="relative w-[150px]">
+<select class="w-full h-[32px] bg-surface-dim border border-outline rounded px-sm text-body-sm focus:border-primary focus:ring-2 focus:ring-primary/20 text-on-surface appearance-none outline-none cursor-pointer">
+<option value="all">Level: All</option>
+<option value="info">Info</option>
+<option value="success">Success</option>
+<option value="warning">Warning</option>
+<option value="error">Error</option>
+</select>
+<span class="material-symbols-outlined absolute right-sm top-1/2 -translate-y-1/2 text-on-surface-variant text-[16px] pointer-events-none" data-icon="expand_more">expand_more</span>
+</div>
+<div class="relative w-[200px]">
+<select class="w-full h-[32px] bg-surface-dim border border-outline rounded px-sm text-body-sm focus:border-primary focus:ring-2 focus:ring-primary/20 text-on-surface appearance-none outline-none cursor-pointer">
+<option value="all">Email: All Accounts</option>
+<option value="w1">worker_alpha@domain.com</option>
+<option value="w2">worker_beta@domain.com</option>
+</select>
+<span class="material-symbols-outlined absolute right-sm top-1/2 -translate-y-1/2 text-on-surface-variant text-[16px] pointer-events-none" data-icon="expand_more">expand_more</span>
+</div>
+</div>
+<!-- DataGrid / Console Area -->
+<div class="flex-1 overflow-auto custom-scrollbar bg-[#000000] p-sm">
+<table class="w-full text-left font-code text-code border-collapse">
+<thead class="sticky top-0 bg-surface-container-lowest z-10">
+<tr>
+<th class="py-xs px-sm font-medium text-on-surface-variant border-b border-outline w-[100px]">TIME</th>
+<th class="py-xs px-sm font-medium text-on-surface-variant border-b border-outline w-[250px]">EMAIL</th>
+<th class="py-xs px-sm font-medium text-on-surface-variant border-b border-outline w-[150px]">STEP</th>
+<th class="py-xs px-sm font-medium text-on-surface-variant border-b border-outline w-[100px]">STATUS</th>
+<th class="py-xs px-sm font-medium text-on-surface-variant border-b border-outline">MESSAGE</th>
+</tr>
+</thead>
+<tbody>
+<tr class="h-[36px] hover:bg-[#262626] border-b border-[#262626] transition-colors">
+<td class="px-sm text-on-surface-variant">03:32:01</td>
+<td class="px-sm text-secondary">worker_alpha@domain.com</td>
+<td class="px-sm text-on-surface">Initialize</td>
+<td class="px-sm"><span class="text-primary font-medium">INFO</span></td>
+<td class="px-sm text-on-surface">Worker started</td>
+</tr>
+<tr class="h-[36px] hover:bg-[#262626] border-b border-[#262626] transition-colors">
+<td class="px-sm text-on-surface-variant">03:32:12</td>
+<td class="px-sm text-secondary">worker_alpha@domain.com</td>
+<td class="px-sm text-on-surface">OTP</td>
+<td class="px-sm"><span class="text-warning font-medium">WAITING</span></td>
+<td class="px-sm text-on-surface">Waiting for OTP</td>
+</tr>
+<tr class="h-[36px] bg-[#1a1010] hover:bg-[#2a1515] border-l-2 border-error border-b border-[#262626] transition-colors">
+<td class="px-sm text-on-surface-variant">03:32:31</td>
+<td class="px-sm text-secondary">worker_beta@domain.com</td>
+<td class="px-sm text-on-surface">Proxy</td>
+<td class="px-sm"><span class="text-error font-medium">ERROR</span></td>
+<td class="px-sm text-error">Proxy connection timeout</td>
+</tr>
+<tr class="h-[36px] hover:bg-[#262626] border-b border-[#262626] transition-colors">
+<td class="px-sm text-on-surface-variant">03:32:45</td>
+<td class="px-sm text-secondary">worker_alpha@domain.com</td>
+<td class="px-sm text-on-surface">Login</td>
+<td class="px-sm"><span class="text-success font-medium">SUCCESS</span></td>
+<td class="px-sm text-on-surface">Authentication successful</td>
+</tr>
+</tbody>
+</table>
+</div>
+</main>
+<!-- Footer -->
+<footer class="fixed bottom-0 left-0 w-full z-50 flex justify-between items-center px-lg h-[32px] bg-surface-container-lowest dark:bg-surface-container-lowest border-t border-outline dark:border-outline md:pl-[calc(240px+16px)]">
+<div class="flex items-center gap-md font-code text-code text-success dark:text-success">
+<span class="flex items-center gap-xs">
+<span class="w-2 h-2 rounded-full bg-success"></span>
+                Service: Connected | Version 1.2.0
+            </span>
+<span class="text-on-surface-variant hidden sm:inline">| Multilogin: Connected</span>
+</div>
+<div class="flex items-center gap-md">
+<label class="flex items-center gap-xs cursor-pointer">
+<input checked="" class="form-checkbox h-3 w-3 text-primary rounded border-outline bg-surface focus:ring-primary focus:ring-offset-surface" type="checkbox"/>
+<span class="font-code text-code text-on-surface-variant">Auto Scroll</span>
+</label>
+</div>
+</footer>
+</body></html>

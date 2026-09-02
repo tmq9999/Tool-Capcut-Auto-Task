@@ -1,0 +1,124 @@
+/**
+ * =============================================================================
+ * AUTH — QUYẾT ĐỊNH ĐĂNG KÝ HAY ĐĂNG NHẬP
+ * =============================================================================
+ * Đây là module thứ tư, và nó chỉ làm ĐÚNG MỘT việc: đưa profile vào trong app,
+ * bằng đường nào cũng được. Nó không biết gì về nhiệm vụ, không biết gì về
+ * proxy — chỉ gọi lại hai module đã có:
+ *
+ *   src/signup.ts  →  signupCapcut()
+ *   src/login.ts   →  loginCapcut(), isLoggedIn()
+ *
+ * Nhờ vậy orchestrator không cần cờ `--signup` thủ công nữa: tài khoản có sẵn
+ * thì đăng nhập, chưa có thì đăng ký.
+ *
+ * FALLBACK HAI CHIỀU — cả hai đều đã gặp thật:
+ *   - đăng ký mà CapCut báo email đã tồn tại  →  chuyển sang đăng nhập
+ *   - đăng nhập mà không vào được app         →  thử đăng ký (email chưa tồn tại)
+ * =============================================================================
+ *
+ * GHI CHÚ KHI PORT VÀO APP:
+ *   - `Account` của engine đến từ `src/accounts.ts` (file phẳng `accounts.txt`).
+ *     File đó KHÔNG được port (app dùng bảng `accounts` trong SQLite), nên kiểu
+ *     tối thiểu `AuthAccount` được khai tại chỗ ở dưới.
+ *   - `opts` không còn tuỳ chọn: `log` bắt buộc vì `console.log` đã bị bỏ hẳn.
+ */
+
+import type { BrowserContext, Page } from 'playwright-core';
+
+import { isLoggedIn, loginCapcut, type CapcutCredentials } from './login';
+import { signupCapcut } from './signup';
+
+/**
+ * Tài khoản tối thiểu mà tầng xác thực cần: email + password, cộng NGUỒN lấy
+ * tài khoản để biết nó đã tồn tại trên CapCut hay chưa (xem `looksExisting`).
+ * Hai giá trị của bản engine được giữ nguyên để quyết định không đổi; `'db'` là
+ * nguồn của app (bảng `accounts` trong SQLite) — cũng là tài khoản đã từng được
+ * tạo nên đi đường đăng nhập.
+ */
+export interface AuthAccount extends CapcutCredentials {
+  source?: 'cli' | 'accounts.txt' | '.env' | 'db';
+}
+
+/** Đường đã thật sự dùng để vào app. */
+export type AuthMode = 'already' | 'login' | 'signup' | 'signup-then-login' | 'login-then-signup';
+
+export interface AuthResult {
+  mode: AuthMode;
+  /** true nếu tài khoản được tạo mới trong lần chạy này (cần ghi vào accounts.txt) */
+  created: boolean;
+}
+
+export interface AuthOptions {
+  /**
+   * Bắt buộc đi đường đăng ký, kể cả khi tài khoản đến từ accounts.txt.
+   * Dùng cho `npm run dev -- --signup`.
+   */
+  forceSignup?: boolean;
+  log: (msg: string) => void;
+  /**
+   * Nguồn mã xác minh 6 số, chuyển thẳng cho `signupCapcut`. App nối vào
+   * `EmailPurchaseService`; thiếu nó mà CapCut đòi OTP thì signup ném lỗi rõ ràng.
+   */
+  getOtp?: (email: string) => Promise<string>;
+}
+
+/**
+ * Tài khoản đến từ `accounts.txt` nghĩa là đã từng được tạo -> đi đường đăng nhập.
+ * Tài khoản sinh ngẫu nhiên (`source: 'cli'`, `lineNumber: 0`) thì chưa tồn tại
+ * -> đi đường đăng ký. `.env` là tài khoản đã lưu -> đăng nhập.
+ */
+function looksExisting(account: AuthAccount): boolean {
+  return (
+    account.source === 'accounts.txt' || account.source === '.env' || account.source === 'db'
+  );
+}
+
+export async function ensureInApp(
+  page: Page,
+  context: BrowserContext,
+  account: AuthAccount,
+  opts: AuthOptions
+): Promise<AuthResult> {
+  const log = opts.log;
+
+  if (await isLoggedIn(page)) {
+    log('✅ Profile đã đăng nhập sẵn — không cần xác thực lại');
+    return { mode: 'already', created: false };
+  }
+
+  const trySignup = opts.forceSignup || !looksExisting(account);
+  log(
+    trySignup
+      ? `↪️  Đi đường ĐĂNG KÝ (${opts.forceSignup ? 'do --signup' : 'tài khoản mới sinh'})`
+      : `↪️  Đi đường ĐĂNG NHẬP (tài khoản từ ${account.source})`
+  );
+
+  if (trySignup) {
+    const r = await signupCapcut(page, context, account, { log, getOtp: opts.getOtp });
+    if (r.alreadyExists && !(await isLoggedIn(page))) {
+      log('Email đã tồn tại → chuyển sang đăng nhập');
+      await loginCapcut(page, context, account, log);
+      await assertInApp(page, account);
+      return { mode: 'signup-then-login', created: false };
+    }
+    await assertInApp(page, account);
+    return { mode: 'signup', created: r.created };
+  }
+
+  await loginCapcut(page, context, account, log).catch((e: unknown) => {
+    log(`Đăng nhập thất bại: ${(e as Error).message}`);
+  });
+  if (await isLoggedIn(page)) return { mode: 'login', created: false };
+
+  // Không vào được: có thể email chưa từng được tạo trên CapCut.
+  log('Đăng nhập không vào được app → thử đăng ký');
+  const r = await signupCapcut(page, context, account, { log, getOtp: opts.getOtp });
+  await assertInApp(page, account);
+  return { mode: 'login-then-signup', created: r.created };
+}
+
+async function assertInApp(page: Page, account: AuthAccount): Promise<void> {
+  if (await isLoggedIn(page)) return;
+  throw new Error(`Chưa vào được app với ${account.email} (URL: ${page.url()})`);
+}

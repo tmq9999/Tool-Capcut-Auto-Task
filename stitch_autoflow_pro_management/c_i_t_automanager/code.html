@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>AutoManager - Settings</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          "colors": {
+            "on-error": "#690005",
+            "outline": "#404040",
+            "on-error-container": "#ffdad6",
+            "surface-dim": "#131313",
+            "primary": "#b4c5ff",
+            "surface-container": "#201f1f",
+            "surface-variant": "#353534",
+            "background": "#131313",
+            "on-surface": "#fafafa",
+            "on-secondary-fixed": "#0d1c2d",
+            "surface-tint": "#b4c5ff",
+            "on-background": "#e5e2e1",
+            "surface-container-lowest": "#0e0e0e",
+            "on-tertiary-fixed-variant": "#7d2d00",
+            "error-container": "#93000a",
+            "tertiary-container": "#bc4800",
+            "warning": "#f59e0b",
+            "surface-container-high": "#2a2a2a",
+            "on-primary-fixed": "#00174b",
+            "on-primary-fixed-variant": "#003ea8",
+            "surface-container-highest": "#353534",
+            "on-secondary-container": "#a7b6cc",
+            "tertiary-fixed": "#ffdbcd",
+            "on-surface-variant": "#c3c6d7",
+            "error": "#ef4444",
+            "on-secondary": "#233143",
+            "on-tertiary-fixed": "#360f00",
+            "surface-container-low": "#1c1b1b",
+            "inverse-on-surface": "#313030",
+            "outline-variant": "#434655",
+            "secondary-fixed": "#d4e4fa",
+            "on-tertiary-container": "#ffede6",
+            "tertiary": "#ffb596",
+            "secondary-container": "#39485a",
+            "surface": "#0a0a0a",
+            "tertiary-fixed-dim": "#ffb596",
+            "on-tertiary": "#581e00",
+            "surface-bright": "#3a3939",
+            "secondary-fixed-dim": "#b9c8de",
+            "on-primary-container": "#eeefff",
+            "primary-container": "#2563eb",
+            "success": "#22c55e",
+            "on-primary": "#002a78",
+            "on-secondary-fixed-variant": "#39485a",
+            "primary-fixed-dim": "#b4c5ff",
+            "inverse-primary": "#0053db",
+            "inverse-surface": "#e5e2e1",
+            "secondary": "#b9c8de",
+            "primary-fixed": "#dbe1ff"
+          },
+          "borderRadius": {
+            "DEFAULT": "0.25rem",
+            "lg": "0.5rem",
+            "xl": "0.75rem",
+            "full": "9999px"
+          },
+          "spacing": {
+            "unit": "4px",
+            "lg": "16px",
+            "xl": "24px",
+            "xs": "4px",
+            "sidebar": "240px",
+            "md": "12px",
+            "sm": "8px",
+            "gutter": "16px"
+          },
+          "fontFamily": {
+            "body-md": ["Geist"],
+            "code": ["JetBrains Mono"],
+            "title-md": ["Geist"],
+            "headline-md": ["Geist"],
+            "label-xs": ["Geist"],
+            "display-lg": ["Geist"],
+            "body-sm": ["Geist"],
+            "label-md": ["Geist"]
+          },
+          "fontSize": {
+            "body-md": ["13px", { "lineHeight": "18px", "fontWeight": "400" }],
+            "code": ["12px", { "lineHeight": "18px", "fontWeight": "400" }],
+            "title-md": ["14px", { "lineHeight": "20px", "fontWeight": "600" }],
+            "headline-md": ["18px", { "lineHeight": "24px", "letterSpacing": "-0.01em", "fontWeight": "600" }],
+            "label-xs": ["11px", { "lineHeight": "14px", "letterSpacing": "0.02em", "fontWeight": "600" }],
+            "display-lg": ["24px", { "lineHeight": "32px", "letterSpacing": "-0.02em", "fontWeight": "600" }],
+            "body-sm": ["12px", { "lineHeight": "16px", "fontWeight": "400" }],
+            "label-md": ["12px", { "lineHeight": "16px", "letterSpacing": "0.01em", "fontWeight": "500" }]
+          }
+        }
+      }
+    }
+  </script>
+<style>
+    /* Custom Scrollbar for dark theme */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent; 
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #353534; 
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #404040; 
+    }
+    .input-field {
+      height: 32px;
+    }
+    .btn {
+      height: 32px;
+      padding: 0 16px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 0.25rem;
+      font-family: 'Geist', sans-serif;
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.01em;
+      transition: all 150ms ease;
+    }
+    .btn-primary {
+      background-color: #2563eb;
+      color: #fafafa;
+    }
+    .btn-primary:hover {
+      background-color: #3b82f6;
+    }
+    .btn-secondary {
+      background-color: transparent;
+      border: 1px solid #404040;
+      color: #e5e2e1;
+    }
+    .btn-secondary:hover {
+      background-color: #2a2a2a;
+    }
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 32px;
+      height: 18px;
+    }
+    .switch input { 
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #404040;
+      transition: .2s;
+      border-radius: 18px;
+    }
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 14px;
+      width: 14px;
+      left: 2px;
+      bottom: 2px;
+      background-color: #fafafa;
+      transition: .2s;
+      border-radius: 50%;
+    }
+    input:checked + .slider {
+      background-color: #2563eb;
+    }
+    input:checked + .slider:before {
+      transform: translateX(14px);
+    }
+  </style>
+</head>
+<body class="bg-background text-on-surface font-body-md text-body-md h-screen w-screen overflow-hidden flex">
+<!-- SideNavBar -->
+<aside class="flex flex-col w-sidebar fixed left-0 top-0 h-full z-40 bg-surface-container-low border-r border-outline transition-all duration-150">
+<div class="p-xl border-b border-outline">
+<div class="flex items-center gap-sm">
+<span class="material-symbols-outlined text-primary text-[24px]">token</span>
+<div>
+<h1 class="font-headline-md text-headline-md text-primary font-bold">AutoManager</h1>
+<p class="font-label-xs text-label-xs text-on-surface-variant">v1.2.0</p>
+</div>
+</div>
+</div>
+<nav class="flex-1 py-lg px-sm space-y-unit">
+<a class="flex items-center gap-md px-md py-sm rounded text-on-surface-variant hover:bg-surface-container-high transition-all duration-150" href="#">
+<span class="material-symbols-outlined text-[20px]" style="font-variation-settings: 'FILL' 0;">dashboard</span>
+<span class="font-label-md text-label-md">Dashboard</span>
+</a>
+<a class="flex items-center gap-md px-md py-sm rounded text-on-surface-variant hover:bg-surface-container-high transition-all duration-150" href="#">
+<span class="material-symbols-outlined text-[20px]" style="font-variation-settings: 'FILL' 0;">manage_accounts</span>
+<span class="font-label-md text-label-md">Accounts</span>
+</a>
+<!-- Active Settings -->
+<a class="flex items-center gap-md px-md py-sm rounded bg-secondary-container text-on-secondary-container border-l-2 border-primary transition-all duration-150" href="#">
+<span class="material-symbols-outlined text-[20px]" style="font-variation-settings: 'FILL' 1;">settings</span>
+<span class="font-label-md text-label-md">Settings</span>
+</a>
+<a class="flex items-center gap-md px-md py-sm rounded text-on-surface-variant hover:bg-surface-container-high transition-all duration-150" href="#">
+<span class="material-symbols-outlined text-[20px]" style="font-variation-settings: 'FILL' 0;">terminal</span>
+<span class="font-label-md text-label-md">Logs</span>
+</a>
+</nav>
+<div class="p-sm space-y-unit border-t border-outline">
+<a class="flex items-center gap-md px-md py-sm rounded text-on-surface-variant hover:bg-surface-container-high transition-all duration-150" href="#">
+<span class="material-symbols-outlined text-[20px]">help</span>
+<span class="font-label-md text-label-md">Help</span>
+</a>
+<a class="flex items-center gap-md px-md py-sm rounded text-on-surface-variant hover:bg-surface-container-high transition-all duration-150" href="#">
+<span class="material-symbols-outlined text-[20px]">logout</span>
+<span class="font-label-md text-label-md">Logout</span>
+</a>
+</div>
+</aside>
+<!-- Main Viewport -->
+<div class="ml-sidebar flex-1 flex flex-col h-full relative">
+<!-- TopNavBar -->
+<header class="flex justify-between items-center w-full px-lg py-sm bg-surface-container text-primary font-title-md text-title-md border-b border-outline docked full-width top-0 z-30">
+<div class="flex items-center gap-md">
+<span class="material-symbols-outlined text-[20px]">search</span>
+<input class="bg-transparent border-none text-on-surface placeholder:text-on-surface-variant focus:ring-0 text-body-sm w-[300px]" placeholder="Search settings..." type="text"/>
+</div>
+<div class="flex items-center gap-sm">
+<button class="p-xs text-on-surface-variant hover:bg-surface-variant rounded transition-colors duration-200">
+<span class="material-symbols-outlined text-[20px]">notifications</span>
+</button>
+<button class="p-xs text-on-surface-variant hover:bg-surface-variant rounded transition-colors duration-200">
+<span class="material-symbols-outlined text-[20px]">settings</span>
+</button>
+<button class="p-xs text-on-surface-variant hover:bg-surface-variant rounded transition-colors duration-200">
+<span class="material-symbols-outlined text-[20px]">account_circle</span>
+</button>
+</div>
+</header>
+<!-- Main Content Area -->
+<main class="flex-1 overflow-y-auto bg-background p-xl pb-[120px]">
+<div class="max-w-[1000px] mx-auto space-y-xl">
+<header class="flex justify-between items-end mb-lg">
+<div>
+<h2 class="font-display-lg text-display-lg text-on-surface mb-xs">CÀI ĐẶT</h2>
+<p class="text-on-surface-variant font-body-sm text-body-sm">Manage global preferences, browser integrations, and data export formats.</p>
+</div>
+<div class="flex gap-sm">
+<button class="btn btn-secondary">Khôi phục mặc định</button>
+<button class="btn btn-primary">LƯU CÀI ĐẶT</button>
+</div>
+</header>
+<div class="grid grid-cols-12 gap-lg">
+<!-- Section 1: CÀI ĐẶT CHUNG -->
+<section class="col-span-12 lg:col-span-4 bg-surface-container-low border border-outline rounded-lg p-lg">
+<h3 class="font-title-md text-title-md text-on-surface mb-lg flex items-center gap-sm">
+<span class="material-symbols-outlined text-[18px] text-primary">tune</span>
+              CÀI ĐẶT CHUNG
+            </h3>
+<div class="space-y-lg">
+<!-- Theme -->
+<div>
+<label class="block font-label-md text-label-md text-on-surface-variant mb-sm">Theme</label>
+<div class="flex bg-surface-container-high rounded p-[2px] border border-outline">
+<button class="flex-1 py-[4px] bg-secondary-container text-on-surface rounded text-center font-label-md text-label-md shadow-sm">Dark</button>
+<button class="flex-1 py-[4px] text-on-surface-variant rounded text-center font-label-md text-label-md hover:text-on-surface">Light</button>
+</div>
+</div>
+<!-- Language -->
+<div>
+<label class="block font-label-md text-label-md text-on-surface-variant mb-sm">Language</label>
+<select class="w-full bg-surface-dim border border-outline rounded input-field px-sm text-on-surface font-body-sm text-body-sm focus:border-primary focus:ring-1 focus:ring-primary outline-none">
+<option>Tiếng Việt</option>
+<option>English</option>
+</select>
+</div>
+<!-- Switches -->
+<div class="space-y-md pt-sm border-t border-outline">
+<div class="flex justify-between items-center">
+<span class="font-body-sm text-body-sm text-on-surface">Tự động lưu cấu hình</span>
+<label class="switch">
+<input checked="" type="checkbox"/>
+<span class="slider"></span>
+</label>
+</div>
+<div class="flex justify-between items-center">
+<span class="font-body-sm text-body-sm text-on-surface">Khôi phục phiên</span>
+<label class="switch">
+<input checked="" type="checkbox"/>
+<span class="slider"></span>
+</label>
+</div>
+</div>
+</div>
+</section>
+<!-- Middle Column: Browser & Email -->
+<div class="col-span-12 lg:col-span-8 flex flex-col gap-lg">
+<!-- Section 2: BROWSER -->
+<section class="bg-surface-container-low border border-outline rounded-lg p-lg flex flex-col">
+<div class="flex justify-between items-start mb-lg">
+<h3 class="font-title-md text-title-md text-on-surface flex items-center gap-sm">
+<span class="material-symbols-outlined text-[18px] text-primary">public</span>
+                  BROWSER
+                </h3>
+<span class="px-sm py-[2px] bg-success/10 text-success border border-success/20 rounded font-label-xs text-label-xs flex items-center gap-xs">
+<div class="w-2 h-2 rounded-full bg-success"></div>
+                  Connected
+                </span>
+</div>
+<div class="grid grid-cols-2 gap-lg mb-lg">
+<div>
+<label class="block font-label-md text-label-md text-on-surface-variant mb-sm">Provider</label>
+<select class="w-full bg-surface-dim border border-outline rounded input-field px-sm text-on-surface font-body-sm text-body-sm focus:border-primary outline-none">
+<option>GPM Login</option>
+<option>Multilogin</option>
+<option>Camoufox</option>
+</select>
+</div>
+<div>
+<label class="block font-label-md text-label-md text-on-surface-variant mb-sm">GPM Port</label>
+<div class="flex gap-sm">
+<input class="w-full bg-surface-dim border border-outline rounded input-field px-sm text-on-surface font-code text-code focus:border-primary outline-none" type="text" value="19995"/>
+<button class="btn btn-secondary whitespace-nowrap">Kiểm tra kết nối</button>
+</div>
+</div>
+</div>
+<div class="bg-surface-container-high rounded p-md border border-outline mb-lg flex justify-between items-center">
+<div>
+<p class="font-label-md text-label-md text-on-surface">Camoufox Module</p>
+<p class="font-body-sm text-body-sm text-on-surface-variant">Version 2.4.1 (Installed)</p>
+</div>
+<button class="btn btn-secondary">Cập nhật Module</button>
+</div>
+<div class="mt-auto flex justify-end gap-sm border-t border-outline pt-md">
+<button class="btn btn-secondary">Kiểm tra Browser</button>
+<button class="btn btn-primary">Lưu cài đặt Browser</button>
+</div>
+</section>
+<!-- Section 3: EMAIL PROVIDER -->
+<section class="bg-surface-container-low border border-outline rounded-lg p-lg">
+<h3 class="font-title-md text-title-md text-on-surface mb-lg flex items-center gap-sm">
+<span class="material-symbols-outlined text-[18px] text-primary">mail</span>
+                EMAIL PROVIDER
+              </h3>
+<div class="space-y-md">
+<!-- Gmail94 -->
+<div class="flex items-end gap-sm">
+<div class="flex-1">
+<label class="block font-label-md text-label-md text-on-surface-variant mb-sm">Gmail94 API Key</label>
+<div class="relative">
+<input class="w-full bg-surface-dim border border-outline rounded input-field px-sm text-on-surface font-code text-code focus:border-primary outline-none tracking-widest" type="password" value="sk-live-9384758209384"/>
+<span class="absolute right-sm top-1/2 -translate-y-1/2 material-symbols-outlined text-[16px] text-on-surface-variant cursor-pointer">visibility</span>
+</div>
+</div>
+<button class="btn btn-secondary">Kiểm tra API</button>
+<span class="px-sm h-[32px] flex items-center justify-center bg-success/10 text-success border border-success/20 rounded font-label-xs text-label-xs">
+                    Connected
+                  </span>
+</div>
+<!-- DongVanFB -->
+<div class="flex items-end gap-sm pt-sm">
+<div class="flex-1">
+<label class="block font-label-md text-label-md text-on-surface-variant mb-sm">DongVanFB API Key</label>
+<div class="relative">
+<input class="w-full bg-surface-dim border border-outline rounded input-field px-sm text-on-surface font-code text-code focus:border-primary outline-none tracking-widest" type="password" value="dv-88472910"/>
+<span class="absolute right-sm top-1/2 -translate-y-1/2 material-symbols-outlined text-[16px] text-on-surface-variant cursor-pointer">visibility</span>
+</div>
+</div>
+<button class="btn btn-secondary">Kiểm tra API</button>
+<span class="px-sm h-[32px] flex items-center justify-center bg-error/10 text-error border border-error/20 rounded font-label-xs text-label-xs">
+                    Offline
+                  </span>
+</div>
+</div>
+</section>
+</div>
+<!-- Section 4: XUẤT DỮ LIỆU -->
+<section class="col-span-12 bg-surface-container-low border border-outline rounded-lg p-lg">
+<h3 class="font-title-md text-title-md text-on-surface mb-lg flex items-center gap-sm">
+<span class="material-symbols-outlined text-[18px] text-primary">download</span>
+              XUẤT DỮ LIỆU
+            </h3>
+<div class="grid grid-cols-12 gap-lg">
+<div class="col-span-4">
+<label class="block font-label-md text-label-md text-on-surface-variant mb-sm">Default Format</label>
+<select class="w-full bg-surface-dim border border-outline rounded input-field px-sm text-on-surface font-body-sm text-body-sm focus:border-primary outline-none mb-md">
+<option>TXT (Pipe separated)</option>
+<option>CSV (Comma separated)</option>
+<option>XLSX (Excel Spreadsheet)</option>
+</select>
+<label class="block font-label-md text-label-md text-on-surface-variant mb-sm">Include Fields</label>
+<div class="space-y-sm bg-surface-dim p-sm rounded border border-outline h-[160px] overflow-y-auto">
+<label class="flex items-center gap-sm cursor-pointer hover:bg-surface-container-high p-xs rounded">
+<input checked="" class="rounded border-outline bg-transparent text-primary focus:ring-primary" type="checkbox"/>
+<span class="font-body-sm text-body-sm text-on-surface">Email</span>
+</label>
+<label class="flex items-center gap-sm cursor-pointer hover:bg-surface-container-high p-xs rounded">
+<input checked="" class="rounded border-outline bg-transparent text-primary focus:ring-primary" type="checkbox"/>
+<span class="font-body-sm text-body-sm text-on-surface">Password CapCut</span>
+</label>
+<label class="flex items-center gap-sm cursor-pointer hover:bg-surface-container-high p-xs rounded">
+<input checked="" class="rounded border-outline bg-transparent text-primary focus:ring-primary" type="checkbox"/>
+<span class="font-body-sm text-body-sm text-on-surface">Email Data</span>
+</label>
+<label class="flex items-center gap-sm cursor-pointer hover:bg-surface-container-high p-xs rounded">
+<input class="rounded border-outline bg-transparent text-primary focus:ring-primary" type="checkbox"/>
+<span class="font-body-sm text-body-sm text-on-surface">Credit</span>
+</label>
+<label class="flex items-center gap-sm cursor-pointer hover:bg-surface-container-high p-xs rounded">
+<input class="rounded border-outline bg-transparent text-primary focus:ring-primary" type="checkbox"/>
+<span class="font-body-sm text-body-sm text-on-surface">Subscription</span>
+</label>
+<label class="flex items-center gap-sm cursor-pointer hover:bg-surface-container-high p-xs rounded">
+<input checked="" class="rounded border-outline bg-transparent text-primary focus:ring-primary" type="checkbox"/>
+<span class="font-body-sm text-body-sm text-on-surface">Create At</span>
+</label>
+</div>
+</div>
+<div class="col-span-8 flex flex-col">
+<label class="block font-label-md text-label-md text-on-surface-variant mb-sm">Preview</label>
+<div class="flex-1 bg-[#000000] border border-outline rounded p-md font-code text-code text-on-surface-variant overflow-x-auto whitespace-pre">
+<span class="text-on-surface-variant"># FORMAT PREVIEW</span>
+<span class="text-primary">Email</span>|<span class="text-primary">Password CapCut</span>|<span class="text-primary">Email Data</span>|<span class="text-primary">Create At</span>
+john.doe@gmail.com|P@ssw0rd123|session_token_89x|2023-10-24 14:30:00
+jane.smith@yahoo.com|SecurePwd!99|session_token_21y|2023-10-24 15:12:45
+                </div>
+</div>
+</div>
+</section>
+</div>
+</div>
+</main>
+</div>
+<!-- Footer (System Status Bar) -->
+<footer class="fixed bottom-0 left-sidebar w-[calc(100%-240px)] z-50 flex justify-between items-center px-lg h-sm bg-surface-container-lowest text-success font-code text-code border-t border-outline transition-opacity duration-200">
+<div class="flex items-center gap-md">
+<span class="text-on-surface-variant">Service: Connected | Version 1.2.0</span>
+<span class="text-outline">|</span>
+<span class="flex items-center gap-xs">
+<div class="w-2 h-2 rounded-full bg-success animate-pulse"></div>
+        Multilogin: Connected
+      </span>
+</div>
+<div class="flex gap-lg text-on-surface-variant">
+<a class="hover:text-on-surface transition-colors" href="#">Status</a>
+<a class="hover:text-on-surface transition-colors" href="#">Docs</a>
+</div>
+</footer>
+</body></html>

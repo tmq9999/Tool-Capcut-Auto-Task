@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>AutoManager Dashboard</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "surface": "#0a0a0a",
+                        "surface-dim": "#131313",
+                        "surface-bright": "#3a3939",
+                        "surface-container-lowest": "#0e0e0e",
+                        "surface-container-low": "#1c1b1b",
+                        "surface-container": "#171717",
+                        "surface-container-high": "#2a2a2a",
+                        "surface-container-highest": "#353534",
+                        "on-surface": "#e5e2e1",
+                        "on-surface-variant": "#a3a3a3",
+                        "outline": "#404040",
+                        "outline-variant": "#434655",
+                        "primary": "#2563eb",
+                        "on-primary": "#ffffff",
+                        "primary-container": "#2563eb",
+                        "on-primary-container": "#eeefff",
+                        "secondary": "#505f76",
+                        "on-secondary": "#ffffff",
+                        "secondary-container": "#39485a",
+                        "on-secondary-container": "#a7b6cc",
+                        "tertiary": "#943700",
+                        "on-tertiary": "#ffffff",
+                        "tertiary-container": "#bc4800",
+                        "on-tertiary-container": "#ffede6",
+                        "error": "#ef4444",
+                        "on-error": "#690005",
+                        "error-container": "#93000a",
+                        "on-error-container": "#ffdad6",
+                        "background": "#0F1115",
+                        "on-background": "#e5e2e1",
+                        "panel": "#161B22",
+                        "table-bg": "#13181F",
+                        "panel-border": "#29313C",
+                        "success": "#22c55e",
+                        "warning": "#f59e0b"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "sidebar": "240px",
+                        "gutter": "16px",
+                        "lg": "16px",
+                        "xl": "24px",
+                        "unit": "4px",
+                        "sm": "8px",
+                        "md": "12px",
+                        "xs": "4px",
+                        "control_height_md": "32px",
+                        "control_height_sm": "28px"
+                    },
+                    "fontFamily": {
+                        "label-xs": ["Geist"],
+                        "label-md": ["Geist"],
+                        "code": ["JetBrains Mono"],
+                        "body-sm": ["Geist"],
+                        "headline-md": ["Geist"],
+                        "display-lg": ["Geist"],
+                        "body-md": ["Geist"],
+                        "title-md": ["Geist"]
+                    },
+                    "fontSize": {
+                        "label-xs": ["11px", {"lineHeight": "14px", "letterSpacing": "0.02em", "fontWeight": "600"}],
+                        "label-md": ["12px", {"lineHeight": "16px", "letterSpacing": "0.01em", "fontWeight": "500"}],
+                        "code": ["12px", {"lineHeight": "18px", "fontWeight": "400"}],
+                        "body-sm": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
+                        "headline-md": ["18px", {"lineHeight": "24px", "letterSpacing": "-0.01em", "fontWeight": "600"}],
+                        "display-lg": ["24px", {"lineHeight": "32px", "letterSpacing": "-0.02em", "fontWeight": "600"}],
+                        "body-md": ["13px", {"lineHeight": "18px", "fontWeight": "400"}],
+                        "title-md": ["14px", {"lineHeight": "20px", "fontWeight": "600"}]
+                    }
+                },
+            }
+        }
+    </script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<style>
+        body { font-family: 'Geist', sans-serif; background-color: #0F1115; color: #e5e2e1; }
+        .font-code { font-family: 'JetBrains Mono', monospace; }
+        
+        /* Custom scrollbar for dark theme */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #353534; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #404040; }
+        
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+    </style>
+</head>
+<body class="bg-background text-on-surface h-screen overflow-hidden flex font-body-md antialiased selection:bg-primary selection:text-on-primary">
+<!-- SideNavBar -->
+<aside class="w-sidebar h-screen fixed left-0 top-0 border-r border-panel-border bg-panel flex flex-col justify-between py-xl z-50">
+<div>
+<div class="px-lg mb-8 flex items-center gap-3">
+<div class="w-8 h-8 rounded bg-primary-container flex items-center justify-center text-white">
+<span class="material-symbols-outlined text-[20px]">smart_toy</span>
+</div>
+<div>
+<h1 class="font-headline-md text-headline-md text-on-surface">AutoManager</h1>
+<p class="font-label-xs text-label-xs text-on-surface-variant">Enterprise v2.4</p>
+</div>
+</div>
+<nav class="flex flex-col gap-1 px-sm">
+<a class="flex items-center gap-md px-lg py-sm bg-secondary-container text-on-secondary-container rounded-lg active:scale-95 duration-150 font-body-sm" href="#">
+<span class="material-symbols-outlined">dashboard</span>
+<span>Dashboard</span>
+</a>
+<a class="flex items-center gap-md px-lg py-sm text-on-surface-variant hover:bg-surface-container-low transition-colors rounded-lg active:scale-95 duration-150 font-body-sm" href="#">
+<span class="material-symbols-outlined">manage_accounts</span>
+<span>Accounts</span>
+</a>
+<a class="flex items-center gap-md px-lg py-sm text-on-surface-variant hover:bg-surface-container-low transition-colors rounded-lg active:scale-95 duration-150 font-body-sm" href="#">
+<span class="material-symbols-outlined">settings</span>
+<span>Settings</span>
+</a>
+<a class="flex items-center gap-md px-lg py-sm text-on-surface-variant hover:bg-surface-container-low transition-colors rounded-lg active:scale-95 duration-150 font-body-sm" href="#">
+<span class="material-symbols-outlined">terminal</span>
+<span>Logs</span>
+</a>
+</nav>
+</div>
+<div class="px-sm mt-auto border-t border-panel-border pt-md">
+<nav class="flex flex-col gap-1">
+<a class="flex items-center gap-md px-lg py-sm text-on-surface-variant hover:bg-surface-container-low transition-colors rounded-lg active:scale-95 duration-150 font-body-sm" href="#">
+<span class="material-symbols-outlined">help</span>
+<span>Support</span>
+</a>
+<a class="flex items-center gap-md px-lg py-sm text-on-surface-variant hover:bg-surface-container-low transition-colors rounded-lg active:scale-95 duration-150 font-body-sm" href="#">
+<span class="material-symbols-outlined">description</span>
+<span>Documentation</span>
+</a>
+</nav>
+</div>
+</aside>
+<!-- Main Content Area -->
+<main class="ml-sidebar flex-1 flex flex-col h-screen relative pb-control_height_sm">
+<!-- TopAppBar -->
+<header class="h-16 sticky top-0 z-40 border-b border-panel-border bg-panel flex items-center justify-between px-xl shrink-0">
+<div>
+<h2 class="font-title-md text-title-md text-primary font-bold">DASHBOARD</h2>
+<p class="font-label-xs text-label-xs text-on-surface-variant">Quản lý và theo dõi các tiến trình automation</p>
+</div>
+<div class="flex items-center gap-4">
+<nav class="hidden md:flex gap-6 mr-4">
+<a class="font-label-md text-label-md text-primary font-bold border-b-2 border-primary pb-1" href="#">System Health</a>
+<a class="font-label-md text-label-md text-on-surface-variant hover:text-on-surface transition-all" href="#">Network</a>
+<a class="font-label-md text-label-md text-on-surface-variant hover:text-on-surface transition-all" href="#">Resources</a>
+</nav>
+<div class="flex items-center gap-2">
+<button class="p-2 text-on-surface-variant hover:text-on-surface rounded hover:bg-surface-container-low transition-all">
+<span class="material-symbols-outlined text-[20px]">sync</span>
+</button>
+<button class="p-2 text-on-surface-variant hover:text-on-surface rounded hover:bg-surface-container-low transition-all">
+<span class="material-symbols-outlined text-[20px]">light_mode</span>
+</button>
+<button class="p-2 text-on-surface-variant hover:text-on-surface rounded hover:bg-surface-container-low transition-all relative">
+<span class="material-symbols-outlined text-[20px]">notifications</span>
+<span class="absolute top-1.5 right-1.5 w-2 h-2 bg-error rounded-full border border-panel"></span>
+</button>
+</div>
+<div class="h-8 w-px bg-panel-border mx-2"></div>
+<div class="flex gap-2">
+<button class="h-control_height_sm px-3 rounded bg-transparent border border-outline-variant text-on-surface font-label-md hover:bg-surface-container-low transition-colors">Stop All</button>
+<button class="h-control_height_sm px-3 rounded bg-primary text-white font-label-md hover:opacity-90 transition-opacity">Start All</button>
+</div>
+</div>
+</header>
+<!-- Scrollable Workspace -->
+<div class="flex-1 overflow-auto p-gutter flex flex-col gap-gutter bg-background">
+<div class="max-w-[1600px] mx-auto w-full flex flex-col gap-gutter">
+<!-- Section 2: Automation Configuration (6 Panels) -->
+<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-gutter shrink-0">
+<!-- Panel 1: Cấu hình chung -->
+<div class="bg-panel border border-panel-border rounded-lg p-md flex flex-col gap-sm">
+<h3 class="font-title-md text-title-md text-on-surface flex items-center gap-2">
+<span class="material-symbols-outlined text-[16px] text-primary">settings_applications</span>
+                            Cấu hình chung
+                        </h3>
+<div class="grid grid-cols-2 gap-md mt-sm">
+<div class="flex flex-col gap-1">
+<label class="font-label-xs text-label-xs text-on-surface-variant">Number</label>
+<input class="h-control_height_md w-full px-sm bg-surface border border-panel-border rounded font-code text-code focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all text-on-surface" type="number" value="10"/>
+</div>
+<div class="flex flex-col gap-1">
+<label class="font-label-xs text-label-xs text-on-surface-variant">Browser</label>
+<select class="h-control_height_md w-full px-sm bg-surface border border-panel-border rounded font-body-sm text-body-sm focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all text-on-surface">
+<option>Camoufox</option>
+<option>GPM Login</option>
+<option>Multilogin</option>
+</select>
+</div>
+<div class="flex flex-col gap-1 col-span-2">
+<label class="font-label-xs text-label-xs text-on-surface-variant">Mode</label>
+<div class="bg-surface-container-low p-[2px] rounded flex relative">
+<button class="flex-1 h-[26px] bg-surface-container-high border border-panel-border rounded shadow-sm font-label-xs text-label-xs text-on-surface z-10">Headed</button>
+<button class="flex-1 h-[26px] text-on-surface-variant font-label-xs text-label-xs z-10">Headless</button>
+</div>
+</div>
+<div class="flex flex-col gap-1 col-span-2">
+<label class="font-label-xs text-label-xs text-on-surface-variant">Retry (Lần)</label>
+<div class="flex items-center border border-panel-border rounded overflow-hidden">
+<button class="h-control_height_md px-md bg-surface hover:bg-surface-container-highest transition-colors font-code border-r border-panel-border text-on-surface">-</button>
+<input class="h-control_height_md w-full text-center bg-surface border-none font-code text-code outline-none focus:ring-0 p-0 text-on-surface" type="text" value="3"/>
+<button class="h-control_height_md px-md bg-surface hover:bg-surface-container-highest transition-colors font-code border-l border-panel-border text-on-surface">+</button>
+</div>
+</div>
+</div>
+</div>
+<!-- Panel 2: Delay & Timing -->
+<div class="bg-panel border border-panel-border rounded-lg p-md flex flex-col gap-sm">
+<h3 class="font-title-md text-title-md text-on-surface flex items-center gap-2">
+<span class="material-symbols-outlined text-[16px] text-primary">timer</span>
+                            Delay &amp; Timing
+                        </h3>
+<div class="flex flex-col gap-md mt-sm">
+<div class="flex flex-col gap-1">
+<label class="font-label-xs text-label-xs text-on-surface-variant flex justify-between">
+<span class="">Delay giữa thao tác (ms)</span>
+</label>
+<div class="flex items-center gap-sm">
+<input class="h-control_height_md w-full px-sm bg-surface border border-panel-border rounded font-code text-code focus:border-primary focus:ring-1 focus:ring-primary outline-none text-on-surface" placeholder="Min" type="number" value="500"/>
+<span class="text-on-surface-variant">-</span>
+<input class="h-control_height_md w-full px-sm bg-surface border border-panel-border rounded font-code text-code focus:border-primary focus:ring-1 focus:ring-primary outline-none text-on-surface" placeholder="Max" type="number" value="2000"/>
+</div>
+</div>
+<div class="flex flex-col gap-1 mt-auto">
+<label class="font-label-xs text-label-xs text-on-surface-variant flex justify-between">
+<span class="">Delay nhập ký tự (ms)</span>
+</label>
+<div class="flex items-center gap-sm">
+<input class="h-control_height_md w-full px-sm bg-surface border border-panel-border rounded font-code text-code focus:border-primary focus:ring-1 focus:ring-primary outline-none text-on-surface" placeholder="Min" type="number" value="50"/>
+<span class="text-on-surface-variant">-</span>
+<input class="h-control_height_md w-full px-sm bg-surface border border-panel-border rounded font-code text-code focus:border-primary focus:ring-1 focus:ring-primary outline-none text-on-surface" placeholder="Max" type="number" value="150"/>
+</div>
+</div>
+</div>
+</div>
+<!-- Panel 3: Proxy Settings -->
+<div class="bg-panel border border-panel-border rounded-lg p-md flex flex-col gap-sm">
+<h3 class="font-title-md text-title-md text-on-surface flex items-center gap-2">
+<span class="material-symbols-outlined text-[16px] text-primary">public</span>
+                            Proxy Settings
+                        </h3>
+<div class="flex flex-col gap-md mt-sm flex-1">
+<div class="flex flex-col gap-1">
+<label class="font-label-xs text-label-xs text-on-surface-variant">Mode</label>
+<select class="h-control_height_md w-full px-sm bg-surface border border-panel-border rounded font-body-sm text-body-sm focus:border-primary focus:ring-1 focus:ring-primary outline-none text-on-surface">
+<option>Direct (IP:Port)</option>
+<option>Proxy Key</option>
+</select>
+</div>
+<div class="flex flex-col gap-1 flex-1">
+<label class="font-label-xs text-label-xs text-on-surface-variant flex justify-between">
+<span class="">Proxy List</span>
+<span class="text-on-surface-variant font-normal">Format: IP:PORT:USER:PASS</span>
+</label>
+<textarea class="flex-1 w-full p-sm bg-surface border border-panel-border rounded font-code text-code resize-none focus:border-primary focus:ring-1 focus:ring-primary outline-none min-h-[80px] text-on-surface" placeholder="Paste proxy list here..."></textarea>
+</div>
+</div>
+</div>
+<!-- Panel 4: Module -->
+<div class="bg-panel border border-panel-border rounded-lg p-md flex flex-col gap-sm">
+<h3 class="font-title-md text-title-md text-on-surface flex items-center gap-2">
+<span class="material-symbols-outlined text-[16px] text-primary">payment</span>Module
+                        </h3>
+<div class="flex flex-col gap-sm mt-sm">
+<label class="flex items-center gap-md p-sm border border-primary bg-primary/10 rounded cursor-pointer transition-colors">
+<input checked="" class="w-4 h-4 text-primary focus:ring-primary border-panel-border bg-surface" name="payment" type="radio"/>
+<span class="font-body-sm text-body-sm text-on-surface font-medium">Pay Trial 7D</span>
+</label>
+<label class="flex items-center gap-md p-sm border border-panel-border hover:border-outline rounded cursor-pointer transition-colors">
+<input class="w-4 h-4 text-primary focus:ring-primary border-panel-border bg-surface" name="payment" type="radio"/>
+<span class="font-body-sm text-body-sm text-on-surface">Pay Team</span>
+</label>
+<label class="flex items-center gap-md p-sm border border-panel-border hover:border-outline rounded cursor-pointer transition-colors">
+<input class="w-4 h-4 text-primary focus:ring-primary border-panel-border bg-surface" name="payment" type="radio"/>
+<span class="font-body-sm text-body-sm text-on-surface">Làm nhiệm vụ Credit</span>
+</label>
+</div>
+</div>
+<!-- Panel 5: Nguồn Email -->
+<div class="bg-panel border border-panel-border rounded-lg p-md flex flex-col gap-sm">
+<h3 class="font-title-md text-title-md text-on-surface flex items-center gap-2">
+<span class="material-symbols-outlined text-[16px] text-primary">mail</span>
+                            Nguồn Email
+                        </h3>
+<div class="flex flex-col gap-md mt-sm flex-1">
+<div class="bg-surface-container-low p-[2px] rounded flex relative">
+<button class="flex-1 h-[26px] bg-surface-container-high border border-panel-border rounded shadow-sm font-label-xs text-label-xs text-on-surface z-10">Manual</button>
+<button class="flex-1 h-[26px] text-on-surface-variant font-label-xs text-label-xs z-10">API</button>
+</div>
+<div class="flex flex-col gap-1 flex-1">
+<label class="font-label-xs text-label-xs text-on-surface-variant">Danh sách Email (Manual)</label>
+<textarea class="flex-1 w-full p-sm bg-surface border border-panel-border rounded font-code text-code resize-none focus:border-primary focus:ring-1 focus:ring-primary outline-none min-h-[80px] text-on-surface" placeholder="email|password..."></textarea>
+</div>
+</div>
+</div>
+<!-- Panel 6: Mật khẩu CapCut -->
+<div class="bg-panel border border-panel-border rounded-lg p-md flex flex-col gap-sm">
+<h3 class="font-title-md text-title-md text-on-surface flex items-center gap-2">
+<span class="material-symbols-outlined text-[16px] text-primary">password</span>
+                            Mật khẩu CapCut
+                        </h3>
+<div class="flex flex-col gap-md mt-sm">
+<div class="flex gap-lg">
+<label class="flex items-center gap-2 cursor-pointer">
+<input class="w-4 h-4 text-primary focus:ring-primary border-panel-border bg-surface" name="pw_mode" type="radio"/>
+<span class="font-body-sm text-body-sm text-on-surface">Tự đặt</span>
+</label>
+<label class="flex items-center gap-2 cursor-pointer">
+<input checked="" class="w-4 h-4 text-primary focus:ring-primary border-panel-border bg-surface" name="pw_mode" type="radio"/>
+<span class="font-body-sm text-body-sm text-on-surface">Random</span>
+</label>
+</div>
+<!-- Random Settings Group -->
+<div class="flex flex-col gap-sm p-sm bg-surface-container-low rounded border border-panel-border">
+<div class="flex items-center justify-between">
+<span class="font-label-xs text-label-xs text-on-surface-variant">Length</span>
+<input class="h-control_height_sm w-16 px-sm bg-surface border border-panel-border rounded font-code text-code text-right py-0 text-on-surface" type="number" value="12"/>
+</div>
+<label class="flex items-center gap-2 cursor-pointer">
+<input checked="" class="w-4 h-4 text-primary rounded border-panel-border bg-surface" type="checkbox"/>
+<span class="font-body-sm text-body-sm text-on-surface-variant">Include Uppercase (A-Z)</span>
+</label>
+<label class="flex items-center gap-2 cursor-pointer">
+<input checked="" class="w-4 h-4 text-primary rounded border-panel-border bg-surface" type="checkbox"/>
+<span class="font-body-sm text-body-sm text-on-surface-variant">Include Numbers (0-9)</span>
+</label>
+<label class="flex items-center gap-2 cursor-pointer">
+<input class="w-4 h-4 text-primary rounded border-panel-border bg-surface" type="checkbox"/>
+<span class="font-body-sm text-body-sm text-on-surface-variant">Include Special (!@#)</span>
+</label>
+</div>
+</div>
+</div>
+</div>
+<!-- Section 3: Action Bar -->
+<div class="bg-panel border border-panel-border rounded-lg p-md flex flex-wrap items-center justify-between gap-md sticky top-0 z-30 shadow-sm shrink-0">
+<div class="flex items-center gap-lg font-body-sm text-body-sm text-on-surface-variant">
+<div class="flex items-center gap-1">
+<span class="material-symbols-outlined text-[16px]">account_circle</span>
+<span class="">10 Accounts</span>
+</div>
+<div class="flex items-center gap-1">
+<span class="material-symbols-outlined text-[16px]">public</span>
+<span class="">10 Proxies</span>
+</div>
+<div class="flex items-center gap-1">
+<span class="material-symbols-outlined text-[16px]">web</span>
+<span class="">Browser: Multilogin</span>
+</div>
+</div>
+<div class="flex items-center gap-md">
+<button class="h-control_height_md px-md bg-surface border border-panel-border text-on-surface rounded font-label-md hover:bg-surface-container-high transition-all">Lưu cấu hình</button>
+<button class="h-control_height_md px-md bg-surface border border-panel-border text-on-surface rounded font-label-md hover:bg-surface-container-high transition-all">Kiểm tra dữ liệu</button>
+<button class="h-control_height_md px-xl bg-primary text-on-primary rounded font-label-md font-bold hover:brightness-110 transition-all active:brightness-90 flex items-center gap-2">
+<span class="material-symbols-outlined text-[18px]">play_arrow</span>
+                            BẮT ĐẦU
+                        </button>
+</div>
+</div>
+<!-- Section 4 & 5: Horizontal Workspace Split -->
+<div class="flex gap-gutter flex-1 min-h-[400px]">
+<!-- LEFT (74%): Account DataGrid -->
+<div class="w-[74%] bg-table-bg border border-panel-border rounded-lg flex flex-col overflow-hidden">
+<!-- Toolbar -->
+<div class="p-sm border-b border-panel-border bg-panel flex flex-wrap items-center justify-between gap-sm">
+<div class="flex items-center gap-sm">
+<h3 class="font-title-md text-title-md text-on-surface ml-xs mr-md">Danh sách tài khoản</h3>
+<div class="relative w-48">
+<span class="material-symbols-outlined absolute left-2 top-1/2 -translate-y-1/2 text-on-surface-variant text-[16px]">search</span>
+<input class="w-full pl-8 pr-2 h-control_height_sm border border-panel-border rounded bg-surface font-body-sm text-body-sm focus:border-primary focus:ring-1 outline-none py-0 text-on-surface" placeholder="Tìm email..." type="text"/>
+</div>
+<select class="h-control_height_sm px-sm border border-panel-border rounded bg-surface font-body-sm text-body-sm outline-none py-0 text-on-surface">
+<option>Status: All</option>
+<option>Running</option>
+<option>Waiting</option>
+</select>
+</div>
+<div class="flex items-center gap-xs">
+<button class="h-control_height_sm px-sm bg-surface border border-panel-border text-on-surface rounded font-label-xs hover:bg-surface-container-high transition-all flex items-center gap-1">
+<span class="material-symbols-outlined text-[14px]">upload</span> Import
+                                </button>
+<button class="h-control_height_sm px-sm bg-surface border border-panel-border text-on-surface rounded font-label-xs hover:bg-surface-container-high transition-all flex items-center gap-1">
+<span class="material-symbols-outlined text-[14px]">download</span> Export
+                                </button>
+<button class="h-control_height_sm px-sm bg-surface border border-panel-border text-on-surface-variant hover:text-error rounded font-label-xs hover:bg-surface-container-high transition-all flex items-center gap-1">
+<span class="material-symbols-outlined text-[14px]">delete_sweep</span> Clear completed
+                                </button>
+</div>
+</div>
+<!-- Table -->
+<div class="overflow-x-auto flex-1">
+<table class="w-full text-left border-collapse whitespace-nowrap">
+<thead class="bg-panel sticky top-0 z-10 border-b border-panel-border">
+<tr>
+<th class="p-sm w-8"><input class="w-4 h-4 rounded border-panel-border bg-surface text-primary" type="checkbox"/></th>
+<th class="p-sm font-label-xs text-label-xs text-on-surface-variant font-semibold">STT</th>
+<th class="p-sm font-label-xs text-label-xs text-on-surface-variant font-semibold">Email</th>
+<th class="p-sm font-label-xs text-label-xs text-on-surface-variant font-semibold">Password</th>
+<th class="p-sm font-label-xs text-label-xs text-on-surface-variant font-semibold">Full Data</th>
+<th class="p-sm font-label-xs text-label-xs text-on-surface-variant font-semibold">Proxy</th>
+<th class="p-sm font-label-xs text-label-xs text-on-surface-variant font-semibold">Browser</th>
+<th class="p-sm font-label-xs text-label-xs text-on-surface-variant font-semibold">Status</th>
+<th class="p-sm font-label-xs text-label-xs text-on-surface-variant font-semibold text-right">Actions</th>
+</tr>
+</thead>
+<tbody class="font-body-sm text-body-sm text-on-surface divide-y divide-panel-border">
+<tr class="hover:bg-surface-container-low transition-colors bg-table-bg h-[36px]">
+<td class="p-sm"><input class="w-4 h-4 rounded border-panel-border bg-surface text-primary" type="checkbox"/></td>
+<td class="p-sm font-code text-on-surface-variant">01</td>
+<td class="p-sm font-medium">worker_alpha@domain.com</td>
+<td class="p-sm text-on-surface-variant font-code">********</td>
+<td class="p-sm text-on-surface-variant truncate max-w-[150px]">data_payload_v2_...</td>
+<td class="p-sm font-code text-[11px] text-on-surface-variant">192.168.1.1:8080</td>
+<td class="p-sm">Multilogin</td>
+<td class="p-sm">
+<div class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/20 text-primary border border-primary/30 font-label-xs">
+<span class="material-symbols-outlined text-[12px] animate-spin">progress_activity</span>
+                                                Running
+                                            </div>
+</td>
+<td class="p-sm text-right">
+<button class="text-on-surface-variant hover:text-primary p-1"><span class="material-symbols-outlined text-[16px]">more_vert</span></button>
+</td>
+</tr>
+<tr class="hover:bg-surface-container-low transition-colors bg-table-bg h-[36px]">
+<td class="p-sm"><input class="w-4 h-4 rounded border-panel-border bg-surface text-primary" type="checkbox"/></td>
+<td class="p-sm font-code text-on-surface-variant">02</td>
+<td class="p-sm font-medium">worker_beta@domain.com</td>
+<td class="p-sm text-on-surface-variant font-code">********</td>
+<td class="p-sm text-on-surface-variant truncate max-w-[150px]">-</td>
+<td class="p-sm font-code text-[11px] text-on-surface-variant">192.168.1.2:8080</td>
+<td class="p-sm">Multilogin</td>
+<td class="p-sm">
+<div class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-warning/20 text-warning border border-warning/30 font-label-xs">
+<span class="w-1.5 h-1.5 rounded-full bg-warning"></span>
+                                                Waiting
+                                            </div>
+</td>
+<td class="p-sm text-right">
+<button class="text-on-surface-variant hover:text-primary p-1"><span class="material-symbols-outlined text-[16px]">more_vert</span></button>
+</td>
+</tr>
+<tr class="hover:bg-surface-container-low transition-colors bg-table-bg h-[36px]">
+<td class="p-sm"><input class="w-4 h-4 rounded border-panel-border bg-surface text-primary" type="checkbox"/></td>
+<td class="p-sm font-code text-on-surface-variant">03</td>
+<td class="p-sm font-medium">worker_gamma@domain.com</td>
+<td class="p-sm text-on-surface-variant font-code">********</td>
+<td class="p-sm text-on-surface-variant truncate max-w-[150px]">data_payload_v2_...</td>
+<td class="p-sm font-code text-[11px] text-on-surface-variant">192.168.1.3:8080</td>
+<td class="p-sm">Multilogin</td>
+<td class="p-sm">
+<div class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success/20 text-success border border-success/30 font-label-xs">
+<span class="material-symbols-outlined text-[12px]">check_circle</span>
+                                                Done
+                                            </div>
+</td>
+<td class="p-sm text-right">
+<button class="text-on-surface-variant hover:text-primary p-1"><span class="material-symbols-outlined text-[16px]">more_vert</span></button>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<!-- RIGHT (26%): Docked System Logs -->
+<div class="w-[26%] bg-[#0d1117] border border-panel-border rounded-lg flex flex-col h-full overflow-hidden">
+<div class="h-8 px-sm bg-panel border-b border-panel-border flex items-center justify-between shrink-0">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-[16px] text-primary">terminal</span>
+<span class="font-label-xs text-label-xs text-on-surface">System Logs</span>
+</div>
+<span class="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+</div>
+<div class="flex-1 overflow-y-auto p-sm font-code text-[11px] leading-relaxed text-[#c9d1d9] flex flex-col gap-1.5">
+<div><span class="text-[#8b949e]">[18:23:01]</span> <span class="text-[#3b82f6]">INFO:</span> System initialized. Environment: Production.</div>
+<div><span class="text-[#8b949e]">[18:23:02]</span> <span class="text-[#3b82f6]">INFO:</span> Loading configuration profile 'Default'.</div>
+<div><span class="text-[#8b949e]">[18:23:02]</span> <span class="text-[#f59e0b]">WARN:</span> Proxy list contains 2 unreachable nodes.</div>
+<div class="bg-[#1f2937]/50 -mx-sm px-sm py-1 border-l-2 border-[#10b981]"><span class="text-[#8b949e]">[18:23:04]</span> <span class="text-[#10b981]">OK:</span> Worker #01 started (worker_alpha@domain.com)</div>
+<div><span class="text-[#8b949e]">[18:23:05]</span> <span class="text-[#3b82f6]">INFO:</span> Worker #01: Establishing connection via 192.168.1.1:8080...</div>
+<div><span class="text-[#8b949e]">[18:23:08]</span> <span class="text-[#ef4444]">ERROR:</span> Worker #02: Connection timeout.</div>
+<div><span class="text-[#8b949e]">[18:23:08]</span> <span class="text-[#f59e0b]">WAIT:</span> Worker #02: Retrying in 5s...</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Footer / Status Bar -->
+<footer class="fixed bottom-0 left-sidebar right-0 h-control_height_sm bg-panel border-t border-panel-border flex items-center justify-between px-lg z-50">
+<div class="flex items-center gap-4">
+<span class="font-label-xs text-on-surface flex items-center gap-1.5"><div class="w-2 h-2 rounded-full bg-success"></div> Multilogin: Connected</span>
+<span class="font-label-xs text-on-surface flex items-center gap-1.5"><div class="w-2 h-2 rounded-full bg-success"></div> GPM: Connected</span>
+<span class="font-label-xs text-on-surface flex items-center gap-1.5"><div class="w-2 h-2 rounded-full bg-success"></div> Email API: 200 OK</span>
+<span class="font-label-xs text-on-surface-variant flex items-center gap-1.5"><div class="w-2 h-2 rounded-full bg-warning"></div> Proxy: 4/4 Active</span>
+</div>
+<span class="font-label-xs text-on-surface-variant">v2.4.0-stable</span>
+</footer>
+</main>
+</body></html>

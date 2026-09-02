@@ -1,0 +1,20 @@
+node_modules/
+dist/
+dist-electron/
+release/
+
+# Local credentials for provider verification. Never commit.
+.env
+.env.local
+
+.tmp-phase2-manual-signoff/
+*.log
+
+# Hiện trường của engine automation: DOM + ảnh của account thật, có thể chứa
+# email/PII. Ghi vào userData khi chạy app; ở repo chỉ xuất hiện khi chạy script.
+.debug/
+
+# Postman collection của nhà cung cấp: kiểm bằng máy thấy có chuỗi dài giống
+# token thật trong request. Giữ trên đĩa để tra cứu, KHÔNG commit tới khi đã
+# thay hết giá trị thật bằng placeholder.
+API Services/
