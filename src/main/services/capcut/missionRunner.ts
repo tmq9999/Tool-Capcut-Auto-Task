@@ -77,14 +77,46 @@ export function selectGroups(
  * `task_list`, và bước bật thông báo báo "không thấy dòng nhiệm vụ".
  */
 export const TASK_ENTRY_SELECTORS = [
-  '[data-id="TitleBarTaskList"]',
-  '#TitleBarTaskList',
-  '[class*="Lv_Task-wrapper"]',
+  // ĐÃ CHỨNG MINH mở được popover: 2026-09-03 04:4x trên /ai-design, bấm
+  // `button.entry-dGtF_I "Free creditsNew"` ra 10 dòng ngay lần đầu.
   'button:has-text("Free credits")',
   '[class*="entry-"]:has-text("Free credits")',
+  // Icon nhiệm vụ 40×40. Thử element TRONG CÙNG trước, vì `[data-id=…]` chỉ là vỏ
+  // bọc: cùng lượt đó, bấm vỏ ngoài 2 lần × 2 trang đều ra 0 dòng.
+  '[class*="Lv_Task-wrapper"]',
+  '#TitleBarTaskList',
+  '[data-id="TitleBarTaskList"]',
   // ĐỂ CUỐI: trên /my-edit đây chỉ là div bọc một span rỗng.
   '[data-id="TitleBarFreeCredits"]',
 ] as const;
+
+/** Mô tả ngắn của một element, để log nói rõ nó bấm vào cái gì. */
+async function describe(entry: Locator): Promise<string> {
+  return entry
+    .evaluate((el: Element) => {
+      const cls = (el.getAttribute('class') ?? '').split(' ').slice(0, 2).join('.');
+      return `${el.tagName.toLowerCase()}${cls ? '.' + cls : ''}` +
+        `${el.getAttribute('data-id') ? `[data-id=${el.getAttribute('data-id')}]` : ''}` +
+        ` "${(el.textContent ?? '').trim().slice(0, 30)}"`;
+    })
+    .catch(() => '(không đọc được)');
+}
+
+/**
+ * MỌI lối vào có kích thước thật trên trang, theo thứ tự ưu tiên.
+ *
+ * Trả về danh sách chứ không phải một cái, vì tiêu chí đúng là "popover CÓ MỌC
+ * hay không" — không element nào được coi là lối vào chỉ vì nó tồn tại.
+ */
+export async function findTaskEntries(page: Page): Promise<Locator[]> {
+  const found: Locator[] = [];
+  for (const sel of TASK_ENTRY_SELECTORS) {
+    const loc = page.locator(sel).first();
+    const box = await loc.boundingBox().catch(() => null);
+    if (box && box.width > 4 && box.height > 4) found.push(loc);
+  }
+  return found;
+}
 
 /**
  * Lối vào đầu tiên CÓ KÍCH THƯỚC THẬT. `boundingBox()` trả null cho element ẩn
@@ -98,12 +130,8 @@ export const TASK_ENTRY_SELECTORS = [
  * làm nhánh dự phòng `/my-edit` không bao giờ chạy vì "đã tìm được lối vào".
  */
 export async function findTaskEntry(page: Page): Promise<Locator | null> {
-  for (const sel of TASK_ENTRY_SELECTORS) {
-    const loc = page.locator(sel).first();
-    const box = await loc.boundingBox().catch(() => null);
-    if (box && box.width > 4 && box.height > 4) return loc;
-  }
-  return null;
+  const [first] = await findTaskEntries(page);
+  return first ?? null;
 }
 
 /** Số dòng nhiệm vụ đang có trong DOM. 0 = popover đã đóng. */
@@ -245,43 +273,37 @@ export async function withTaskPopover<T>(
     // nhiệm vụ "bật thông báo" mở TAB MỚI nên hay rơi vào đúng cảnh này.
     await page.bringToFront().catch(() => {});
 
-    /** Bấm lối vào của TRANG HIỆN TẠI rồi chờ có dòng thật. Trả về số dòng. */
+    /** Thử LẦN LƯỢT mọi lối vào của trang hiện tại. Trả về số dòng mở được. */
     const tryOpenHere = async (): Promise<number> => {
-      const entry = await findTaskEntry(page);
-      if (!entry) {
+      const candidates = await findTaskEntries(page);
+      if (candidates.length === 0) {
         log('   ℹ️  Trang này không có lối vào nhiệm vụ nào có kích thước thật');
         return 0;
       }
 
-      const what = await entry
-        .evaluate((el: Element) => {
-          const cls = (el.getAttribute('class') ?? '').split(' ').slice(0, 2).join('.');
-          return `${el.tagName.toLowerCase()}${cls ? '.' + cls : ''}` +
-            `${el.getAttribute('data-id') ? `[data-id=${el.getAttribute('data-id')}]` : ''}` +
-            ` "${(el.textContent ?? '').trim().slice(0, 30)}"`;
-        })
-        .catch(() => '(không đọc được)');
-      log(`   ℹ️  Lối vào nhiệm vụ sẽ bấm: ${what}`);
+      for (const entry of candidates) {
+        const what = await describe(entry);
+        log(`   ℹ️  Thử lối vào nhiệm vụ: ${what}`);
 
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        // force: nut hien thi nhung Playwright coi la chua actionable (do tren
-        // tab that 2026-09-02: click thuong timeout 6s, force thi an).
-        await entry
-          .click({ timeout: 5000, force: true })
-          .catch((e: unknown) =>
-            log(`   ℹ️  Bấm lối vào nhiệm vụ lỗi: ${(e as Error).message.slice(0, 90)}`)
-          );
-        const deadline = Date.now() + 8000;
-        while (Date.now() < deadline && (await countTaskRows(page)) === 0) {
-          await page.waitForTimeout(500);
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          // force: nut hien thi nhung Playwright coi la chua actionable (do tren
+          // tab that 2026-09-02: click thuong timeout 6s, force thi an).
+          await entry
+            .click({ timeout: 5000, force: true })
+            .catch((e: unknown) =>
+              log(`   ℹ️  Bấm lối vào nhiệm vụ lỗi: ${(e as Error).message.slice(0, 90)}`)
+            );
+          const deadline = Date.now() + 8000;
+          while (Date.now() < deadline && (await countTaskRows(page)) === 0) {
+            await page.waitForTimeout(500);
+          }
+          const rows = await countTaskRows(page);
+          if (rows > 0) {
+            log(`   ℹ️  Mở được popover: ${rows} dòng nhiệm vụ (lần bấm ${attempt})`);
+            return rows;
+          }
         }
-        const rows = await countTaskRows(page);
-        log(
-          rows > 0
-            ? `   ℹ️  Sau lần bấm ${attempt}: ${rows} dòng nhiệm vụ trong popover`
-            : `   ℹ️  Sau lần bấm ${attempt}: popover vẫn 0 dòng`
-        );
-        if (rows > 0) return rows;
+        log(`   ℹ️  ${what} không mở được popover — thử lối vào khác`);
       }
       return 0;
     };
@@ -330,9 +352,25 @@ export async function withTaskPopover<T>(
   try {
     return await fn();
   } finally {
-    // KHÔNG reload ở đây: request do_action vừa bắn có thể còn đang bay.
-    // Nếu không đóng được thì assertNoPopover của nhóm sau sẽ reload.
-    await closeTaskPopover(page, false);
+    /**
+     * Popover PHẢI được đóng lại, và lần này được phép reload.
+     *
+     * Bản cũ để `allowReload = false` với lý do "do_action vừa bắn có thể còn
+     * đang bay" — đúng, nên ở đây chờ một nhịp trước khi đóng thay vì bỏ hẳn
+     * việc đóng. Bỏ hẳn thì popover để hở, và đó là nguyên nhân đã đo được của
+     * 10 lỗi `canvas_panel_missing` đêm 2026-09-01.
+     *
+     * Lượt 2026-09-03 05:0x cho thêm một bằng chứng mới: khi `pwa_install` lần
+     * đầu MỞ ĐƯỢC popover (10 dòng), nhóm Design Studio ngay sau đó vỡ với
+     * "Nút Send vẫn disabled" ở modal Inspiration rồi "Không thấy tab workspace
+     * mới" — popover còn hở che đúng nút Send. Trước đó popover chưa bao giờ mở
+     * nên lỗi này không tồn tại.
+     */
+    await page.waitForTimeout(2500);
+    const closed = await closeTaskPopover(page, true);
+    if (!closed) {
+      log('   ℹ️  Popover nhiệm vụ không đóng được kể cả sau khi reload — nhóm sau có thể bị che');
+    }
   }
 }
 
