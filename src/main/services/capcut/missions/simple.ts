@@ -19,6 +19,10 @@ import { URLS } from '../urls';
 
 /** Bấm nút "Go" của đúng dòng nhiệm vụ rồi đóng popover lại. */
 async function clickGo(env: CapcutMissionEnv, title: string, reward: number): Promise<void> {
+  // `env.log` PHẢI truyền vào: chẩn đoán của `withTaskPopover` (bấm lối vào nào,
+  // sau mỗi lần bấm popover có mấy dòng) mặc định là no-op. Lượt chạy thật
+  // 2026-09-03 02:5x mất đúng những dòng đó nên không biết mắt xích nào đứt khi
+  // `pwa_install` báo "tìm dòng ... ra 0 kết quả".
   await withTaskPopover(env.page, async () => {
     const row = await findTaskRow(env.page, title, reward);
     const btn = row.locator('button').first();
@@ -30,7 +34,7 @@ async function clickGo(env: CapcutMissionEnv, title: string, reward: number): Pr
     } else {
       env.log(`Nút của "${title}" đang là "${text || 'N/A'}", không bấm Go`);
     }
-  });
+  }, env.log);
 }
 
 export const notificationsGroup: MissionGroup = {
@@ -112,7 +116,7 @@ export const notificationsGroup: MissionGroup = {
         // force: element hiển thị nhưng Playwright coi là chưa actionable
         await line.click({ timeout: 8000, force: true });
         env.log('Đã click dòng nhiệm vụ thông báo');
-      });
+      }, env.log);
 
       // do_action bắn ~1 giây sau; chờ rồi mới đóng tab để không huỷ request.
       await page.waitForTimeout(rand(8000, 10000));
