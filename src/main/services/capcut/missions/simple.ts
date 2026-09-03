@@ -11,6 +11,8 @@
  * =============================================================================
  */
 
+import type { Page } from 'playwright-core';
+
 import { mustSee } from '../diag';
 import { clickIfVisible, rand } from '../human';
 import { findTaskRow, withTaskPopover, type MissionGroup } from '../missionRunner';
@@ -19,18 +21,32 @@ import { URLS } from '../urls';
 
 /** Bấm nút "Go" của đúng dòng nhiệm vụ rồi đóng popover lại. */
 async function clickGo(env: CapcutMissionEnv, title: string, reward: number): Promise<void> {
+  await clickGoOnPage(env.page, env, title, reward);
+}
+
+/**
+ * Như `clickGo` nhưng trên MỘT TRANG CHỈ ĐỊNH — nhiệm vụ bật thông báo làm việc
+ * trên tab mới của riêng nó, không phải `env.page`.
+ */
+async function clickGoOnPage(
+  page: Page,
+  env: CapcutMissionEnv,
+  title: string,
+  reward: number
+): Promise<void> {
   // `env.log` PHẢI truyền vào: chẩn đoán của `withTaskPopover` (bấm lối vào nào,
   // sau mỗi lần bấm popover có mấy dòng) mặc định là no-op. Lượt chạy thật
   // 2026-09-03 02:5x mất đúng những dòng đó nên không biết mắt xích nào đứt khi
   // `pwa_install` báo "tìm dòng ... ra 0 kết quả".
-  await withTaskPopover(env.page, async () => {
-    const row = await findTaskRow(env.page, title, reward);
+  await withTaskPopover(page, async () => {
+    const row = await findTaskRow(page, title, reward);
     const btn = row.locator('button').first();
     const text = (await btn.innerText().catch(() => '')).trim();
     // Nút có thể đã là Done/Tomorrow nếu nhiệm vụ vừa xong ở lần thử trước.
     if (/^go$/i.test(text)) {
       await btn.click({ timeout: 8000 }).catch(() => {});
-      await env.page.waitForTimeout(rand(1800, 2600));
+      await page.waitForTimeout(rand(1800, 2600));
+      env.log(`Đã bấm Go ở dòng "${title}"`);
     } else {
       env.log(`Nút của "${title}" đang là "${text || 'N/A'}", không bấm Go`);
     }
@@ -106,6 +122,28 @@ export const notificationsGroup: MissionGroup = {
         env.log('Đã bấm Allow ở thanh "Allow notifications from CapCut?"');
         await page.waitForTimeout(rand(2000, 3000));
       }
+
+      /**
+       * BẤM "Go" TRƯỚC, RỒI MỚI CLICK DÒNG — theo đúng lượt làm tay 12/12.
+       *
+       * Comment cũ ở đầu hàm nói "click vào chính DÒNG nhiệm vụ, không phải nút
+       * Go". Đo lại trên `.capture/2026-09-01-21-50-27` (lượt làm tay đạt 12/12)
+       * thì thứ tự thật là:
+       *
+       *   [03:04] mở popover                      (label "Free credits")
+       *   [03:09] task-popover  action  "Go"      ← BẤM GO
+       *   [03:21] mở popover lại
+       *   [03:34] mở popover lại
+       *   [03:36] task-popover  taskLine  "Enable browser notifications"
+       *   [03:37] do_action capcut_web_push_authorize err_no=0   ✅
+       *   [03:38] task-popover  action  "Claim"
+       *
+       * Nghĩa là "Go" là bước khởi động luồng cấp quyền của CapCut; chỉ click
+       * dòng mà chưa từng bấm Go thì không có gì được ghi nhận — đúng hiện tượng
+       * của app ở 4 lượt chạy thật (popover mở 10 dòng, dòng đã click, vẫn không
+       * có do_action sau 45 giây).
+       */
+      await clickGoOnPage(page, env, 'Enable browser notifications', 210);
 
       await withTaskPopover(page, async () => {
         const line = await mustSee(

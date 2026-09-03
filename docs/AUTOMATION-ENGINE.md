@@ -132,6 +132,11 @@ sửa engine phải đọc hết bảng này trước.
 | Multilogin rotate refresh token mỗi lần signin, trả **HTTP 400** | 3/3 luồng fail sau vài giờ | map thành `CONFIG_ERROR` ⇒ nhánh fallback signin không chạy |
 | CapCut chạy Shark Risk Control: chấm điểm quỹ đạo chuột và độ trễ phím | `grant_reward` trả `err_no 8001003` khi click teleport | bị chặn nhận thưởng |
 | Hai dòng "Chat with AI agent" chỉ khác nhau ở reward (+110 vs +130) | `findTaskRow` lọc cả title **và** reward | claim sai dòng, báo thành công sai |
+| `button.credit-section` là lối vào **Upgrade**, KHÔNG phải popover nhiệm vụ | chẩn đoán in ra `button.credit-section "552200Upgrade"` (520 credits qua rolling-digits + chữ Upgrade) | nó che mất lối vào thật và làm nhánh dự phòng không chạy |
+| Lối vào mở được popover là `button.entry-… "Free creditsNew"` | 10 dòng ngay lần bấm đầu (2026-09-03 04:4x, `/ai-design`) | — |
+| `[data-id="TitleBarTaskList"]` là **vỏ ngoài**; bấm nó không mở popover | 2 lần bấm × 2 trang (`/my-edit?start_tab=video` và trang `enter_source`) đều 0 dòng | phải thử tiếp `.Lv_Task-wrapper` / `#TitleBarTaskList` |
+| `enter_source=web_task_earn_credit` **không** làm popover tự mọc | vào đúng URL đó rồi bấm, vẫn 0 dòng | đừng coi URL là điều kiện đủ |
+| Popover để hở che **nút Send của modal Inspiration** | lượt 2026-09-03 05:0x: `pwa_install` mở popover xong → "Nút Send vẫn disabled" → mất cả 4 nhiệm vụ Design Studio | phải đóng popover sau khi dùng (chờ 2.5s cho `do_action` rồi reload) |
 
 ## 6. Kiểm UI mà không đốt account
 

@@ -31,7 +31,7 @@ import type { Locator, Page } from 'playwright-core';
 import path from 'node:path';
 import fs from 'node:fs';
 
-import { getDumpDir, mustSee } from './diag';
+import { dump, getDumpDir, mustSee } from './diag';
 
 import {
   clickIfVisible,
@@ -185,13 +185,21 @@ export async function clickSend(
 ): Promise<boolean> {
   const send = ('locator' in scope ? scope.locator(S.send) : page.locator(S.send)).last();
 
+  /**
+   * Hai nhánh dưới đây từng làm vỡ cả nhóm Design Studio mà KHÔNG để lại hiện
+   * trường (lượt 2026-09-03 05:0x: "Nút Send vẫn disabled", lượt 05:1x: "Không
+   * thấy nút Send message" — cả hai chỉ có một dòng log rồi đi tiếp). Giờ ghi
+   * dump để lần sau biết trang đang ở trạng thái nào.
+   */
   if (!(await send.isVisible({ timeout: 8000 }).catch(() => false))) {
-    log('❌ Không thấy nút Send message');
+    const shot = await dump(page, 'send_message_missing');
+    log(`❌ Không thấy nút Send message — dump: ${shot ?? 'không ghi được'}`);
     return false;
   }
 
   if (!(await waitEnabled(send, timeoutMs))) {
-    log('⚠️  Nút Send vẫn disabled sau khi chờ → thử Enter');
+    const shot = await dump(page, 'send_message_disabled');
+    log(`⚠️  Nút Send vẫn disabled sau khi chờ → thử Enter — dump: ${shot ?? 'không ghi được'}`);
     await page.keyboard.press('Enter');
     return true;
   }
