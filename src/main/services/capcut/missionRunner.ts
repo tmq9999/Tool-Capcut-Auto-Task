@@ -366,8 +366,18 @@ export async function withTaskPopover<T>(
      * mới" — popover còn hở che đúng nút Send. Trước đó popover chưa bao giờ mở
      * nên lỗi này không tồn tại.
      */
-    await page.waitForTimeout(2500);
-    const closed = await closeTaskPopover(page, true);
+    /**
+     * DỌN DẸP KHÔNG ĐƯỢC PHÉP NÉM.
+     *
+     * `closeTaskPopover` bọc `.catch()` ở mọi thao tác nên nó vô hại. Dòng chờ
+     * 2.5 giây thì KHÔNG — lượt chạy thật 2026-09-03 20:5x chết vì đúng nó:
+     * `page.waitForTimeout: Target page, context or browser has been closed` ném
+     * ra từ trong `finally` ở bước bấm Claim, cuốn theo cả luồng và account về
+     * 0/12 dù chưa nhiệm vụ nào được thử. Lỗi trong `finally` che mất kết quả
+     * thật, nên ở đây mọi thứ đều phải `.catch()`.
+     */
+    await page.waitForTimeout(2500).catch(() => {});
+    const closed = await closeTaskPopover(page, true).catch(() => true);
     if (!closed) {
       log('   ℹ️  Popover nhiệm vụ không đóng được kể cả sau khi reload — nhóm sau có thể bị che');
     }
