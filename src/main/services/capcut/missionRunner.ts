@@ -14,6 +14,7 @@
 import type { Locator, Page } from 'playwright-core';
 
 import { dump, StepError } from './diag';
+import { ensurePageUsable } from './overlays';
 import type { ActionProof, CapcutTask, TaskSnapshot, TaskStore } from './taskApi';
 import type { CapcutMissionEnv, MissionGroup } from './types';
 import { URLS } from './urls';
@@ -206,6 +207,14 @@ export async function runGroup(
   const mark = Date.now();
   const result = new Map<string, ActionProof | Error>();
 
+  /**
+   * Dẹp mọi thứ phủ trang TRƯỚC khi nhóm thao tác. Ngày 04/09/2026 ba modal khác
+   * nhau chặn ba nhiệm vụ khác nhau, và cả ba lần engine báo sai địa chỉ:
+   * khảo sát onboarding → "Không thấy panel chat AI agent"; bảng giá Pro →
+   * `canvas_send_no_effect`; "trang lỗi" của CapCut → "Không thấy nút Send
+   * message" (trong khi `aria-label="Send message"` vẫn ở trong DOM).
+   */
+  await ensurePageUsable(env.page, env.log);
   await assertNoPopover(env.page, env.log);
 
   let actError: Error | null = null;
@@ -244,22 +253,41 @@ export async function runGroup(
  * +130 Video Studio). Bản cũ lọc chỉ theo title rồi `.first()`, nên lần nào
  * claim nhiệm vụ +130 cũng bốc trúng dòng +110 và báo thành công sai.
  *
+ * NHƯNG CapCut lệch với chính nó: đo 04/09/2026 05:48 (fixture
+ * `tools/fixtures/dom-task-popover-reward.html`), `task_list` trả
+ * `reward_amount = 210` cho `capcut_web_pwa_install` và
+ * `capcut_web_push_authorize` còn popover của chính CapCut in `+70` — hai nhiệm
+ * vụ đó trượt cả 4 lượt quét vì lọc title + reward ra 0 dòng. Nên có đường lùi
+ * về title-only, và CHỈ nhận khi title ra ĐÚNG MỘT dòng: giữ nguyên bảo đảm
+ * chống nhầm ở trên, chỉ mở đúng trường hợp không thể nhầm.
+ *
  * Ném lỗi nếu không ra đúng 1 dòng — thà fail rõ hơn là bốc bừa.
  */
-export async function findTaskRow(page: Page, title: string, reward: number): Promise<Locator> {
-  const row = page
-    .locator('[class*="taskRow"]')
-    .filter({ hasText: title })
-    .filter({ hasText: `+${reward}` });
+export async function findTaskRow(
+  page: Page,
+  title: string,
+  reward: number,
+  log: LogFn = NO_LOG
+): Promise<Locator> {
+  const byTitle = page.locator('[class*="taskRow"]').filter({ hasText: title });
+  const byTitleAndReward = byTitle.filter({ hasText: `+${reward}` });
 
-  const n = await row.count().catch(() => 0);
-  if (n !== 1) {
-    throw new StepError(
-      `Tìm dòng "${title}" +${reward} ra ${n} kết quả, cần đúng 1`,
-      await dump(page, 'task_row_ambiguous')
+  const exact = await byTitleAndReward.count().catch(() => 0);
+  if (exact === 1) return byTitleAndReward.first();
+
+  const onlyTitle = await byTitle.count().catch(() => 0);
+  if (exact === 0 && onlyTitle === 1) {
+    log(
+      `   ℹ️  Dòng "${title}": task_list báo +${reward} nhưng popover in số khác — ` +
+        'title ra đúng 1 dòng nên dùng dòng đó'
     );
+    return byTitle.first();
   }
-  return row.first();
+
+  throw new StepError(
+    `Tìm dòng "${title}" +${reward} ra ${exact} kết quả (title-only: ${onlyTitle}), cần đúng 1`,
+    await dump(page, 'task_row_ambiguous')
+  );
 }
 
 /** Mở popover nhiệm vụ, chạy `fn`, rồi cố đóng lại (không reload — xem closeTaskPopover). */
@@ -269,6 +297,18 @@ export async function withTaskPopover<T>(
   log: LogFn = NO_LOG
 ): Promise<T> {
   if ((await countTaskRows(page)) === 0) {
+    /**
+     * Dẹp modal phủ trang TRÊN CHÍNH `page` NÀY, không phải trên `env.page`.
+     *
+     * `runGroup` chỉ gọi `ensurePageUsable(env.page)`, mà nhiệm vụ "bật thông
+     * báo" làm việc trên TAB MỚI do nó tự mở. Đo 04/09/2026 trên account
+     * `markusmkel7097`: tab mới đó có modal khảo sát (`lv-modal-mask`
+     * `display: block` + "best describes you"), popover 0 dòng, và lỗi báo ra là
+     * `Tìm dòng "Enable browser notifications" ... (title-only: 0)` — sai địa chỉ
+     * lần thứ tư của cùng một lớp lỗi.
+     */
+    await ensurePageUsable(page, log);
+
     // Tab nền bị Chrome tiết chế nên animation popover không chạy tới đâu —
     // nhiệm vụ "bật thông báo" mở TAB MỚI nên hay rơi vào đúng cảnh này.
     await page.bringToFront().catch(() => {});
@@ -404,7 +444,7 @@ export async function claimIfPending(
   await withTaskPopover(
     page,
     async () => {
-      const row = await findTaskRow(page, task.title, task.reward);
+      const row = await findTaskRow(page, task.title, task.reward, log);
       await row.locator('button').first().click({ timeout: 8000 }).catch(() => {});
     },
     log

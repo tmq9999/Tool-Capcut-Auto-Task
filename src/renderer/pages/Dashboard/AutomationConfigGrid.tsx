@@ -17,6 +17,8 @@ import { Select } from '@renderer/components/ui/Select';
 import { Textarea } from '@renderer/components/ui/Textarea';
 import { SegmentedControl } from '@renderer/components/ui/SegmentedControl';
 import { NumberStepper } from '@renderer/components/ui/NumberStepper';
+import { isBrowserImplemented } from '../../../shared/schemas/automation.schema';
+import { clampConfigNumber } from './automationConfig';
 import { Checkbox } from '@renderer/components/ui/Checkbox';
 import type { EmailApiProvider, EmailProviderConfigDTO } from '@shared/schemas/provider.schema';
 import type { CustomEmailSettingsDTO } from '@shared/schemas/settings.schema';
@@ -102,8 +104,12 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                   <label className="font-label-xs text-[10px] text-on-surface-variant">Luồng</label>
                   <Input
                     type="number"
+                    min={1}
+                    max={200}
                     value={config.threadCount}
-                    onChange={(e) => onChange({ threadCount: Number(e.target.value) })}
+                    onChange={(e) =>
+                      onChange({ threadCount: clampConfigNumber(e.target.value, 1, 200, config.threadCount) })
+                    }
                     controlSize="sm"
                     disabled={disabled}
                     fontMono
@@ -118,11 +124,21 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                     disabled={disabled}
                     onChange={(e) => onChange({ browser: e.target.value as BrowserRuntime })}
                   >
-                    {BROWSER_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
+                    {BROWSER_OPTIONS.map((option) => {
+                      /**
+                       * Khoá browser chưa có implementation, đúng khuôn `module`
+                       * trial/team ở dưới. Trước 04/09/2026 dropdown cho chọn cả
+                       * 5 trong khi chỉ Multilogin có provider + launcher, mà
+                       * `start()` lại MUA EMAIL trước khi mở browser — chọn nhầm
+                       * là mất tiền rồi mới báo lỗi.
+                       */
+                      const ready = isBrowserImplemented(option.value);
+                      return (
+                        <option key={option.value} value={option.value} disabled={!ready}>
+                          {option.label}{ready ? '' : ' (chưa hỗ trợ)'}
+                        </option>
+                      );
+                    })}
                   </Select>
                 </div>
               </div>
@@ -137,6 +153,7 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                   value={config.headless ? 'headless' : 'headed'}
                   onChange={(value) => onChange({ headless: value === 'headless' })}
                   size="sm"
+                  disabled={disabled}
                 />
               </div>
 
@@ -167,9 +184,13 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                 <div className="flex items-center gap-1">
                   <Input
                     type="number"
+                    min={0}
+                    max={600000}
                     placeholder="Min"
                     value={config.stepDelayMinMs}
-                    onChange={(e) => onChange({ stepDelayMinMs: Number(e.target.value) })}
+                    onChange={(e) =>
+                      onChange({ stepDelayMinMs: clampConfigNumber(e.target.value, 0, 600000, config.stepDelayMinMs) })
+                    }
                     controlSize="sm"
                     disabled={disabled}
                     fontMono
@@ -177,9 +198,13 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                   <span className="text-on-surface-variant text-xs">-</span>
                   <Input
                     type="number"
+                    min={0}
+                    max={600000}
                     placeholder="Max"
                     value={config.stepDelayMaxMs}
-                    onChange={(e) => onChange({ stepDelayMaxMs: Number(e.target.value) })}
+                    onChange={(e) =>
+                      onChange({ stepDelayMaxMs: clampConfigNumber(e.target.value, 0, 600000, config.stepDelayMaxMs) })
+                    }
                     controlSize="sm"
                     disabled={disabled}
                     fontMono
@@ -194,9 +219,13 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                 <div className="flex items-center gap-1">
                   <Input
                     type="number"
+                    min={0}
+                    max={60000}
                     placeholder="Min"
                     value={config.typeDelayMinMs}
-                    onChange={(e) => onChange({ typeDelayMinMs: Number(e.target.value) })}
+                    onChange={(e) =>
+                      onChange({ typeDelayMinMs: clampConfigNumber(e.target.value, 0, 60000, config.typeDelayMinMs) })
+                    }
                     controlSize="sm"
                     disabled={disabled}
                     fontMono
@@ -204,9 +233,13 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                   <span className="text-on-surface-variant text-xs">-</span>
                   <Input
                     type="number"
+                    min={0}
+                    max={60000}
                     placeholder="Max"
                     value={config.typeDelayMaxMs}
-                    onChange={(e) => onChange({ typeDelayMaxMs: Number(e.target.value) })}
+                    onChange={(e) =>
+                      onChange({ typeDelayMaxMs: clampConfigNumber(e.target.value, 0, 60000, config.typeDelayMaxMs) })
+                    }
                     controlSize="sm"
                     disabled={disabled}
                     fontMono
@@ -240,6 +273,29 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
 
               {config.proxyMode === 'proxykey' ? (
                 <div className="flex-1 flex flex-col gap-0.5">
+                  {/*
+                    Vùng chỉ có nghĩa với proxy key: KiotProxy cấp IP theo vùng
+                    (`bac`/`trung`/`nam`), còn proxy dán tay `http://ip:port` thì IP
+                    đã cố định. `random` = không gửi khoá vùng, để KiotProxy tự chọn.
+                  */}
+                  <div className="flex items-center justify-between">
+                    <label className="font-label-xs text-[10px] text-on-surface-variant">Vùng</label>
+                    <div className="w-28">
+                      <Select
+                        controlSize="sm"
+                        value={config.proxyRegion}
+                        disabled={disabled}
+                        onChange={(e) =>
+                          onChange({ proxyRegion: e.target.value as AutomationConfigState['proxyRegion'] })
+                        }
+                      >
+                        <option value="random">Ngẫu nhiên</option>
+                        <option value="bac">Miền Bắc</option>
+                        <option value="trung">Miền Trung</option>
+                        <option value="nam">Miền Nam</option>
+                      </Select>
+                    </div>
+                  </div>
                   <Textarea
                     placeholder="Mỗi dòng một proxy key..."
                     value={config.proxyKeyList}
@@ -312,6 +368,28 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                   </span>
                 </label>
               ))}
+
+              {/*
+                Cổng trial đọc bằng selector và CỐ Ý fail-open: đọc không được thì
+                coi như đủ điều kiện. Bật ô này là chấp nhận bỏ qua account — mỗi
+                account bỏ qua là một hộp thư đã trả tiền, nên mặc định TẮT.
+              */}
+              <label
+                className={`flex items-start gap-2 p-1.5 border rounded border-panel-border ${
+                  disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:border-outline'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={config.skipWithoutTrial}
+                  disabled={disabled}
+                  onChange={(e) => onChange({ skipWithoutTrial: e.target.checked })}
+                  className="w-3.5 h-3.5 mt-0.5 text-primary focus:ring-primary border-panel-border bg-surface rounded"
+                />
+                <span className="font-label-xs text-[10px] text-on-surface-variant leading-snug">
+                  Bỏ qua account không có trial Pro ≥ 7 ngày
+                </span>
+              </label>
             </div>
           </Panel>
 
@@ -331,6 +409,7 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                 value={config.emailSourceMode}
                 onChange={(value) => onChange({ emailSourceMode: value })}
                 size="sm"
+                disabled={disabled}
               />
 
               {config.emailSourceMode === 'custom' ? (
@@ -437,9 +516,13 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                   <span className="font-label-xs text-[10px] text-on-surface-variant">Dài</span>
                   <Input
                     type="number"
+                    min={6}
+                    max={64}
                     value={config.passwordLength}
                     disabled={disabled}
-                    onChange={(e) => onChange({ passwordLength: Number(e.target.value) })}
+                    onChange={(e) =>
+                      onChange({ passwordLength: clampConfigNumber(e.target.value, 6, 64, config.passwordLength) })
+                    }
                     controlSize="sm"
                     className="w-12 text-center py-0 h-6 text-xs"
                     fontMono

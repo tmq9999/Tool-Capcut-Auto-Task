@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type Database from 'better-sqlite3';
@@ -15,6 +15,8 @@ import { SettingsService } from './services/SettingsService';
 import { registerBaselineIpc } from './ipc/registerIpc';
 import { registerSettingsIpc } from './ipc/settingsIpc';
 import { registerAccountsIpc } from './ipc/accountsIpc';
+import { AccountExportService } from './services/AccountExportService';
+import { AccountTaskService } from './services/AccountTaskService';
 import { registerLogsIpc } from './ipc/logsIpc';
 import { registerAutomationIpc } from './ipc/automationIpc';
 import { IPC_EVENTS } from '../shared/contracts/ipc-channels';
@@ -23,6 +25,7 @@ import {
   createProviderStackRepositories,
   type ProviderStack
 } from './runtime/providerStack';
+import { runLogRetentionCleanup } from './runtime/logRetention';
 import { createShutdownManager, type SafeDiagnosticLogger, type ShutdownManager } from './lifecycle';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -175,11 +178,54 @@ app.whenReady().then(() => {
       providerStack.logBus.dispose();
     };
 
+    /**
+     * Dọn log quá hạn — AGENTS.md §18. Chạy SAU `logBus.start()` để dòng tổng kết
+     * được ghi xuống DB, và trước khi mở cửa sổ.
+     *
+     * `runLogRetentionCleanup` không bao giờ ném: dọn log là việc dọn dẹp, không
+     * phải điều kiện để app mở được (xem `runtime/logRetention.ts`).
+     */
+    runLogRetentionCleanup({
+      repositories: {
+        logRepo: providerStack.repositories.logRepo,
+        settingsRepo: providerStack.repositories.settingsRepo
+      },
+      logBus: providerStack.logBus
+    });
+
+    /**
+     * Xuất account: hộp thoại lưu file là API của Electron nên khoá `dialog` được
+     * bơm từ đây, còn service ở `services/AccountExportService.ts` không biết gì
+     * về Electron (nhờ vậy test chạy được bằng Node thuần).
+     *
+     * KHÔNG ghi runtime log cho lượt xuất: `RuntimeLog` bắt buộc có `email` của
+     * một account (AGENTS §16), một lượt xuất N account không thuộc account nào.
+     */
+    const accountExportService = new AccountExportService(accountRepo, credentialVault, {
+      chooseSavePath: async (suggestedFileName: string) => {
+        const extension = path.extname(suggestedFileName).replace('.', '') || 'txt';
+        const result = await dialog.showSaveDialog({
+          title: 'Xuất danh sách tài khoản',
+          defaultPath: path.join(app.getPath('downloads'), suggestedFileName),
+          filters: [
+            { name: extension.toUpperCase(), extensions: [extension] },
+            { name: 'Tất cả', extensions: ['*'] }
+          ]
+        });
+        return result.canceled || !result.filePath ? null : result.filePath;
+      }
+    });
+
     // 4. Register Baseline & Settings IPC handlers
     currentStage = 'IPC_REGISTRATION';
     const cleanupBaselineIpc = registerBaselineIpc(ipcMain);
     const cleanupSettingsIpc = registerSettingsIpc(ipcMain, settingsService, serviceConnectionManager);
-    const cleanupAccountsIpc = registerAccountsIpc(ipcMain, providerStack.accountService);
+    const cleanupAccountsIpc = registerAccountsIpc(
+      ipcMain,
+      providerStack.accountService,
+      accountExportService,
+      new AccountTaskService(providerStack.repositories.accountTaskRepo)
+    );
     const cleanupLogsIpc = registerLogsIpc(ipcMain, logRepo);
     const cleanupAutomationIpc = registerAutomationIpc(
       ipcMain,
@@ -227,8 +273,21 @@ app.whenReady().then(() => {
         createWindow();
       }
     });
-  } catch {
-    process.stderr.write(`[MAIN_INIT_FAILED] ${currentStage}\n`);
+  } catch (err: unknown) {
+    /**
+     * PHẢI in nguyên nhân, không chỉ in tên bước (AGENTS.md §27).
+     *
+     * Bản cũ là `catch {}` trơn: bản đóng gói 04/09/2026 chết với đúng một dòng
+     * `[MAIN_INIT_FAILED] DB_CONNECT` và không có cách nào biết vì sao —
+     * `better-sqlite3` không load được, sai đường dẫn DB, hay quyền ghi, ba
+     * nguyên nhân đó cần ba cách sửa khác nhau. Ở đây không có secret nào:
+     * `currentStage` là hằng trong code, còn message là lỗi native/đường dẫn.
+     */
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[MAIN_INIT_FAILED] ${currentStage}: ${message}\n`);
+    if (err instanceof Error && err.stack) {
+      process.stderr.write(err.stack + '\n');
+    }
     if (dbInstance && dbInstance.open) {
       try {
         dbInstance.close();

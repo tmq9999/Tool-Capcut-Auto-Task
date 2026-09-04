@@ -2,11 +2,13 @@ import { ColumnDef } from '@tanstack/react-table';
 import { Account } from '@shared/types/account';
 import { Checkbox } from '@renderer/components/ui/Checkbox';
 import { Badge } from '@renderer/components/ui/Badge';
-import { Edit2, MoreVertical } from 'lucide-react';
+import { Edit2, ListChecks } from 'lucide-react';
 
 export interface AccountsColumnsOptions {
   onEditAccount: (account: Account) => void;
   onDeleteAccount?: (account: Account) => void;
+  /** Mở bảng tiến độ 12 nhiệm vụ của một account. */
+  onViewTasks?: (account: Account) => void;
 }
 
 export const createAccountsColumns = (
@@ -53,8 +55,16 @@ export const createAccountsColumns = (
   },
   {
     accessorKey: 'password',
-    header: 'Password',
-    cell: () => <span className="font-code text-on-surface-variant">••••••••</span>,
+    header: 'Password CapCut',
+    /**
+     * Ô chỉ nói CÓ hay KHÔNG có mật khẩu — giá trị thật không rời main process
+     * (AGENTS §13). `password` của view model đã là dấu che hoặc chuỗi rỗng.
+     */
+    cell: ({ row }) => (
+      <span className="font-code text-on-surface-variant">
+        {row.original.password ? '••••••••' : '—'}
+      </span>
+    ),
   },
   {
     accessorKey: 'provider',
@@ -166,11 +176,21 @@ export const createAccountsColumns = (
         >
           <Edit2 className="w-3.5 h-3.5" />
         </button>
+        {/*
+          Tiến độ 12 nhiệm vụ: bảng `account_tasks` đã ghi từ lâu nhưng không có
+          đường nào đọc, nên dữ liệu quý nhất của tool không hiện ở đâu
+          (audit 04/09/2026).
+        */}
         <button
           type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            options.onViewTasks?.(row.original);
+          }}
           className="p-1 rounded text-on-surface-variant hover:text-primary hover:bg-surface-container-high transition-colors"
+          title="Xem tiến độ 12 nhiệm vụ"
         >
-          <MoreVertical className="w-3.5 h-3.5" />
+          <ListChecks className="w-3.5 h-3.5" />
         </button>
       </div>
     ),

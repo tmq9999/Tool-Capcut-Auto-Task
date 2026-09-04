@@ -49,6 +49,13 @@ export const AccountsToolbar: React.FC<AccountsToolbarProps> = ({
             <option value="processing">Đang xử lý</option>
             <option value="error">Lỗi</option>
             <option value="disabled">Đã tắt</option>
+            {/*
+              `waiting` và `done` thiếu trong bản cũ, mà `done` chính là trạng thái
+              của MỌI account chạy xong (`AutomationRunService.shutdownThread`) —
+              không lọc được đúng thứ người dùng cần tìm nhất.
+            */}
+            <option value="waiting">Đang chờ</option>
+            <option value="done">Hoàn tất</option>
           </Select>
         </div>
 
@@ -72,10 +79,16 @@ export const AccountsToolbar: React.FC<AccountsToolbarProps> = ({
             onChange={(e) => onFilterChange({ ...filters, providerFilter: e.target.value })}
           >
             <option value="all">Provider: Tất cả</option>
-            <option value="Gmail">Gmail</option>
-            <option value="Outlook">Outlook</option>
-            <option value="Yahoo">Yahoo</option>
-            <option value="Proton">Proton</option>
+            {/*
+              Giá trị phải khớp `emailProvider` mà automation GHI RA
+              (`AutomationRunService`): gmail94 / dongvanfb / customdomain / manual.
+              Bản cũ để Gmail/Outlook/Yahoo/Proton và so `===` nên KHÔNG BAO GIỜ
+              khớp account do bot tạo — lọc luôn ra 0 dòng (audit 04/09/2026).
+            */}
+            <option value="gmail94">Gmail94</option>
+            <option value="dongvanfb">DongVanFB</option>
+            <option value="customdomain">Domain riêng</option>
+            <option value="manual">Nhập tay</option>
           </Select>
         </div>
 

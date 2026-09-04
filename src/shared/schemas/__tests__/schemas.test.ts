@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
-import { AppSettingsSchema, ExportFieldEnum } from '../settings.schema';
+import { AppSettingsSchema, AutomationConfigSettingsSchema, ExportFieldEnum } from '../settings.schema';
+import { CAPCUT_OTP_SERVICE } from '../provider.schema';
+import { DEFAULT_APP_SETTINGS } from '../../settings/default-settings';
 import { SaveCredentialInputSchema } from '../credentials.schema';
 import { CanonicalRuntimeLogSchema, LogFilterSchema } from '../log.schema';
 import {
@@ -452,5 +454,20 @@ describe('Strict Runtime Zod Schemas (Task 2 RED)', () => {
       };
       expect(PingEnvelopeSchema.safeParse(errorPayload).success).toBe(true);
     });
+  });
+});
+
+/**
+ * Slug OTP mặc định của một máy MỚI. Sai slug thì gmail94 thuê hộp thư cho dịch
+ * vụ khác và mã CapCut không bao giờ về (xem `CAPCUT_OTP_SERVICE`).
+ */
+describe('slug OTP mặc định', () => {
+  it('máy mới mặc định thuê hộp thư dịch vụ capcut', () => {
+    const fresh = AutomationConfigSettingsSchema.parse(undefined);
+    expect(fresh.otpService).toBe(CAPCUT_OTP_SERVICE);
+  });
+
+  it('DEFAULT_APP_SETTINGS cũng dùng đúng slug đó', () => {
+    expect(DEFAULT_APP_SETTINGS.automation.otpService).toBe(CAPCUT_OTP_SERVICE);
   });
 });

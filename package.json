@@ -1,6 +1,6 @@
 {
   "name": "automanager-desktop",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "type": "module",
   "description": "AutoManager Enterprise Desktop Client",
   "main": "dist-electron/main.js",
@@ -18,7 +18,9 @@
     "test:electron": "npm run build && npm run rebuild:electron && electron ./scripts/run-electron-harness.cjs",
     "test": "npm run test:node && npm run test:electron",
     "verify:providers": "vitest run --config vitest.live.config.ts",
-    "selectors": "tsx tools/verify-selectors.ts"
+    "selectors": "tsx tools/verify-selectors.ts",
+    "dist": "npm run build && npm run rebuild:electron && electron-builder --win --config electron-builder.yml",
+    "dist:dir": "npm run build && npm run rebuild:electron && electron-builder --win --dir --config electron-builder.yml"
   },
   "dependencies": {
     "@fontsource/geist-sans": "^5.2.5",
@@ -32,6 +34,7 @@
     "react-dom": "^19.1.0",
     "react-router-dom": "^7.3.0",
     "tailwind-merge": "^3.0.2",
+    "write-excel-file": "4.1.1",
     "zod": "4.0.1"
   },
   "devDependencies": {
@@ -44,9 +47,11 @@
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.21",
     "electron": "^35.0.0",
+    "electron-builder": "26.15.3",
     "eslint": "^9.22.0",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.19",
+    "fflate": "0.8.3",
     "globals": "^16.0.0",
     "postcss": "^8.5.3",
     "tailwindcss": "^3.4.17",

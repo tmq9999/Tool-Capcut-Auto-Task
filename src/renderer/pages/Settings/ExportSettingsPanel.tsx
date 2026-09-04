@@ -4,20 +4,18 @@ import { Panel } from '@renderer/components/ui/Panel';
 import { Select } from '@renderer/components/ui/Select';
 import { Checkbox } from '@renderer/components/ui/Checkbox';
 import type { ExportSettingsDTO, ExportField } from '@shared/schemas/settings.schema';
+import {
+  CANONICAL_EXPORT_FIELD_ORDER,
+  EXPORT_FIELD_HEADERS
+} from '@shared/schemas/account-export.schema';
 
 export interface ExportSettingsPanelProps {
   settings: ExportSettingsDTO;
   onChange: (settings: ExportSettingsDTO) => void;
 }
 
-const FIELD_LABELS: Record<ExportField, string> = {
-  email: 'Email',
-  passwordCapcut: 'Password CapCut',
-  emailData: 'Email Data',
-  credit: 'Credit',
-  subscription: 'Subscription',
-  createdAt: 'Create At',
-};
+/** Nhãn cột lấy từ contract dùng chung, để Settings và file xuất không lệch chữ. */
+const FIELD_LABELS = EXPORT_FIELD_HEADERS;
 
 const SAMPLE_VALUES: Record<ExportField, string[]> = {
   email: ['john.doe@gmail.com', 'jane.smith@yahoo.com'],
@@ -50,12 +48,19 @@ export const ExportSettingsPanel: React.FC<ExportSettingsPanelProps> = ({
     });
   };
 
+  /**
+   * Ký tự ngăn cột trong ô xem trước.
+   *
+   * XLSX/CSV KHÔNG dùng `|` — chỉ TXT (AGENTS §21). Bản cũ vẽ XLSX bằng `|` nên
+   * xem trước hứa một thứ mà file thật ra thứ khác; `│` (vạch kẻ) để người dùng
+   * hiểu đó là ranh giới ô, không phải ký tự có trong file.
+   */
   const getDelimiter = () => {
     switch (settings.defaultFormat) {
       case 'csv':
         return ',';
       case 'xlsx':
-        return '    |    ';
+        return ' │ ';
       case 'txt':
       default:
         return '|';
@@ -64,13 +69,21 @@ export const ExportSettingsPanel: React.FC<ExportSettingsPanelProps> = ({
 
   const delimiter = getDelimiter();
 
-  const headerPreview = settings.checkedFields
+  /**
+   * Xem trước theo ĐÚNG thứ tự §21, không theo thứ tự người dùng bấm chọn: file
+   * xuất ra do `CANONICAL_EXPORT_FIELD_ORDER` quyết định, xem trước phải khớp.
+   */
+  const previewFields = CANONICAL_EXPORT_FIELD_ORDER.filter((f) =>
+    settings.checkedFields.includes(f)
+  );
+
+  const headerPreview = previewFields
     .map((f) => FIELD_LABELS[f] ?? f)
     .join(delimiter);
-  const row1Preview = settings.checkedFields
+  const row1Preview = previewFields
     .map((f) => SAMPLE_VALUES[f]?.[0] || '...')
     .join(delimiter);
-  const row2Preview = settings.checkedFields
+  const row2Preview = previewFields
     .map((f) => SAMPLE_VALUES[f]?.[1] || '...')
     .join(delimiter);
 

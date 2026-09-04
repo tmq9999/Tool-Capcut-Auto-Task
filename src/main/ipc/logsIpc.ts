@@ -1,7 +1,7 @@
 import { IPC_CHANNELS } from '../../shared/contracts/ipc-channels';
 import { IpcContractRegistry } from '../../shared/contracts/api';
 import type { IpcRegistrar } from './registerIpc';
-import { ok, toErrorEnvelope, VALIDATION_ERROR } from './ipcResult';
+import { ok, toErrorEnvelope, validationError } from './ipcResult';
 import type { LogRepository } from '../repositories/LogRepository';
 import type { IpcEnvelope } from '../../shared/schemas/ipc-envelope.schema';
 import type { CanonicalRuntimeLog } from '../../shared/schemas/log.schema';
@@ -14,7 +14,7 @@ export function registerLogsIpc(
     IPC_CHANNELS.LOGS_LIST,
     async (_event: unknown, request?: unknown): Promise<IpcEnvelope<{ items: CanonicalRuntimeLog[]; total: number }>> => {
       const parsed = IpcContractRegistry.logs.list.request.safeParse(request);
-      if (!parsed.success) return VALIDATION_ERROR;
+      if (!parsed.success) return validationError(parsed.error);
       try {
         return ok(logRepo.queryLogs(parsed.data));
       } catch (err: unknown) {

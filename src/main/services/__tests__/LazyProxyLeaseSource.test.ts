@@ -128,6 +128,45 @@ describe('LazyProxyLeaseSource với danh sách key chỉ định', () => {
     expect(built[0].keys).toEqual(['K1', 'K2']);
   });
 
+  it('chuyển tiếp region xuống ProxyLeaseManager', async () => {
+    /**
+     * `ProxyConfig.region` có trong contract và `ProxyLeaseManager` ĐANG đọc
+     * (`options.region` khi gọi `getNewProxy`), nhưng không ai chuyển xuống —
+     * khoá này trước đây luôn `undefined` (audit 04/09/2026).
+     */
+    const seen: Array<string | undefined> = [];
+    const source = new LazyProxyLeaseSource(
+      { readSimpleKey: () => 'TOKEN' },
+      (options: ProxyLeaseManagerOptions) => {
+        seen.push(options.region);
+        return new FakeManager(options.apiToken, options.keys);
+      }
+    );
+
+    source.configure({ keys: ['K1'], region: 'hanoi' });
+    await source.acquire();
+
+    expect(seen).toEqual(['hanoi']);
+  });
+
+  it('đổi region thì dựng lại manager, không dùng lại region của lượt trước', async () => {
+    const seen: Array<string | undefined> = [];
+    const source = new LazyProxyLeaseSource(
+      { readSimpleKey: () => 'TOKEN' },
+      (options: ProxyLeaseManagerOptions) => {
+        seen.push(options.region);
+        return new FakeManager(options.apiToken, options.keys);
+      }
+    );
+
+    source.configure({ keys: ['K1'], region: 'hanoi' });
+    await source.acquire();
+    source.configure({ keys: ['K1'], region: 'saigon' });
+    await source.acquire();
+
+    expect(seen).toEqual(['hanoi', 'saigon']);
+  });
+
   it('dựng lại manager khi danh sách key đổi giữa hai phiên', async () => {
     const built: FakeManager[] = [];
     const source = new LazyProxyLeaseSource(

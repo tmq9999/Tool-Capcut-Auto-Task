@@ -84,6 +84,13 @@ describe('createProviderStack', () => {
     expect(http.requests[0].url).toContain('/profile?token=GM-KEY');
   });
 
+  /**
+   * Tên test này luôn nói "refuses to start", nhưng phần assert cũ lại khẳng định
+   * run VẪN start rồi mới có 1 luồng fail — hai thứ mâu thuẫn nhau. Audit
+   * 04/09/2026 chỉ ra đó chính là lỗi: `start()` mua email TRƯỚC, `launchThread`
+   * fail SAU, nên chọn browser chưa có là tiêu tiền hộp thư rồi mới báo lỗi.
+   * Nay hành vi khớp với cái tên: từ chối ngay, không tạo luồng nào.
+   */
   it('refuses to start a run for a browser that is not implemented yet', async () => {
     const stack = createProviderStack(createProviderStackRepositories(db), new PlainVault(), new RecordingHttp());
 
@@ -98,15 +105,15 @@ describe('createProviderStack', () => {
         typeDelayMinMs: 0,
         typeDelayMaxMs: 0,
         module: 'trial',
+        skipWithoutTrial: false,
         emailSource: { mode: 'manual', entries: ['a@b.com|p'] },
         proxy: { mode: 'direct', entries: [] },
         password: { mode: 'random', length: 12, uppercase: true, numbers: true, special: false },
         testDurationMs: 0
       })
-    ).resolves.toMatchObject({ runId: expect.any(String) });
+    ).rejects.toMatchObject({ code: 'CONFIG_ERROR' });
 
-    const summary = await stack.automationRunService.waitForCompletion();
-    expect(summary.threadsFailed).toBe(1);
+    expect(stack.automationRunService.isRunning()).toBe(false);
   });
 
   it('tạo AccountTaskRepository trên cùng database của stack', () => {

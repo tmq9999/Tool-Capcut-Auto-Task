@@ -33,6 +33,7 @@ import {
   findTaskEntry,
   runGroup,
   selectGroups,
+  withTaskPopover,
 } from './missionRunner';
 import { designStudioGroup } from './missions/designStudio';
 import { notificationsGroup, pwaInstallGroup } from './missions/simple';
@@ -92,6 +93,13 @@ export interface TaskSnapshotSummary {
   credits: number; // credits đã nhận
   creditsTotal: number; // tổng credits khả dụng
   missing: string[]; // task_key chưa xong
+  /**
+   * true khi KHÔNG đọc lại được `task_list` ở bước chốt — tab chính chết giữa
+   * lượt là nguyên nhân đã đo được (04/09/2026 06:5x). Lúc đó các con số ở trên
+   * là của snapshot CŨ, nên người đọc phải ưu tiên `do_action err_no=0` của
+   * từng `TaskOutcome` thay vì tin `missing`.
+   */
+  stale?: boolean;
 }
 
 export interface RunTasksResult {
@@ -169,15 +177,24 @@ async function bootstrap(
   let snap = await tryGet(30000);
 
   if (!snap) {
+    /**
+     * Dùng lại BẬC LEO THANG ĐÃ CÓ của `withTaskPopover` thay vì tự thử một lần.
+     *
+     * Bản cũ ở đây chỉ `findTaskEntry` (một ứng viên) + một cú click; không mở
+     * được là đi thẳng tới nhánh ném lỗi ⇒ account chết ngay từ bước đầu, không
+     * làm được nhiệm vụ nào. Trong khi `withTaskPopover` đã có sẵn bậc mạnh hơn
+     * nhiều: `findTaskEntries` trả 6 selector theo thứ tự ưu tiên, mỗi cái thử 2
+     * lần click, 2 vòng, rồi còn bậc cuối là điều hướng sang `URLS.tasks` với
+     * `enter_source=web_task_earn_credit`.
+     *
+     * Triệu chứng đã ghi trong CHANGELOG ("Không bắt được task_list" trên
+     * `jksqtiqa24961`, `yrqfvwwk67499`) chính là bậc yếu này, không phải selector
+     * sai — nên chỗ sửa đúng là dùng chung, không phải viết logic mới.
+     */
     log('   ℹ️  Chưa thấy task_list — mở popover nhiệm vụ để kích hoạt');
-    const entry = await findTaskEntry(page);
-    if (entry) {
-      await entry.click({ timeout: 8000, force: true }).catch(() => {});
-    } else {
-      log('   ℹ️  Trang này không có lối vào nhiệm vụ nào có kích thước thật');
-    }
-    snap = await tryGet(20000);
-    await closeTaskPopover(page, false);
+    await withTaskPopover(page, async () => {
+      snap = await tryGet(20000);
+    }, log).catch(() => {});
   }
 
   if (!snap) {
@@ -375,14 +392,21 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
   // Nhiệm vụ Bonus (+80) nhảy 1→2→4 vài giây SAU nhiệm vụ con cuối cùng, nên
   // nếu chỉ dùng `snap` của vòng lặp thì báo cáo in ❌ cho một nhiệm vụ mà
   // CapCut đã tính xong — đúng chuyện xảy ra lượt 2026-09-02 05:48.
+  let stale = false;
   const final = await store
     .waitForSnapshot(Date.now() - 3000, 25000)
-    .catch(() => store.snapshot() ?? snap);
+    .catch(() => {
+      // Không đọc lại được `task_list`: tab chính chết là nguyên nhân đã đo.
+      // Nói ra thay vì im lặng trả về snapshot cũ như thể nó còn đúng.
+      stale = true;
+      log('   ⚠️  Không đọc lại được task_list ở bước chốt — số liệu snapshot là của lượt trước');
+      return store.snapshot() ?? snap;
+    });
   snap = final;
   for (const [key, t] of snap.byKey) {
     const o = outcomes.get(key);
     if (o && t.status === 4) o.done = true;
   }
 
-  return { outcomes: [...outcomes.values()], snapshot: summarize(snap) };
+  return { outcomes: [...outcomes.values()], snapshot: { ...summarize(snap), stale } };
 }

@@ -13,10 +13,21 @@ import type {
   AutomationRunState,
   BrowserRuntime
 } from '../../shared/schemas/automation.schema';
+import {
+  IMPLEMENTED_BROWSER_RUNTIMES,
+  isBrowserImplemented
+} from '../../shared/schemas/automation.schema';
 import type {
   AccountCreateInputDTO,
   AccountUpdateInputDTO
 } from '../../shared/schemas/account.schema';
+
+/**
+ * Hạn chờ mã xác minh của một luồng. Giữ nguyên 90 giây của bản đầu vì CHƯA có
+ * số đo nào về độ trễ CapCut → hộp thư vendor; `buildOtpReader` in mốc thời gian
+ * mỗi lượt để lượt chạy thật cung cấp số đó (AGENTS.md §3).
+ */
+const OTP_WAIT_MS = 90_000;
 
 export interface StartedProfile {
   profileId: string;
@@ -51,6 +62,12 @@ export interface IEmailSourceApi {
   ): Promise<EmailPurchaseResult>;
   markConsumed(purchasedEmailId: string, accountId: string | null): void;
   /**
+   * Nhả hộp thư đã thuê về hàng chờ khi luồng chết trước khi dùng tới nó.
+   * Không có nó thì mỗi lỗi hạ tầng (launcher Multilogin tắt, proxy chết) là một
+   * lần mất tiền — đo 04/09/2026 với `songhajun652@gmail.com`.
+   */
+  release?(purchasedEmailId: string): void;
+  /**
    * Đọc OTP của mailbox đã mua. Tuỳ chọn để test cũ không phải khai thêm; thiếu
    * nó thì đường ĐĂNG KÝ không chạy được và engine sẽ báo lỗi rõ thay vì treo.
    */
@@ -66,8 +83,8 @@ export interface IProxyLeaseSource {
    * count. null means no known ceiling.
    */
   availableSlots?(): Promise<number | null>;
-  /** Narrows the source to the keys this run may use. */
-  configure?(options: { keys?: string[] }): void;
+  /** Narrows the source to the keys — và vùng — lượt chạy này được dùng. */
+  configure?(options: { keys?: string[]; region?: string }): void;
 }
 
 export interface IAccountSink {
@@ -85,6 +102,15 @@ export interface CapcutAccountResult {
   credits: number;
   creditsTotal: number;
   missing: string[];
+  /**
+   * Ưu đãi Pro đọc được từ DOM, dạng câu để hiển thị — ví dụ `Pro trial 7 ngày`
+   * hoặc `Không có ưu đãi`. `undefined` khi cổng trial không đọc được gì.
+   *
+   * Đây là nguồn của cột `subscription` trong bảng `accounts` và của cột
+   * Subscription khi xuất account (AGENTS.md §21); trước 04/09/2026 cổng trial chỉ
+   * LOG con số rồi bỏ, nên cột đó luôn rỗng.
+   */
+  subscription?: string;
   /** Account bị bỏ qua có chủ ý (ví dụ không có ưu đãi trial), không phải lỗi. */
   skipped?: boolean;
   /**
@@ -119,6 +145,14 @@ export interface CapcutTaskRunner {
     email: string;
     password: string;
     accountId: string;
+    /**
+     * true khi email của luồng vừa được thuê/mua trong lượt chạy này, nên account
+     * CHƯA tồn tại trên CapCut và phải đi thẳng đường ĐĂNG KÝ.
+     *
+     * Bắt buộc (không optional) có chủ ý: lỗi đã xảy ra chính là không ai truyền
+     * cờ tương ứng, nên để TypeScript ép mọi call site phải nói rõ.
+     */
+    isNewAccount: boolean;
     /** Nguồn OTP của riêng luồng này; chỉ đường ĐĂNG KÝ cần. */
     getOtp?: () => Promise<string>;
     /** `retryCount` của Dashboard, đã đổi sang số lượt quét lại nhiệm vụ. */
@@ -129,6 +163,12 @@ export interface CapcutTaskRunner {
      * làm bot gõ nhanh hơn khoảng an toàn.
      */
     pace?: { stepMinMs: number; stepMaxMs: number; typeMinMs: number; typeMaxMs: number };
+    /**
+     * Ô "Bỏ qua account không có trial" của Dashboard. Bắt buộc truyền (không
+     * optional) vì lỗi cũ đúng là KHÔNG ai truyền: engine đọc `options
+     * .skipWithoutTrial` nên cờ luôn `false` bất kể người dùng chọn gì.
+     */
+    skipWithoutTrial: boolean;
     log: (status: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR', step: string, message: string) => void;
   }): Promise<CapcutAccountResult>;
 }
@@ -209,6 +249,12 @@ interface ThreadRuntime {
    */
   port?: number | null;
   lease?: AcquiredProxyLease;
+  /**
+   * Bước cuối mà phần nhiệm vụ đã kết luận. `shutdownThread` phải TÔN TRỌNG nó:
+   * ghi đè bằng "Đã dừng sau khi kiểm tra kết nối" là xoá kết quả thật khỏi UI —
+   * câu đó là của thời engine chưa được cắm vào, khi luồng chỉ giữ browser rồi tắt.
+   */
+  outcomeStep?: string;
   /** Phiên Playwright của luồng này, chỉ có khi profile mở qua `BrowserLauncher`. */
   page?: CapcutPage;
   context?: CapcutContext;
@@ -224,12 +270,47 @@ function parseManualEntry(entry: string): { email: string; password?: string } |
 }
 
 /** Accepts host:port, host:port:user:pass. */
-function parseDirectProxy(entry: string): BrowserProxySettings | null {
-  const parts = entry.split(':').map((part) => part.trim());
+/**
+ * Các scheme proxy đọc được. `xcli` nhận `--proxy-type` là một trong số này,
+ * `api-v3` nhận qua `MultiloginProxyConnection.type`.
+ */
+const PROXY_SCHEMES = ['http', 'https', 'socks4', 'socks5'] as const;
+
+/**
+ * Đọc một dòng proxy trực tiếp. Hai định dạng, scheme là tuỳ chọn:
+ *
+ *   ip:port[:user[:pass]]                  → mặc định http
+ *   scheme://ip:port[:user[:pass]]         → scheme quyết định `type`
+ *
+ * Bản cũ chỉ `split(':')` và GHIM `type: 'http'`, nên `socks5://1.2.3.4:1080` ra
+ * `host='socks5'`, `port=NaN` → `null`. Mà `buildThreadPlans` loại dòng `null`
+ * KHÔNG LOG GÌ rồi gán proxy theo index ⇒ luồng thiếu proxy chạy bằng IP THẬT của
+ * máy, im lặng. Đó là lý do hàm này phải đọc được đủ định dạng, và lý do người
+ * gọi phải TỪ CHỐI cả lượt chạy khi có dòng trả `null` (xem `buildThreadPlans`).
+ *
+ * @returns `null` khi dòng không đọc được — người gọi KHÔNG được phép bỏ qua.
+ */
+export function parseDirectProxy(entry: string): BrowserProxySettings | null {
+  const raw = entry.trim();
+  if (!raw) return null;
+
+  let type: string = 'http';
+  let rest = raw;
+
+  const schemeMatch = /^([a-z0-9]+):\/\/(.*)$/i.exec(raw);
+  if (schemeMatch) {
+    const scheme = schemeMatch[1].toLowerCase();
+    if (!(PROXY_SCHEMES as readonly string[]).includes(scheme)) return null;
+    type = scheme;
+    rest = schemeMatch[2];
+  }
+
+  const parts = rest.split(':').map((part) => part.trim());
   const host = parts[0];
   const port = Number(parts[1]);
-  if (!host || !Number.isFinite(port) || port <= 0) return null;
-  const settings: BrowserProxySettings = { host, port, type: 'http' };
+  if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null;
+
+  const settings: BrowserProxySettings = { host, port, type };
   if (parts[2]) settings.username = parts[2];
   if (parts[3]) settings.password = parts[3];
   return settings;
@@ -334,12 +415,24 @@ export class AutomationRunService {
   }
 
   private async buildThreadPlans(config: AutomationRunConfigDTO): Promise<ThreadPlan[]> {
+    /**
+     * Chặn cấu hình chắc chắn hỏng TRƯỚC khi mua email. `start()` gọi hàm này rồi
+     * mới tới `launchThread`, nên nếu để browser fail ở dưới thì tiền hộp thư đã
+     * tiêu xong mới báo lỗi (audit 04/09/2026).
+     */
+    if (!isBrowserImplemented(config.browser)) {
+      throw new ProviderError(
+        'CONFIG_ERROR',
+        'Browser "' + config.browser + '" chưa được tích hợp nên không mở được profile nào. ' +
+          'Hiện chỉ dùng được: ' + IMPLEMENTED_BROWSER_RUNTIMES.join(', ') + '.'
+      );
+    }
+
     const directProxies = config.proxy.mode === 'direct'
-      ? config.proxy.entries.flatMap((entry) => {
-          const parsed = parseDirectProxy(entry);
-          return parsed ? [parsed] : [];
-        })
+      ? this.parseDirectProxyList(config.proxy.entries, config.threadCount)
       : [];
+
+    this.assertLauncherSupportsConfig(config, directProxies);
 
     let plans: ThreadPlan[];
     const source = config.emailSource;
@@ -408,6 +501,91 @@ export class AutomationRunService {
     }));
   }
 
+  /**
+   * Đọc danh sách proxy dán tay. NÉM khi có dòng hỏng hoặc khi không đủ proxy cho
+   * số luồng — KHÔNG bao giờ lặng lẽ chạy tiếp với ít proxy hơn.
+   *
+   * Bản cũ dùng `flatMap` loại dòng không đọc được rồi gán proxy theo index, nên
+   * dán 5 dòng mà 2 dòng có `socks5://` thì 3 luồng có proxy còn **2 luồng chạy
+   * bằng IP thật của máy**, không một dòng cảnh báo. Với công việc này thì lộ IP
+   * còn tệ hơn là không chạy, nên đây là chỗ duy nhất đúng để dừng lại.
+   *
+   * Danh sách RỖNG vẫn hợp lệ: đó là lựa chọn có chủ ý "chạy không proxy" và cũng
+   * là mặc định của Dashboard.
+   */
+  private parseDirectProxyList(entries: string[], threadCount: number): BrowserProxySettings[] {
+    if (entries.length === 0) return [];
+
+    const parsed: BrowserProxySettings[] = [];
+    const badLines: string[] = [];
+
+    entries.forEach((entry, index) => {
+      const proxy = parseDirectProxy(entry);
+      if (proxy) parsed.push(proxy);
+      else badLines.push('dòng ' + (index + 1));
+    });
+
+    if (badLines.length > 0) {
+      throw new ProviderError(
+        'CONFIG_ERROR',
+        'Không đọc được ' + badLines.length + ' dòng proxy (' + badLines.join(', ') + '). ' +
+          'Định dạng: ip:port[:user:pass] hoặc socks5://ip:port[:user:pass] ' +
+          '(scheme: http, https, socks4, socks5). Không chạy tiếp để tránh luồng đi bằng IP thật.'
+      );
+    }
+
+    if (parsed.length < threadCount) {
+      throw new ProviderError(
+        'CONFIG_ERROR',
+        'Chỉ có ' + parsed.length + ' proxy cho ' + threadCount + ' luồng. ' +
+          (threadCount - parsed.length) + ' luồng còn lại sẽ chạy bằng IP thật của máy — ' +
+          'thêm proxy hoặc giảm số luồng.'
+      );
+    }
+
+    return parsed;
+  }
+
+  /**
+   * Chặn hai tổ hợp mà launcher `xcli` không làm được, NGAY LÚC BẤM BẮT ĐẦU.
+   *
+   * `xcli` là mặc định (`settings.schema.ts`), và nó ném `CONFIG_ERROR` khi proxy
+   * có user/pass (`XcliLauncher.ts:139`) — trong khi placeholder Dashboard lại mời
+   * dán đúng `IP:PORT:USER:PASS`. Bản cũ để lỗi đó nổ ở giữa phiên, tức là SAU khi
+   * đã mua email; mỗi lần nổ là một hộp thư đã trả tiền.
+   *
+   * Headless thì KHÔNG chặn: nó là tuỳ chọn, không phải điều kiện chạy. Nhưng
+   * `xcli` bỏ qua nó im lặng (`XcliLauncher.ts:157`) nên phải nói ra, không thì
+   * người dùng bật Headless rồi thấy N cửa sổ Chrome bung lên mà không hiểu.
+   */
+  private assertLauncherSupportsConfig(
+    config: AutomationRunConfigDTO,
+    directProxies: BrowserProxySettings[]
+  ): void {
+    const launcher = this.deps.launcher?.();
+    if (!launcher || launcher.name !== 'xcli') return;
+
+    const authProxy = directProxies.find((proxy) => proxy.username || proxy.password);
+    if (authProxy) {
+      throw new ProviderError(
+        'CONFIG_ERROR',
+        'Đường mở browser "xcli" chưa hỗ trợ proxy có user/pass, mà danh sách proxy ' +
+          'đang có loại đó. Vào Settings đổi "Đường mở profile" sang "api-v3", ' +
+          'hoặc dùng proxy xác thực bằng IP.'
+      );
+    }
+
+    if (config.headless) {
+      this.log(
+        'WARNING',
+        'system',
+        'Browser',
+        'Đường mở profile "xcli" không nhận cờ headless nên cửa sổ browser vẫn hiện. ' +
+          'Muốn chạy ẩn thì đổi sang "api-v3" trong Settings.'
+      );
+    }
+  }
+
   private async launchThread(
     plan: ThreadPlan,
     config: AutomationRunConfigDTO
@@ -449,6 +627,9 @@ export class AutomationRunService {
         const message = err instanceof Error ? err.message : 'Không lấy được proxy.';
         this.log('ERROR', plan.email, 'Proxy', message, created.id);
         this.deps.accounts.update(created.id, { status: 'error', automationStep: 'Không lấy được proxy' });
+        if (plan.purchasedEmailId && this.deps.emails.release) {
+          this.deps.emails.release(plan.purchasedEmailId);
+        }
         return null;
       }
     }
@@ -510,6 +691,12 @@ export class AutomationRunService {
       if (runtime.lease) {
         await this.deps.proxies.release(runtime.lease);
       }
+      // Hộp thư chưa dùng tới thì trả về hàng chờ: nó đã được trả tiền và
+      // `order_id` vẫn đọc được OTP, nên lượt sau dùng lại thay vì thuê hộp mới.
+      if (plan.purchasedEmailId && this.deps.emails.release) {
+        this.deps.emails.release(plan.purchasedEmailId);
+        this.log('INFO', plan.email, 'Email', 'Đã nhả hộp thư về hàng chờ để lượt sau dùng lại', created.id);
+      }
       return null;
     }
   }
@@ -542,7 +729,10 @@ export class AutomationRunService {
       await this.deps.proxies.release(thread.lease);
     }
 
-    this.deps.accounts.update(thread.accountId, { status: 'done', automationStep: step });
+    this.deps.accounts.update(thread.accountId, {
+      status: 'done',
+      automationStep: thread.outcomeStep ?? step
+    });
     return stoppedProfile;
   }
 
@@ -642,19 +832,42 @@ export class AutomationRunService {
     if (!read || !purchasedEmailId) return undefined;
 
     return async () => {
-      const deadline = Date.now() + 90_000;
+      const startedAt = Date.now();
+      const deadline = startedAt + OTP_WAIT_MS;
+      const waited = (): string => String(Math.round((Date.now() - startedAt) / 1000)) + 's';
+      const say = (
+        status: 'INFO' | 'SUCCESS' | 'WARNING',
+        message: string
+      ): void => this.log(status, thread.email, 'OTP', message, thread.accountId);
+
       let lastError = '';
+      let attempt = 0;
+
+      say('INFO', 'Đang chờ mã xác minh CapCut về hộp thư đã thuê...');
+
       while (Date.now() < deadline && !this.stopRequested) {
+        attempt += 1;
         try {
           const code = await read.call(this.deps.emails, purchasedEmailId);
-          if (code) return code;
+          if (code) {
+            // Mốc thời gian này là số ĐO duy nhất cho câu hỏi "90 giây có đủ
+            // không?". Chưa có nó thì mọi lần nới hạn chỉ là phỏng đoán.
+            say('SUCCESS', 'Đã nhận mã xác minh sau ' + waited() + ' (' + attempt + ' lượt đọc)');
+            return code;
+          }
+          say('INFO', 'Chưa có mã sau ' + waited() + ', đọc lại sau 5 giây');
         } catch (err: unknown) {
           lastError = err instanceof Error ? err.message : String(err);
+          // Lỗi API mail phải hiện ra NGAY lượt đó: nuốt tới khi hết hạn thì
+          // không phân biệt được "mail chưa tới" với "API mail đang chết".
+          say('WARNING', 'Đọc mã thất bại ở lượt ' + attempt + ': ' + lastError);
         }
         await this.sleep(5_000);
       }
+
       throw new Error(
-        'Không lấy được OTP cho ' + thread.email + ' sau 90 giây' + (lastError ? ': ' + lastError : '')
+        'Không lấy được OTP cho ' + thread.email + ' sau ' + Math.round(OTP_WAIT_MS / 1000) +
+          ' giây' + (lastError ? ': ' + lastError : '')
       );
     };
   }
@@ -731,6 +944,12 @@ export class AutomationRunService {
         email: thread.email,
         password,
         accountId: thread.accountId,
+        /**
+         * Hộp thư vừa thuê từ vendor thì chưa từng có account CapCut nào dùng nó,
+         * nên phải đi thẳng đường ĐĂNG KÝ. Email dán tay ngược lại là tài khoản
+         * người dùng đã có, đi đường ĐĂNG NHẬP.
+         */
+        isNewAccount: thread.purchasedEmailId !== undefined,
         getOtp: this.buildOtpReader(thread),
         // Dashboard `retryCount` → số LƯỢT quét lại nhiệm vụ còn thiếu. Chặn trên
         // ở 4 để một account hỏng không giữ profile và proxy key cả tiếng.
@@ -744,6 +963,7 @@ export class AutomationRunService {
           typeMinMs: config.typeDelayMinMs,
           typeMaxMs: config.typeDelayMaxMs
         },
+        skipWithoutTrial: config.skipWithoutTrial,
         log: (status, step, message) => this.log(status, thread.email, step, message, thread.accountId)
       });
 
@@ -753,16 +973,23 @@ export class AutomationRunService {
       this.recordTaskProgress(thread, result.tasks);
 
       if (result.skipped) {
-        this.deps.accounts.update(thread.accountId, { automationStep: 'Bỏ qua — không đủ điều kiện' });
+        this.deps.accounts.update(thread.accountId, {
+          automationStep: 'Bỏ qua — không đủ điều kiện',
+          ...(result.subscription ? { subscription: result.subscription } : {})
+        });
         return;
       }
 
       const full = result.missing.length === 0;
+      // Giữ lại để `shutdownThread` không ghi đè kết quả thật bằng câu dừng máy.
+      thread.outcomeStep = full
+        ? 'Đủ ' + result.done + '/' + result.total + ' nhiệm vụ'
+        : 'Còn thiếu ' + result.missing.length + ' nhiệm vụ';
       this.deps.accounts.update(thread.accountId, {
         credit: result.credits,
-        automationStep: full
-          ? 'Đủ ' + result.done + '/' + result.total + ' nhiệm vụ'
-          : 'Còn thiếu ' + result.missing.length + ' nhiệm vụ'
+        automationStep: thread.outcomeStep,
+        // Chỉ ghi khi engine đọc được: ghi rỗng lên giá trị cũ là mất dữ liệu.
+        ...(result.subscription ? { subscription: result.subscription } : {})
       });
       this.log(
         full ? 'SUCCESS' : 'WARNING',
@@ -795,8 +1022,11 @@ export class AutomationRunService {
 
     // Narrow the proxy pool to the keys this run may use before asking how many
     // slots exist, so the ceiling reflects the operator's selection.
+    //
+    // `region` cũng phải đi cùng: `ProxyLeaseManager` đọc nó khi xin proxy mới,
+    // nhưng trước đây không ai chuyển nên khoá đó luôn rỗng (audit 04/09/2026).
     if (config.proxy.mode === 'proxykey' && this.deps.proxies.configure) {
-      this.deps.proxies.configure({ keys: config.proxy.keys });
+      this.deps.proxies.configure({ keys: config.proxy.keys, region: config.proxy.region });
     }
 
     const concurrency = await this.resolveConcurrency(config, plans.length);

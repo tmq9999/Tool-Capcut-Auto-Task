@@ -14,6 +14,12 @@ export class LazyProxyLeaseSource implements IProxyLeaseSource {
   private manager: IProxyLeaseSource | null = null;
   /** Keys the current run is allowed to use; empty means every key on the account. */
   private keys: string[] = [];
+  /**
+   * Vùng proxy của lượt chạy. `ProxyLeaseManager` đã đọc khoá này khi gọi
+   * `getNewProxy`, nhưng trước đây không ai chuyển xuống nên nó luôn `undefined`
+   * (audit 04/09/2026).
+   */
+  private region: string | undefined;
 
   constructor(
     private readonly secrets: SecretSource,
@@ -23,14 +29,18 @@ export class LazyProxyLeaseSource implements IProxyLeaseSource {
   /**
    * Narrows this source to a specific set of proxy keys for the next run. The
    * manager is rebuilt when the set changes so a run never inherits the previous
-   * run's key selection.
+   * run's key selection — cùng lý do đó cho `region`.
    */
-  configure(options: { keys?: string[] }): void {
+  configure(options: { keys?: string[]; region?: string }): void {
     const next = (options.keys ?? []).map((key) => key.trim()).filter((key) => key.length > 0);
+    const nextRegion = options.region?.trim() || undefined;
     const changed =
-      next.length !== this.keys.length || next.some((key, index) => key !== this.keys[index]);
+      next.length !== this.keys.length ||
+      next.some((key, index) => key !== this.keys[index]) ||
+      nextRegion !== this.region;
 
     this.keys = next;
+    this.region = nextRegion;
     if (changed) {
       this.manager = null;
     }
@@ -39,7 +49,7 @@ export class LazyProxyLeaseSource implements IProxyLeaseSource {
   private ensureManager(): IProxyLeaseSource {
     if (!this.manager) {
       const apiToken = this.secrets.readSimpleKey(KIOTPROXY_SERVICE_NAME);
-      this.manager = this.factory({ apiToken, keys: this.keys });
+      this.manager = this.factory({ apiToken, keys: this.keys, region: this.region });
     }
     return this.manager;
   }

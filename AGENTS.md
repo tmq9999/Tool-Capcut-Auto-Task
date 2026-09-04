@@ -1125,7 +1125,7 @@ jitter reintroduces `err_no 8001003` on reward claims.
 
 **Selectors change under you.**
 Before editing any selector, add a fixture of the DOM state that broke it under
-`tools/fixtures/` and an assertion in `npm run selectors` (currently 51). CSS is
+`tools/fixtures/` and an assertion in `npm run selectors` (currently 87). CSS is
 not loaded in those fixtures, so they verify selector resolution and `inert`
 containment only — never visibility or occlusion.
 

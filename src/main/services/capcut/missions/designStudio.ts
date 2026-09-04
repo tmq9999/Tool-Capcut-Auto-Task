@@ -28,6 +28,7 @@ import type { Page } from 'playwright-core';
 import { assertHittable, assertNotInert, dump, mustSee, StepError, waitNotInert } from '../diag';
 import { humanClick, pick, rand, waitEnabled } from '../human';
 import type { MissionGroup } from '../missionRunner';
+import { closeBlockingPricingModal, ensurePageUsable } from '../overlays';
 import { fillEditor, stepChatWithAgent, stepInspirationTemplate } from '../steps';
 import type { CapcutMissionEnv } from '../types';
 import { URLS } from '../urls';
@@ -117,6 +118,13 @@ async function hideChatPanel(dp: Page, env: CapcutMissionEnv): Promise<void> {
 }
 
 async function editOnCanvas(dp: Page, env: CapcutMissionEnv): Promise<void> {
+  /**
+   * Bảng giá "Choose your plan" phủ kín trang thì Send không tới đích và bước
+   * này báo `canvas_send_no_effect` — đo 04/09/2026 06:29, dump có
+   * `subscriptionModal-wrapper` `display: block`. Năng lực đóng bảng giá trước
+   * đây chỉ nằm trong Video Studio nên luồng này không có gì dẹp nó.
+   */
+  await closeBlockingPricingModal(dp, env.log);
   await hideChatPanel(dp, env);
   await waitCanvasReady(dp);
   // Click vào VÙNG editor, không phải thẻ <canvas> đầu tiên (xem waitCanvasReady).
@@ -201,10 +209,28 @@ export const designStudioGroup: MissionGroup = {
   ],
   proofTimeoutMs: 90000,
   async act(env: CapcutMissionEnv, need: Set<string>): Promise<void> {
+    /**
+     * Dẹp bảng giá TRƯỚC khi làm gì: nó có thể còn mở từ nhóm nhiệm vụ trước
+     * (Video Studio bấm card upsell Pro), và khi mask phủ trang thì mọi bước
+     * dưới đây trượt im lặng rồi timeout 90 giây ở một chỗ khác.
+     */
+    await ensurePageUsable(env.page, env.log);
+
     // 1. Inspiration mở tab workspace riêng của nó.
     let inspirationTab: Page | null = null;
     if (need.has('capcut_web_inspiration_generate_done')) {
       inspirationTab = await stepInspirationTemplate(env);
+    }
+
+    /**
+     * Tab MỚI của CapCut hay bung modal khảo sát onboarding — đo 04/09/2026 trên
+     * `markusmkel7097`: tab do nhiệm vụ tự mở có `lv-modal-mask` `display: block`
+     * kèm "best describes you", và cả 4 nhiệm vụ nhóm này báo "Không thấy panel
+     * chat AI agent". `runGroup` chỉ dẹp được trên `env.page`, không với tới tab
+     * này, nên phải dẹp ngay tại đây.
+     */
+    if (inspirationTab) {
+      await ensurePageUsable(inspirationTab, env.log);
     }
 
     // 2. Chat làm được trên tab nào cũng xong.
@@ -230,6 +256,8 @@ export const designStudioGroup: MissionGroup = {
     await dp.bringToFront().catch(() => {});
     await dp.goto(URLS.aiDesign, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await dp.waitForTimeout(rand(6000, 9000));
+    // Trang vừa load lại thì modal có thể mọc lại — dẹp trước khi upload.
+    await ensurePageUsable(dp, env.log);
 
     // Edit on canvas cần có ảnh trên canvas -> upload cả khi chỉ thiếu canvas.
     await uploadToCanvas(dp, env);

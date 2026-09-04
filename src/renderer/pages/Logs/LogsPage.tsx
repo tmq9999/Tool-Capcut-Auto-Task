@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Pause, Play, Trash2, AlertCircle } from 'lucide-react';
 import { AppHeader } from '@renderer/layouts/AppHeader';
 import { Button } from '@renderer/components/ui/Button';
@@ -38,9 +38,25 @@ export const LogsPage: React.FC = () => {
 
   useEffect(() => {
     controller.attach();
-    void controller.load();
     return () => controller.dispose();
   }, [controller]);
+
+  /**
+   * Lọc `level`/`email` chạy bằng SQL (`LogRepository.ts:55-62`) chứ không lọc
+   * trên mảng đã tải: bộ đệm chỉ giữ 500 dòng mới nhất, mà DB có 1573 dòng —
+   * dòng ERROR thứ 800 không nằm trong bộ đệm nên lọc client báo "không có bản
+   * ghi phù hợp" trong khi lỗi vẫn nằm trong DB (đo 04/09/2026).
+   *
+   * Hoãn 250ms vì `emailFilter` cũng đổi theo từng lần gõ ở các bản sau; một
+   * lượt `logs.list` cho mỗi ký tự là thừa. Dọn timer khi unmount để không gọi
+   * `load()` trên controller đã `dispose()`.
+   */
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void controller.load({ level: filters.levelFilter, email: filters.emailFilter });
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [controller, filters.levelFilter, filters.emailFilter]);
 
   const availableEmails = useMemo(() => {
     const unique = new Set<string>();
@@ -50,26 +66,36 @@ export const LogsPage: React.FC = () => {
     return Array.from(unique);
   }, [state.logs]);
 
+  /**
+   * Chỉ còn lọc `searchQuery` phía client: `LogFilterSchema` không có khoá tìm
+   * kiếm toàn văn (kiểm `log.schema.ts` 04/09/2026 — chỉ có `level`, `email`,
+   * `page`, `pageSize`), nên không có gì để đẩy xuống SQL. `level`/`email` đã
+   * lọc bằng SQL ở effect trên; lọc lại ở đây là lọc hai lần.
+   */
   const filteredLogs = useMemo(() => {
     const query = filters.searchQuery.trim().toLowerCase();
-    return state.logs.filter((log) => {
-      const matchesSearch =
-        query.length === 0 ||
+    if (query.length === 0) return state.logs;
+    return state.logs.filter(
+      (log) =>
         log.message.toLowerCase().includes(query) ||
         log.email.toLowerCase().includes(query) ||
-        log.step.toLowerCase().includes(query);
+        log.step.toLowerCase().includes(query)
+    );
+  }, [state.logs, filters.searchQuery]);
 
-      const matchesLevel =
-        filters.levelFilter === 'ALL' ||
-        log.status.toUpperCase() === filters.levelFilter.toUpperCase();
+  /**
+   * "Auto Scroll" — ô tích này trước đây chỉ đổi state, không cuộn gì (audit
+   * 04/09/2026). Dòng MỚI NHẤT được `logsController` chèn lên ĐẦU danh sách
+   * (`logs: [entry, ...prev]`), nên "theo dòng mới" là cuộn về ĐỈNH, không phải
+   * xuống đáy. Chỉ cuộn khi ô được tích, để người đang đọc log cũ không bị giật.
+   */
+  const gridScrollRef = useRef<HTMLDivElement>(null);
 
-      const matchesEmail =
-        filters.emailFilter === 'ALL' ||
-        log.email.toLowerCase() === filters.emailFilter.toLowerCase();
-
-      return matchesSearch && matchesLevel && matchesEmail;
-    });
-  }, [state.logs, filters]);
+  useEffect(() => {
+    if (!filters.autoScroll) return;
+    const el = gridScrollRef.current;
+    if (el) el.scrollTop = 0;
+  }, [filteredLogs, filters.autoScroll]);
 
   const handleTogglePause = (): void => {
     const nextPaused = !state.isPaused;
@@ -131,6 +157,7 @@ export const LogsPage: React.FC = () => {
           data={filteredLogs}
           columns={logsColumns}
           getRowId={(row) => row.id}
+          scrollRef={gridScrollRef}
           className="bg-[#0d1117]"
           tableClassName="bg-[#0d1117]"
           emptyText={

@@ -10,7 +10,14 @@
  * provider stack, không gọi service trực tiếp — nếu bất kỳ mắt xích IPC nào sai
  * thì bài này phải fail.
  *
- * CHẠY:  node scripts/live-capcut-run.mjs
+ * CHẠY:  node scripts/live-capcut-run.mjs [--email=...] [--minutes=45] [--threads=1]
+ *
+ *   --email=custom       (mặc định) sinh địa chỉ trên domain catch-all — MIỄN PHÍ
+ *   --email=api:gmail94  thuê hộp thư thật từ gmail94 — CÓ TRẢ PHÍ (1.000đ/hộp,
+ *                        dịch vụ `capcut`), rồi ĐĂNG KÝ account CapCut mới
+ *   --threads=N          số luồng song song. Mỗi luồng tốn 1 hộp thư và giữ 1
+ *                        proxy key, nên N nhân lên cả chi phí lẫn rủi ro.
+ *
  * Yêu cầu: `npm run build` xong, Multilogin đang bật, credentials đã lưu trong app.
  */
 import { spawn } from 'node:child_process';
@@ -20,8 +27,49 @@ import { chromium } from 'playwright-core';
 
 const PORT = 9333;
 const ELECTRON = path.resolve('node_modules/electron/dist/electron.exe');
+
+/**
+ * Nguồn email của lượt chạy. `api` KHÔNG gửi `service`: slug OTP do main process
+ * ghim (`CAPCUT_OTP_SERVICE`), nên harness này không thể vô tình thuê sai dịch vụ.
+ */
+function parseEmailSource(argv) {
+  const flag = argv.find((arg) => arg.startsWith('--email='));
+  const raw = flag ? flag.slice('--email='.length) : 'custom';
+
+  if (raw === 'custom') return { mode: 'custom' };
+
+  const api = /^api:(gmail94|dongvanfb)$/.exec(raw);
+  if (api) return { mode: 'api', provider: api[1] };
+
+  throw new Error(
+    `--email="${raw}" không hợp lệ. Dùng: custom | api:gmail94 | api:dongvanfb`
+  );
+}
+
+const emailSource = parseEmailSource(process.argv.slice(2));
+
+/** Hạn chờ của harness, phút. Xem chú thích ở `deadline`. */
+const LIMIT_MINUTES = (() => {
+  const flag = process.argv.slice(2).find((arg) => arg.startsWith('--minutes='));
+  const value = flag ? Number(flag.slice('--minutes='.length)) : 45;
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`--minutes="${flag}" không hợp lệ: phải là số phút > 0`);
+  }
+  return value;
+})();
+
+/** Số luồng song song. Xem `docs/MERGE-PLAN.md` Pha 5/6 — đường chưa nghiệm thu. */
+const THREADS = (() => {
+  const flag = process.argv.slice(2).find((arg) => arg.startsWith('--threads='));
+  const value = flag ? Number(flag.slice('--threads='.length)) : 1;
+  if (!Number.isInteger(value) || value < 1 || value > 20) {
+    throw new Error(`--threads="${flag}" không hợp lệ: phải là số nguyên 1..20`);
+  }
+  return value;
+})();
+
 const RUN_CONFIG = {
-  threadCount: 1,
+  threadCount: THREADS,
   browser: 'multilogin',
   headless: false,
   retryCount: 3,
@@ -30,8 +78,7 @@ const RUN_CONFIG = {
   typeDelayMinMs: 50,
   typeDelayMaxMs: 150,
   module: 'credit',
-  // Domain catch-all của chính chủ: địa chỉ được SINH RA, không phải mua.
-  emailSource: { mode: 'custom' },
+  emailSource,
   proxy: { mode: 'proxykey', keys: [] },
   password: { mode: 'random', length: 12, uppercase: true, numbers: true, special: false },
   testDurationMs: 10_000
@@ -51,6 +98,10 @@ async function attach() {
 }
 
 async function main() {
+  console.log('[LIVE] nguồn email:', JSON.stringify(emailSource), '| hạn harness:', LIMIT_MINUTES, 'phút');
+  if (emailSource.mode === 'api') {
+    console.log('[LIVE] ⚠️  Chế độ API sẽ THUÊ hộp thư thật — thao tác có trả phí.');
+  }
   console.log('[LIVE] mở app:', ELECTRON);
   const child = spawn(ELECTRON, ['.', `--remote-debugging-port=${PORT}`], {
     stdio: ['ignore', 'inherit', 'inherit'],
@@ -80,7 +131,7 @@ async function main() {
     window.electronAPI.run.onProgress((p) => window.__liveProgress(p));
   });
 
-  console.log('[LIVE] gọi run.start với threadCount=1...');
+  console.log(`[LIVE] gọi run.start với threadCount=${THREADS}...`);
   const started = await page.evaluate(async (config) => {
     const res = await window.electronAPI.run.start(config);
     return res;
@@ -94,7 +145,13 @@ async function main() {
   }
 
   // Chờ tới khi phiên dừng. Engine chạy đủ 12 nhiệm vụ nên để hạn rộng.
-  const deadline = Date.now() + 30 * 60_000;
+  /**
+   * Hạn của HARNESS, không phải của engine. Đo 04/09/2026: lượt 1 account chạy
+   * tới giữa lượt quét 2/4 thì cán mốc 30 phút và app bị đóng khi engine còn
+   * đang làm — nên không có dòng "CapCut ghi nhận x/12" nào để đọc. Engine tự
+   * chặn trên ở `maxRounds`, vậy hạn ở đây chỉ để không treo vô hạn.
+   */
+  const deadline = Date.now() + LIMIT_MINUTES * 60_000;
   let last = '';
   while (Date.now() < deadline) {
     const progress = await page

@@ -21,6 +21,7 @@ export const EditAccountDrawer: React.FC<EditAccountDrawerProps> = ({
 }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [emailPassword, setEmailPassword] = useState('');
   const [provider, setProvider] = useState('Gmail');
   const [proxy, setProxy] = useState('');
   const [browserProfile, setBrowserProfile] = useState('');
@@ -32,6 +33,7 @@ export const EditAccountDrawer: React.FC<EditAccountDrawerProps> = ({
     if (account) {
       setEmail(account.email || '');
       setPassword(account.password || '');
+      setEmailPassword(account.emailPassword || '');
       setProvider(account.provider || 'Gmail');
       setProxy(account.proxy || '');
       setBrowserProfile(account.browserProfile || '');
@@ -49,6 +51,7 @@ export const EditAccountDrawer: React.FC<EditAccountDrawerProps> = ({
       ...account,
       email,
       password,
+      emailPassword,
       provider,
       proxy,
       browserProfile,
@@ -92,14 +95,31 @@ export const EditAccountDrawer: React.FC<EditAccountDrawerProps> = ({
           />
         </div>
 
-        <div className="space-y-1">
-          <label className="font-label-xs text-label-xs text-on-surface-variant">Password</label>
-          <Input
-            type="password"
-            placeholder="••••••••"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
+        <div className="grid grid-cols-2 gap-md">
+          <div className="space-y-1">
+            {/* Cột #2 của bản xuất (AGENTS §21). Để trống = giữ mật khẩu đang lưu. */}
+            <label className="font-label-xs text-label-xs text-on-surface-variant">
+              Password CapCut
+            </label>
+            <Input
+              type="password"
+              placeholder="••••••••"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
+
+          <div className="space-y-1">
+            <label className="font-label-xs text-label-xs text-on-surface-variant">
+              Password hộp thư
+            </label>
+            <Input
+              type="password"
+              placeholder="••••••••"
+              value={emailPassword}
+              onChange={(e) => setEmailPassword(e.target.value)}
+            />
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-md">

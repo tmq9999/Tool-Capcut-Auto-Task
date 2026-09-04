@@ -1,0 +1,78 @@
+# =============================================================================
+# ĐÓNG GÓI AUTOMANAGER — electron-builder
+# =============================================================================
+# Hai package BẮT BUỘC nằm ngoài asar, và cả hai đều đã có lý do đo được:
+#
+#   better-sqlite3  — native addon (.node). Trong asar thì `bindings` không
+#                     resolve được và app chết ngay lúc mở DB.
+#   playwright-core — `utilsBundle.js` có dynamic import native tuỳ chọn
+#                     (`kerberos`); đó cũng là lý do nó bị loại khỏi bundle
+#                     Rollup trong `vite.config.ts` (xem `notBundle`).
+#
+# Engine KHÔNG tải browser của Playwright: nó `connectOverCDP` vào browser do
+# Multilogin mở, nên bản đóng gói không cần Chromium kèm theo.
+# =============================================================================
+
+appId: com.automanager.desktop
+productName: AutoManager
+copyright: AutoManager
+
+directories:
+  output: release
+  buildResources: build
+
+# Chỉ đóng gói thành phẩm build + manifest. Không đưa src/, tools/, scripts/ vào.
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+
+asarUnpack:
+  - node_modules/better-sqlite3/**
+  - node_modules/bindings/**
+  - node_modules/file-uri-to-path/**
+  - node_modules/playwright-core/**
+
+# electron-builder tự rebuild native dep theo ABI của Electron đích — nhưng
+# @electron/rebuild coi module "đã build sẵn" là xong và KHÔNG build lại. Lượt
+# 04/09/2026: chạy `npm run rebuild:node` cho test xong đóng gói luôn, nên bản
+# đóng gói mang `better_sqlite3.node` ABI 137 (Node) trong khi Electron 35 cần
+# 133 — app chết ngay ở bước DB_CONNECT. Vì vậy script `dist` gọi
+# `npm run rebuild:electron` TRƯỚC electron-builder; cờ này chỉ là lớp thứ hai.
+npmRebuild: true
+
+win:
+  # `build/icon.ico` sinh bằng `node scripts/make-icon.mjs` (6 kích cỡ, không cần
+  # thư viện ngoài). Thiếu file này thì electron-builder dùng icon Electron mặc
+  # định và bản cài trông như một app lạ.
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: AutoManager
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+
+# =============================================================================
+# KÝ SỐ (Authenticode)
+# =============================================================================
+# Đo 04/09/2026: máy này KHÔNG có certificate ký code nào. `Cert:\CurrentUser\My`
+# chỉ có certificate MITM của Fiddler (`O=DO_NOT_TRUST`) — dùng để chặn HTTPS,
+# tuyệt đối không phải để ký code.
+#
+# CỐ Ý không tạo self-signed: nó KHÔNG làm SmartScreen bớt cảnh báo (Windows chỉ
+# tin certificate có chuỗi tin cậy tới một CA được công nhận), mà lại làm bản cài
+# trông "đã ký" — tức là một lời hứa sai.
+#
+# Muốn ký thật thì cần một Authenticode certificate (OV hoặc EV) rồi đặt:
+#   CSC_LINK=<đường dẫn .pfx hoặc base64>
+#   CSC_KEY_PASSWORD=<mật khẩu>
+# electron-builder tự dùng hai biến đó, không cần sửa file này.

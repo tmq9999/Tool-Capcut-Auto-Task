@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { CAPCUT_OTP_SERVICE } from './provider.schema';
+import { ProxyRegionChoiceEnum } from './automation.schema';
 
 export const ExportFieldEnum = z.enum([
   'email',
@@ -82,10 +84,23 @@ export const AutomationConfigSettingsSchema = z.object({
   // `trial`/`team` giữ trong enum để dữ liệu cũ còn parse được, nhưng UI khoá lại
   // và main process từ chối chạy — xem AGENTS.md §30.
   module: z.enum(['trial', 'team', 'credit']).default('credit'),
+  /** Bỏ qua account không có trial Pro ≥ 7 ngày. Xem `AutomationRunConfigSchema`. */
+  skipWithoutTrial: z.boolean().default(false),
   proxyMode: z.enum(['direct', 'proxykey']).default('direct'),
+  /**
+   * Vùng KiotProxy cho chế độ proxy key. `random` = không chỉ định vùng. Proxy dán
+   * tay (`http://ip:port`) không có vùng nên khoá này không ảnh hưởng.
+   */
+  proxyRegion: ProxyRegionChoiceEnum.default('random'),
   emailSourceMode: z.enum(['manual', 'api', 'custom']).default('manual'),
   emailApiProvider: z.enum(['gmail94', 'dongvanfb']).default('gmail94'),
-  otpService: z.string().min(1).max(64).default('facebook'),
+  /**
+   * Slug dịch vụ gmail94. KHÔNG còn là nút điều chỉnh: Dashboard luôn ghi
+   * `CAPCUT_OTP_SERVICE` (xem `automationConfig.toPersistedConfig`). Khoá vẫn ở
+   * đây vì schema là `.strict()` — bỏ khoá thì row đã lưu trên máy người dùng
+   * parse thất bại và mất sạch nút điều chỉnh.
+   */
+  otpService: z.string().min(1).max(64).default(CAPCUT_OTP_SERVICE),
   passwordMode: z.enum(['custom', 'random']).default('random'),
   passwordLength: z.number().int().min(6).max(64).default(12),
   includeUppercase: z.boolean().default(true),
@@ -101,10 +116,12 @@ export const AutomationConfigSettingsSchema = z.object({
   typeDelayMinMs: 50,
   typeDelayMaxMs: 150,
   module: 'credit',
+  skipWithoutTrial: false,
   proxyMode: 'direct',
+  proxyRegion: 'random',
   emailSourceMode: 'manual',
   emailApiProvider: 'gmail94',
-  otpService: 'facebook',
+  otpService: CAPCUT_OTP_SERVICE,
   passwordMode: 'random',
   passwordLength: 12,
   includeUppercase: true,

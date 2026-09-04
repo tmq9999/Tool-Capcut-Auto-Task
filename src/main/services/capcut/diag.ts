@@ -65,6 +65,47 @@ export function getDumpDir(): string {
   return dumpRoot ?? path.resolve('.debug');
 }
 
+/**
+ * Số dump tối đa giữ lại trong thư mục hiện trường.
+ *
+ * `docs/MERGE-PLAN.md` yêu cầu ở Pha 1 và trong bảng rủi ro, nhưng chưa bao giờ
+ * được làm: mỗi lỗi thêm một cặp `.png` + `.html` và không ai xoá. Thư mục này
+ * nằm trong `userData` của người dùng nên phải có trần.
+ */
+export const MAX_DUMPS = 50;
+
+/**
+ * Giữ lại `keep` dump mới nhất, xoá phần cũ hơn.
+ *
+ * Đếm theo DUMP (cặp `.png` + `.html` cùng tên), không theo file — nếu đếm theo
+ * file thì trần thực tế chỉ còn một nửa. Tên dump có tiền tố số tăng dần
+ * (`NNN_label`) nên sắp theo tên là sắp theo thời gian.
+ *
+ * KHÔNG ném ra ngoài: dump là để điều tra sự cố, nó không được tự gây sự cố.
+ * File đang bị Explorer/antivirus giữ là chuyện thường trên Windows.
+ */
+export function pruneDumps(dir: string, keep: number = MAX_DUMPS): void {
+  try {
+    const names = [...new Set(
+      fs.readdirSync(dir)
+        .filter((file) => /\.(png|html)$/i.test(file))
+        .map((file) => file.replace(/\.(png|html)$/i, ''))
+    )].sort();
+
+    for (const name of names.slice(0, Math.max(0, names.length - keep))) {
+      for (const ext of ['.png', '.html']) {
+        try {
+          fs.unlinkSync(path.join(dir, name + ext));
+        } catch {
+          // Một file không xoá được không được phép chặn phần còn lại.
+        }
+      }
+    }
+  } catch {
+    // Thư mục chưa tồn tại hoặc không đọc được — không có gì để dọn.
+  }
+}
+
 /** Ảnh + DOM đầy đủ vào thư mục dump; trả về tên file (không đuôi) hoặc null. */
 export async function dump(page: Page, label: string): Promise<string | null> {
   try {
@@ -76,6 +117,8 @@ export async function dump(page: Page, label: string): Promise<string | null> {
     await page.screenshot({ path: path.join(dir, `${name}.png`) }).catch(() => {});
     const html = await page.content().catch(() => null);
     if (html) fs.writeFileSync(path.join(dir, `${name}.html`), html);
+    // Dọn SAU khi ghi xong: dump vừa tạo phải nằm trong số được giữ lại.
+    pruneDumps(dir);
     return name;
   } catch {
     return null;

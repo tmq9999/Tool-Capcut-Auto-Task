@@ -76,7 +76,9 @@ describe('Repository Layer Behavior Suite (Task 6 RED)', () => {
         typeDelayMinMs: 50,
         typeDelayMaxMs: 150,
         module: 'trial',
+        skipWithoutTrial: false,
         proxyMode: 'direct',
+        proxyRegion: 'random',
         emailSourceMode: 'manual',
         emailApiProvider: 'gmail94',
         otpService: 'facebook',
@@ -213,6 +215,44 @@ describe('Repository Layer Behavior Suite (Task 6 RED)', () => {
   });
 
   describe('AccountRepository', () => {
+    /**
+     * Bộ lọc "Ngày tạo" trên toolbar Accounts trước đây chỉ đổi state rồi bật chip
+     * "Active Filters" — không một dòng SQL nào dùng tới (audit 04/09/2026).
+     * `created_at` lưu dạng `YYYY-MM-DD HH:MM:SS` UTC nên repo phải tự đổi mốc ISO
+     * sang đúng dạng đó, không thì phép so chuỗi trượt sạch.
+     */
+    it('lọc theo createdFrom, đổi mốc ISO sang dạng ngày của SQLite', () => {
+      if (!db) throw new Error('DB is not initialized');
+      const repo = new AccountRepository(db);
+
+      repo.createAccount({ id: 'old', email: 'old@x.com', emailProvider: 'gmail94' });
+      repo.createAccount({ id: 'new', email: 'new@x.com', emailProvider: 'gmail94' });
+      db.prepare("UPDATE accounts SET created_at = '2026-08-01 10:00:00' WHERE id = 'old'").run();
+      db.prepare("UPDATE accounts SET created_at = '2026-09-04 10:00:00' WHERE id = 'new'").run();
+
+      const result = repo.listAccounts({
+        page: 1,
+        pageSize: 50,
+        createdFrom: '2026-09-01T00:00:00.000Z'
+      });
+
+      expect(result.total).toBe(1);
+      expect(result.items[0].id).toBe('new');
+    });
+
+    it('xuất file dùng CHUNG bộ lọc ngày với danh sách', () => {
+      if (!db) throw new Error('DB is not initialized');
+      const repo = new AccountRepository(db);
+
+      repo.createAccount({ id: 'old', email: 'old@x.com', emailProvider: 'gmail94' });
+      repo.createAccount({ id: 'new', email: 'new@x.com', emailProvider: 'gmail94' });
+      db.prepare("UPDATE accounts SET created_at = '2026-08-01 10:00:00' WHERE id = 'old'").run();
+
+      const rows = repo.queryAccountsForExport({ createdFrom: '2026-09-01T00:00:00.000Z' });
+
+      expect(rows.map((r) => r.id)).toEqual(['new']);
+    });
+
     it('creates, gets, and maps AccountListItemDTO with boolean indicators and zero plaintext secrets', () => {
       if (!db) throw new Error('DB is not initialized');
       const repo = new AccountRepository(db);

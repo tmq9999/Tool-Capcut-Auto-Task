@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useSyncExternalStore } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { RefreshCw, Search, Upload, Download, Trash2, AlertCircle } from 'lucide-react';
 import { RowSelectionState } from '@tanstack/react-table';
 import { AppHeader } from '@renderer/layouts/AppHeader';
@@ -61,6 +62,7 @@ const OFFLINE_BRIDGE: IDashboardBridge = {
 };
 
 export const DashboardPage: React.FC = () => {
+  const navigate = useNavigate();
   const controller = useMemo(() => {
     const api = window.electronAPI;
     const bridge: IDashboardBridge = api
@@ -190,6 +192,7 @@ export const DashboardPage: React.FC = () => {
 
         <DashboardActionBar
           accountCount={state.totalAccounts}
+          loadedCount={state.accounts.length}
           proxyCount={proxyCount}
           browserName={state.config.browser}
           isRunning={isRunning}
@@ -240,10 +243,19 @@ export const DashboardPage: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-1.5">
+                {/*
+                  Hai nút này trước đây KHÔNG có `onClick` (audit 04/09/2026).
+                  Xuất file có một đường duy nhất — hộp thoại ở trang Tài khoản, nơi
+                  chọn được phạm vi/định dạng/cột — nên nút ở đây dẫn sang đó thay vì
+                  mở thêm một đường xuất thứ hai. Nhập account theo file thì chưa có
+                  ở bất cứ đâu, nên khoá lại kèm ghi chú thay vì hứa hão.
+                */}
                 <Button
                   variant="surface"
                   size="sm"
                   icon={<Upload className="w-3 h-3" />}
+                  disabled
+                  title="Nhập account từ file chưa hỗ trợ. Dán danh sách ở ô Nguồn email (Manual) để chạy."
                 >
                   Import
                 </Button>
@@ -251,6 +263,8 @@ export const DashboardPage: React.FC = () => {
                   variant="surface"
                   size="sm"
                   icon={<Download className="w-3 h-3" />}
+                  onClick={() => navigate('/accounts?export=1')}
+                  title="Mở hộp thoại xuất ở trang Tài khoản"
                 >
                   Export
                 </Button>

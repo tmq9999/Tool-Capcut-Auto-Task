@@ -15,6 +15,7 @@ const baseConfig = {
   typeDelayMinMs: 50,
   typeDelayMaxMs: 150,
   module: 'trial' as const,
+  skipWithoutTrial: false,
   emailSource: { mode: 'api' as const, provider: 'gmail94' as const, service: 'facebook' },
   proxy: { mode: 'proxykey' as const },
   password: { mode: 'random' as const, length: 12, uppercase: true, numbers: true, special: false }
@@ -114,11 +115,24 @@ describe('chọn riêng proxy key để chạy', () => {
     expect(result.success).toBe(false);
   });
 
-  it('vẫn nhận region kèm danh sách key', () => {
+  it('nhận vùng KiotProxy kèm danh sách key', () => {
+    const result = AutomationRunConfigSchema.safeParse({
+      ...baseConfig,
+      proxy: { mode: 'proxykey', keys: ['K1'], region: 'bac' }
+    });
+    expect(result.success).toBe(true);
+  });
+
+  /**
+   * `random` là lựa chọn trên UI, KHÔNG phải giá trị gửi đi: nó nghĩa là không gửi
+   * khoá `region` để KiotProxy tự chọn. Contract từ chối nó để không ai gửi một
+   * chuỗi mà API không hiểu.
+   */
+  it('từ chối "random" trong contract vì đó không phải một vùng thật', () => {
     const result = AutomationRunConfigSchema.safeParse({
       ...baseConfig,
       proxy: { mode: 'proxykey', keys: ['K1'], region: 'random' }
     });
-    expect(result.success).toBe(true);
+    expect(result.success).toBe(false);
   });
 });

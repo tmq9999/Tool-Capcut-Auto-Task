@@ -38,6 +38,7 @@ function purchasedRow(index: number, provider: 'gmail94' | 'customdomain' = 'gma
 class StubEmailSource implements IEmailSourceApi {
   public purchaseCalls: Array<{ provider: string; count: number }> = [];
   public consumed: Array<{ id: string; accountId: string | null }> = [];
+  public released: string[] = [];
   public available = 0;
   public failures: string[] = [];
 
@@ -52,6 +53,10 @@ class StubEmailSource implements IEmailSourceApi {
   markConsumed(id: string, accountId: string | null): void {
     this.consumed.push({ id, accountId });
   }
+
+  release(id: string): void {
+    this.released.push(id);
+  }
 }
 
 class StubProxySource implements IProxyLeaseSource {
@@ -63,11 +68,14 @@ class StubProxySource implements IProxyLeaseSource {
   public keyCount: number | null = null;
   public peakConcurrent = 0;
   public configuredKeys: string[][] = [];
+  /** Vùng KiotProxy của lượt chạy — trước đây không ai chuyển xuống. */
+  public configuredRegions: Array<string | undefined> = [];
   private live = 0;
   private counter = 0;
 
-  configure(options: { keys?: string[] }): void {
+  configure(options: { keys?: string[]; region?: string }): void {
     this.configuredKeys.push(options.keys ?? []);
+    this.configuredRegions.push(options.region);
     // An explicit key list is the ceiling for this run.
     if ((options.keys ?? []).length > 0) {
       this.keyCount = (options.keys ?? []).length;
@@ -169,6 +177,7 @@ function baseConfig(overrides: Partial<AutomationRunConfigDTO> = {}): Automation
     typeDelayMinMs: 0,
     typeDelayMaxMs: 0,
     module: 'trial',
+    skipWithoutTrial: false,
     emailSource: { mode: 'api', provider: 'gmail94', service: 'facebook' },
     proxy: { mode: 'proxykey' },
     password: { mode: 'random', length: 12, uppercase: true, numbers: true, special: false },
@@ -340,6 +349,23 @@ describe('AutomationRunService failure handling', () => {
     expect(proxySource.released).toEqual(['10.0.0.1']);
   });
 
+  /**
+   * Hộp thư đã thuê là tiền đã trả. Lượt 04/09/2026: `xcli profile-quick` lỗi vì
+   * launcher Multilogin đã tắt, mà `markConsumed` đã chạy từ lúc tạo account —
+   * hộp thư bị đánh dấu đã tiêu trong khi chưa dùng gì, nên lượt sau lại đi thuê
+   * hộp mới. `order_id` vẫn còn nên hộp cũ hoàn toàn dùng lại được.
+   */
+  it('nhả lại hộp thư đã thuê khi browser không mở được', async () => {
+    emailSource.available = 1;
+    browser.failAtCall = 1;
+    const service = createService();
+
+    await service.start(baseConfig({ threadCount: 1 }));
+    await service.waitForCompletion();
+
+    expect(emailSource.released).toEqual(['pe-1']);
+  });
+
   it('refuses to start when no mailbox could be obtained', async () => {
     emailSource.available = 0;
     emailSource.failures = ['hết hàng'];
@@ -406,7 +432,158 @@ describe('AutomationRunService manual email source', () => {
   });
 });
 
+describe('AutomationRunService chặn cấu hình chắc chắn hỏng TRƯỚC khi tiêu tiền', () => {
+  /**
+   * Audit 04/09/2026: GoLogin/GPM/Camoufox/Patchright không có một file
+   * implementation nào (`providerStack.ts:140-143` trả `UnsupportedBrowserRuntime`),
+   * nhưng dropdown Dashboard không khoá gì. Tệ hơn là THỨ TỰ: `start()` mua email
+   * TRƯỚC rồi `launchThread` mới fail — chọn GoLogin + nguồn API là gọi API mua N
+   * hộp thư rồi mới báo lỗi browser.
+   */
+  it('browser chưa hỗ trợ thì từ chối ngay, KHÔNG mua email', async () => {
+    emailSource.available = 3;
+    const service = createService();
+
+    await expect(service.start(baseConfig({
+      threadCount: 3,
+      browser: 'gologin',
+      emailSource: { mode: 'api', provider: 'gmail94' }
+    }))).rejects.toMatchObject({ code: 'CONFIG_ERROR' });
+
+    expect(emailSource.purchaseCalls).toHaveLength(0);
+    expect(browser.startCalls).toHaveLength(0);
+  });
+
+  it('nêu đúng tên browser và tên browser đang dùng được', async () => {
+    const service = createService();
+
+    await expect(service.start(baseConfig({ browser: 'camoufox' })))
+      .rejects.toThrow(/camoufox[\s\S]*multilogin/i);
+  });
+
+  it('multilogin vẫn chạy bình thường', async () => {
+    emailSource.available = 1;
+    const service = createService();
+
+    await service.start(baseConfig({ threadCount: 1, browser: 'multilogin' }));
+    await service.waitForCompletion();
+
+    expect(emailSource.purchaseCalls).toHaveLength(1);
+  });
+});
+
+/**
+ * `xcli` là launcher MẶC ĐỊNH và nó từ chối proxy có user/pass
+ * (`XcliLauncher.ts:139`), trong khi placeholder trên Dashboard lại mời dán đúng
+ * `IP:PORT:USER:PASS`. Cấu hình mặc định + gợi ý của UI = 100% chết ở bước mở
+ * browser — mà lúc đó email đã mua xong. Phải chặn trước khi tiêu tiền.
+ */
+describe('AutomationRunService chặn tổ hợp xcli + proxy user/pass', () => {
+  function serviceWithLauncher(name: 'xcli' | 'api-v3'): AutomationRunService {
+    const launcher = { name, launch: async () => { throw new Error('không dùng'); }, stop: async () => {} };
+    return new AutomationRunService(
+      {
+        emails: emailSource,
+        proxies: proxySource,
+        browser,
+        accounts,
+        logBus,
+        launcher: () => launcher as never
+      },
+      { sleep: async () => {}, nextId: () => 'run-1' }
+    );
+  }
+
+  it('xcli + proxy có user/pass ⇒ từ chối, KHÔNG mua email', async () => {
+    emailSource.available = 1;
+    const service = serviceWithLauncher('xcli');
+
+    await expect(service.start(baseConfig({
+      threadCount: 1,
+      emailSource: { mode: 'api', provider: 'gmail94' },
+      proxy: { mode: 'direct', entries: ['1.1.1.1:8080:bob:secret'] }
+    }))).rejects.toMatchObject({ code: 'CONFIG_ERROR' });
+
+    expect(emailSource.purchaseCalls).toHaveLength(0);
+  });
+
+  it('lỗi chỉ đúng cách sửa: đổi sang api-v3', async () => {
+    const service = serviceWithLauncher('xcli');
+
+    await expect(service.start(baseConfig({
+      threadCount: 1,
+      emailSource: { mode: 'manual', entries: ['a@x.com|p'] },
+      proxy: { mode: 'direct', entries: ['1.1.1.1:8080:bob:secret'] }
+    }))).rejects.toThrow(/api-v3/);
+  });
+
+  it('xcli + proxy KHÔNG có user/pass thì cho qua', async () => {
+    const service = serviceWithLauncher('xcli');
+
+    await service.start(baseConfig({
+      threadCount: 1,
+      emailSource: { mode: 'manual', entries: ['a@x.com|p'] },
+      proxy: { mode: 'direct', entries: ['1.1.1.1:8080'] }
+    }));
+    await service.waitForCompletion();
+  });
+
+  it('api-v3 thì proxy có user/pass là hợp lệ', async () => {
+    const service = serviceWithLauncher('api-v3');
+
+    await service.start(baseConfig({
+      threadCount: 1,
+      emailSource: { mode: 'manual', entries: ['a@x.com|p'] },
+      proxy: { mode: 'direct', entries: ['1.1.1.1:8080:bob:secret'] }
+    }));
+    await service.waitForCompletion();
+  });
+});
+
 describe('AutomationRunService direct proxy mode', () => {
+  /**
+   * Hậu quả nặng nhất của bản audit 04/09/2026: dòng proxy không đọc được bị
+   * `flatMap` loại KHÔNG LOG GÌ, rồi proxy gán theo index ⇒ luồng thiếu proxy
+   * chạy bằng IP THẬT của máy, im lặng. Với công việc này, lộ IP còn tệ hơn là
+   * không chạy — nên phải TỪ CHỐI cả lượt, không chạy tiếp với ít proxy hơn.
+   */
+  it('từ chối cả lượt khi có dòng proxy không đọc được, nêu đúng số dòng', async () => {
+    const service = createService();
+
+    await expect(service.start(baseConfig({
+      threadCount: 3,
+      emailSource: { mode: 'manual', entries: ['a@x.com|p', 'b@x.com|p', 'c@x.com|p'] },
+      proxy: { mode: 'direct', entries: ['1.1.1.1:8080', 'ftp://2.2.2.2:21', '3.3.3.3:abc'] }
+    }))).rejects.toMatchObject({ code: 'CONFIG_ERROR' });
+
+    expect(browser.startCalls).toHaveLength(0);
+  });
+
+  it('từ chối khi số proxy ít hơn số luồng — phần thiếu sẽ chạy bằng IP thật', async () => {
+    const service = createService();
+
+    await expect(service.start(baseConfig({
+      threadCount: 3,
+      emailSource: { mode: 'manual', entries: ['a@x.com|p', 'b@x.com|p', 'c@x.com|p'] },
+      proxy: { mode: 'direct', entries: ['1.1.1.1:8080', '2.2.2.2:8081'] }
+    }))).rejects.toMatchObject({ code: 'CONFIG_ERROR' });
+
+    expect(browser.startCalls).toHaveLength(0);
+  });
+
+  it('nhận proxy có scheme socks5 và chuyển đúng type xuống launcher', async () => {
+    const service = createService();
+
+    await service.start(baseConfig({
+      threadCount: 1,
+      emailSource: { mode: 'manual', entries: ['a@x.com|p'] },
+      proxy: { mode: 'direct', entries: ['socks5://9.9.9.9:1080:u:p'] }
+    }));
+    await service.waitForCompletion();
+
+    expect(browser.startCalls[0].proxyHost).toBe('9.9.9.9');
+  });
+
   it('assigns the pasted proxies without touching the proxy key pool', async () => {
     const service = createService();
 
@@ -733,6 +910,29 @@ describe('AutomationRunService giới hạn theo danh sách proxy key của phi�
     await service.waitForCompletion();
 
     expect(proxySource.configuredKeys).toEqual([['K1', 'K2']]);
+  });
+
+  it('chuyển vùng KiotProxy đã chọn xuống nguồn proxy', async () => {
+    emailSource.available = 1;
+    const service = createService();
+
+    await service.start(baseConfig({
+      threadCount: 1,
+      proxy: { mode: 'proxykey', keys: ['K1'], region: 'bac' }
+    }));
+    await service.waitForCompletion();
+
+    expect(proxySource.configuredRegions).toEqual(['bac']);
+  });
+
+  it('không chọn vùng thì không gửi khoá region', async () => {
+    emailSource.available = 1;
+    const service = createService();
+
+    await service.start(baseConfig({ threadCount: 1, proxy: { mode: 'proxykey', keys: ['K1'] } }));
+    await service.waitForCompletion();
+
+    expect(proxySource.configuredRegions).toEqual([undefined]);
   });
 
   it('chỉ chạy song song bằng số key được nhập, phần còn lại xếp hàng', async () => {

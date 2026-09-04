@@ -3,8 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export class DatabaseConfigurationError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = 'DatabaseConfigurationError';
   }
 }
@@ -65,6 +65,17 @@ export function createDatabaseConnection(databasePath: string): Database.Databas
     if (err instanceof DatabaseConfigurationError) {
       throw err;
     }
-    throw new DatabaseConfigurationError('Failed to initialize and configure SQLite database connection.');
+    /**
+     * Mang theo nguyên nhân GỐC (AGENTS.md §27). Bản cũ chỉ ném câu chung, nên
+     * bản đóng gói 04/09/2026 chết với đúng một dòng "Failed to initialize and
+     * configure SQLite database connection." — không phân biệt được `.node`
+     * không load được, đường dẫn DB sai, hay không có quyền ghi. Đường dẫn DB
+     * do `app.getPath('userData')` sinh ra, không phải secret.
+     */
+    const cause = err instanceof Error ? err.message : String(err);
+    throw new DatabaseConfigurationError(
+      'Failed to initialize and configure SQLite database connection: ' + cause,
+      { cause: err }
+    );
   }
 }

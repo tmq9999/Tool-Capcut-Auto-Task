@@ -8,6 +8,7 @@ import type { DongVanCodeResult, DongVanPurchasedMail } from '../providers/DongV
 import { buildCustomDomainAddress, generateMailUsernames } from './mailUsername';
 import type { CustomEmailSettingsDTO } from '../../shared/schemas/settings.schema';
 import {
+  CAPCUT_OTP_SERVICE,
   EmailApiProviderEnum,
   type EmailApiProvider,
   type EmailProviderConfigDTO,
@@ -15,7 +16,11 @@ import {
   type PurchasedEmailDTO
 } from '../../shared/schemas/provider.schema';
 
-export const DEFAULT_OTP_SERVICE = 'facebook';
+/**
+ * Slug gmail94 dùng khi người gọi không chỉ định. Xem `CAPCUT_OTP_SERVICE`:
+ * slug là hằng của site đang tự động hoá, không phải nút của người dùng.
+ */
+export const DEFAULT_OTP_SERVICE = CAPCUT_OTP_SERVICE;
 const DEFAULT_DONGVAN_ACCOUNT_TYPE = 1;
 const DEFAULT_DONGVAN_QUALITY = 3;
 
@@ -251,10 +256,29 @@ export class EmailPurchaseService {
       return this.purchaseCustomDomain(count);
     }
 
+    /**
+     * Hộp thư đã thuê mà chưa tiêu là TIỀN ĐÃ TRẢ, và `order_id` của nó vẫn còn
+     * trong `purchased_emails` nên vẫn đọc được OTP. Lượt 04/09/2026 thuê
+     * `songhajun652@gmail.com` rồi `xcli profile-quick` lỗi vì launcher
+     * Multilogin đã tắt — không dùng lại thì mỗi lỗi hạ tầng là một lần mất tiền.
+     */
+    const reuse = this.purchasedRepo.listUnconsumed(provider, count);
+    if (reuse.length >= count) {
+      return { purchased: reuse.slice(0, count), failures: [] };
+    }
+
     const apiKey = this.readApiKey(provider);
-    return provider === 'gmail94'
-      ? this.purchaseGmail94(apiKey, count, options)
-      : this.purchaseDongVanFB(apiKey, count, options);
+    const missing = count - reuse.length;
+    const bought = provider === 'gmail94'
+      ? await this.purchaseGmail94(apiKey, missing, options)
+      : await this.purchaseDongVanFB(apiKey, missing, options);
+
+    return { purchased: [...reuse, ...bought.purchased], failures: bought.failures };
+  }
+
+  /** Đưa hộp thư chưa dùng tới trở lại hàng chờ (xem `PurchasedEmailRepository.release`). */
+  release(purchasedEmailId: string): void {
+    this.purchasedRepo.release(purchasedEmailId);
   }
 
   /**

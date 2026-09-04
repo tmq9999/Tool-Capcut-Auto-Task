@@ -62,11 +62,26 @@ export function toTaskProgressRows(
   const missing = new Set(snapshot.missing);
 
   return outcomes.map((outcome) => {
+    /**
+     * `do_action err_no=0` bắt được TRONG lượt này chỉ thắng snapshot khi snapshot
+     * đã CŨ (`stale`).
+     *
+     * Đo 04/09/2026 06:5x: tab chính của CapCut chết giữa lượt, nên lần đọc
+     * `task_list` cuối rơi về snapshot ĐẦU TIÊN và báo cáo in
+     * "CapCut ghi nhận: 0/12" trong khi 3 nhiệm vụ đã có `do_action err_no=0`.
+     * Ghi status 1 cho chúng là xoá tiến độ THẬT khỏi DB và lượt sau làm lại.
+     *
+     * Snapshot còn TƯƠI thì nó vẫn thắng: một proof mà CapCut vừa đọc lại vẫn
+     * liệt vào `missing` nghĩa là CapCut không tính — không được suy diễn hộ nó.
+     * Bước đọc lại `task_status` là xác nhận thứ hai của AGENTS.md §30; chỉ khi
+     * bước đó KHÔNG CÒN TỒN TẠI mới lùi về bằng chứng đã có.
+     */
+    const proven = snapshot.stale === true && outcome.proof?.errNo === 0;
     const row: CapcutAccountResult['tasks'][number] = {
       key: outcome.key,
       title: outcome.title,
       reward: outcome.reward,
-      status: missing.has(outcome.key) ? CAPCUT_STATUS_OPEN : CAPCUT_STATUS_DONE
+      status: missing.has(outcome.key) && !proven ? CAPCUT_STATUS_OPEN : CAPCUT_STATUS_DONE
     };
     if (outcome.proof) {
       row.opId = outcome.proof.opId;
@@ -104,6 +119,16 @@ export class CapcutEngineService implements CapcutTaskRunner {
     email: string;
     password: string;
     accountId: string;
+    /**
+     * true khi email của luồng vừa được thuê/mua ⇒ CapCut chưa có account nào
+     * dùng địa chỉ đó. Dịch thẳng thành `forceSignup` của `ensureInApp`.
+     *
+     * Không có cờ này thì `looksExisting({ source: 'db' })` luôn trả true và mọi
+     * account mới vẫn bị thử ĐĂNG NHẬP trước: `loginCapcut` chạy tới heading
+     * "Create an account" rồi ném lỗi, `capcut/auth.ts` bắt, rồi mới quay lại
+     * đăng ký — mất ~60 giây và in một dòng lỗi giả cho mỗi account mới.
+     */
+    isNewAccount: boolean;
     getOtp?: () => Promise<string>;
     /**
      * `retryCount` của Dashboard. Engine quét lại toàn bộ nhiệm vụ còn thiếu theo
@@ -119,9 +144,25 @@ export class CapcutEngineService implements CapcutTaskRunner {
      * nhanh hơn khoảng đã đo thì thưởng trả `err_no 8001003`.
      */
     pace?: CapcutPace;
+    /**
+     * Ô "Bỏ qua account không có trial" của Dashboard, ưu tiên hơn
+     * `options.skipWithoutTrial` lúc dựng service. Trước đây chỉ có đường
+     * `options` mà không ai truyền nên cờ luôn `false` (audit 04/09/2026).
+     */
+    skipWithoutTrial?: boolean;
     log: (status: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR', step: string, message: string) => void;
   }): Promise<CapcutAccountResult> {
     const { page, context, email, password, log } = input;
+
+    /**
+     * Tab chính chết là nguyên nhân đã cắt ngắn hai lượt chạy 04/09/2026
+     * (`❌ Tab chính đã bị đóng`, `Target page ... has been closed`) mà không có
+     * dòng nào cho biết ai đóng nó. `crash` và `close` là hai nguyên nhân khác
+     * nhau và cần hai cách sửa khác nhau — renderer sập vs có ai gọi `close()` —
+     * nên phải phân biệt được ngay trong log thay vì suy đoán từ dump.
+     */
+    page.on('close', () => log('WARNING', 'Browser', 'Tab chính vừa ĐÓNG — các bước sau sẽ trượt'));
+    page.on('crash', () => log('ERROR', 'Browser', 'Tab chính CRASH (renderer sập) — không phải do code gọi close()'));
 
     // OTP của riêng luồng này (đường đăng ký) ưu tiên hơn nguồn cấu hình chung.
     const getOtp = input.getOtp
@@ -132,18 +173,34 @@ export class CapcutEngineService implements CapcutTaskRunner {
       page,
       context,
       { email, password, source: 'db' },
-      { log: (m) => log('INFO', 'Đăng nhập', m), getOtp }
+      {
+        // `source: 'db'` giữ nguyên để nhánh fallback (đăng ký → email đã tồn tại
+        // → đăng nhập) không đổi; `forceSignup` mới là thứ chọn đường ĐI TRƯỚC.
+        forceSignup: input.isNewAccount,
+        log: (m) => log('INFO', 'Đăng nhập', m),
+        getOtp
+      }
     );
     log('SUCCESS', 'Đăng nhập', `Đã ở trong app (đường: ${auth.mode})`);
 
     const trial = await checkProTrial(page, context, (m) => log('INFO', 'Ưu đãi', m));
+    /**
+     * Câu để hiển thị, không phải object: `accounts.subscription` là một `string`
+     * (AGENTS.md §15) và cột Subscription của bản xuất đọc thẳng từ đó.
+     */
+    const subscription = isEligible(trial)
+      ? 'Pro trial ' + (trial.days || MIN_TRIAL_DAYS) + ' ngày'
+      : 'Không có ưu đãi';
     if (isEligible(trial)) {
       log('INFO', 'Ưu đãi', `Có trial Pro ${trial.days || MIN_TRIAL_DAYS} ngày`);
-    } else if (this.options.skipWithoutTrial) {
+    } else if (input.skipWithoutTrial ?? this.options.skipWithoutTrial) {
       log('WARNING', 'Ưu đãi', 'Không có ưu đãi dùng thử — bỏ qua account này theo cấu hình');
       // Bỏ qua thì chưa đọc được nhiệm vụ nào, nên không có dòng tiến độ nào để
       // ghi — trả mảng rỗng chứ KHÔNG phải "0 nhiệm vụ đã xong".
-      return { done: 0, total: 0, credits: 0, creditsTotal: 0, missing: [], skipped: true, tasks: [] };
+      return {
+        done: 0, total: 0, credits: 0, creditsTotal: 0, missing: [],
+        skipped: true, tasks: [], subscription
+      };
     } else {
       log('WARNING', 'Ưu đãi', 'Không có ưu đãi dùng thử — vẫn chạy nhiệm vụ');
     }
@@ -174,7 +231,8 @@ export class CapcutEngineService implements CapcutTaskRunner {
       credits: snapshot.credits,
       creditsTotal: snapshot.creditsTotal,
       missing: snapshot.missing,
-      tasks: toTaskProgressRows(outcomes, snapshot)
+      tasks: toTaskProgressRows(outcomes, snapshot),
+      subscription
     };
   }
 }

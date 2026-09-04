@@ -131,10 +131,16 @@ Ranh giới bắt buộc giữ:
 ## 6. Việc cần anh quyết
 
 1. **Mở profile bằng đường nào**: `MultiloginProvider` (API v3, UI đã live test)
-   hay `xcli` (engine đang dùng)? Kế hoạch trên chọn API v3 — nếu anh muốn giữ
-   `xcli` thì phải port thêm phần đọc profile dir để bơm `prefs`.
+   hay `xcli` (engine đang dùng)?
+   → **Đã quyết và đã làm 04/09/2026**: cả hai đường đều có, chọn bằng
+   `app_settings.browser.multilogin.launcher` (mặc định `xcli` vì nó là đường bơm
+   được `Preferences`); `providerStack` đọc lại khoá này mỗi lượt chạy nên đổi
+   trong Settings là có tác dụng ngay, không cần khởi động lại.
 2. **Đăng ký account mới**: engine có `signup.ts` đầy đủ, UI hiện chỉ có luồng
    đăng nhập + mua email. Gộp luôn đăng ký vào Dashboard, hay để pha sau?
+   → **Đã xong 04/09/2026**: `CapcutTaskRunner.runAccount` nhận `isNewAccount`
+   (bắt buộc), bật khi luồng có `purchasedEmailId`, và `CapcutEngineService` dịch
+   thành `forceSignup` của `ensureInApp`. Không cần ô nào trên Dashboard.
 3. **Cổng trial**: bỏ qua account không có ưu đãi Pro 7 ngày (như engine đang
    làm) hay vẫn chạy hết? Hiện là fail-open, và đã có account bị bỏ qua thật.
 4. **Nhiệm vụ nào bật/tắt được từ UI**: hiện engine luôn chạy đủ 4 nhóm. Có cần
@@ -157,10 +163,23 @@ Ranh giới bắt buộc giữ:
 - [x] Pha 4b: cắm vào `AutomationRunService` — `runPrepared` gọi
       `runThreadWorkload`, Multilogin đi qua `BrowserLauncher`, engine chạy khi có
       `userDataDir`; `npm run build` + `npm run test:electron` xanh
-- [ ] Chạy thật 1 account qua app (soi `✓ Đã tắt dialog lưu mật khẩu` và
-      `do_action err_no=0`)
-- [ ] Pha 5: tiến độ vào SQLite, chạy thật 4 account
-- [ ] Pha 6: 5 luồng / 2 key, không treo, lease nhả hết
+- [x] Chạy thật 1 account qua app: 04/09/2026, `node scripts/live-capcut-run.mjs
+      --email=api:gmail94` → thuê hộp `matteozammit44@gmail.com` từ gmail94, log
+      có `✓ Đã tắt dialog lưu mật khẩu`, `Đi đường ĐĂNG KÝ`, OTP về sau **1 giây**,
+      `ĐĂNG KÝ THÀNH CÔNG`, trial Pro 7 ngày, và 2 nhiệm vụ có `do_action err_no=0`.
+      Còn 10 nhiệm vụ trượt vì 3 nguyên nhân trong engine — xem `CHANGELOG.md`
+      mục `[Unreleased] — luồng thuê email gmail94`
+- [x] Chạy thật lại sau khi sửa 3 nguyên nhân đó — 04/09/2026, lượt 5/6/7 đã đọc
+      được dòng `CapCut ghi nhận x/12` (bảng `account_tasks` ghi đủ 12 dòng)
+- [x] Pha 5: tiến độ vào SQLite — 04/09/2026, bảng `account_tasks` ghi đủ 12 dòng
+      `status = 4` cho mỗi account, 9 dòng có `op_id` (bằng chứng `do_action`);
+      `credit`, `subscription`, `automation_step` đều đúng
+- [x] Pha 6: **3 luồng song song** — 04/09/2026,
+      `node scripts/live-capcut-run.mjs --email=api:gmail94 --threads=3`:
+      `start 3, stop 3, fail 0`, cả ba account **12/12 nhiệm vụ, 670/670 credits**.
+      Mỗi luồng có `do_action err_no=0` RIÊNG cho cùng `task_key` ⇒ ba `TaskStore`
+      không lẫn dữ liệu. `proxy_leases` không còn lease nào giữ sau khi xong.
+      Chưa chạy 5 luồng / 2 key (đường xếp hàng khi thiếu key vẫn chỉ có unit test)
 - [x] `AGENTS.md` §30: ranh giới engine (không tự mở profile, không `console.log`,
       không bỏ `assertHittable`, không "tối ưu" `human.ts`, giữ 2 package ngoài bundle)
 - [x] UI: ô chọn `launcher` trong `BrowserSettingsPanel` + mô tả trade-off từng đường
@@ -177,12 +196,11 @@ chạy thật 13 account trong ngày và là đường bơm được `Preference
 
 **Còn treo, cần làm khi cắm Pha 4b:**
 
-1. `AutomationRunService` vẫn dùng `IBrowserRuntimeApi.startProfile()` trả
-   `{profileId, port}` và **chưa bao giờ attach Playwright** — nó chỉ giữ browser
-   `testDurationMs` rồi tắt. Đã thêm `port` vào `ThreadRuntime` để bước nhiệm vụ
-   nối được vào đúng browser. Quyết định đề xuất: giữ `deps.browser` cho vòng đời
-   profile của các browser chưa hỗ trợ (GoLogin/GPM vẫn phải báo
-   `PROVIDER_NOT_IMPLEMENTED`), và dùng `BrowserLauncher` cho Multilogin.
+1. ~~`AutomationRunService` **chưa bao giờ attach Playwright**~~ — **đã xong từ Pha
+   4b**: `runThreadWorkload` gọi `deps.capcut.runAccount(...)` với `page`/`context`
+   thật do `BrowserLauncher` mở (`attachToBrowser`), không còn giữ browser rồi tắt.
+   `deps.browser` vẫn lo vòng đời profile của các browser chưa hỗ trợ (chúng báo
+   lỗi cấu hình ngay, trước cả bước mua email), `BrowserLauncher` lo Multilogin.
 2. `browserRuntime.ts` (`MultiloginBrowserRuntime.startProfile`) **chưa bơm
    prefs**, nên đường đi không qua launcher vẫn còn dialog "Save password".
 3. `xcli` + proxy có user/pass ⇒ `CONFIG_ERROR` **có chủ ý** (engine chưa từng đo
@@ -190,10 +208,10 @@ chạy thật 13 account trong ngày và là đường bơm được `Preference
    được proxy user/pass ⇒ UI phải khoá `xcli` ở chế độ đó hoặc hiện lỗi rõ.
 4. `seedPreferences` trên đường `api-v3` **chưa đo tay**. Lượt chạy thật đầu tiên
    phải soi dòng log `✓ Đã tắt dialog lưu mật khẩu`.
-5. `ensureSampleImage` không còn tự đoán cwd — người gọi phải truyền thư mục
-   (dùng `app.getPath('userData')`).
-6. `diag.dump()` cần `setDumpDir(path.join(app.getPath('userData'), 'debug'))`
-   gọi một lần lúc khởi động main process.
+5. ~~`ensureSampleImage` không còn tự đoán cwd~~ — **đã xong**: người gọi truyền
+   thư mục và app truyền `app.getPath('userData')`.
+6. ~~`diag.dump()` cần `setDumpDir(...)`~~ — **đã xong**: `CapcutEngineService`
+   gọi `setDumpDir(path.join(options.userDataDir, 'debug'))` trong constructor.
 
 **Đã va phải và đã sửa:**
 

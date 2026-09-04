@@ -1,7 +1,7 @@
 import { IPC_CHANNELS } from '../../shared/contracts/ipc-channels';
 import { IpcContractRegistry } from '../../shared/contracts/api';
 import type { IpcRegistrar } from './registerIpc';
-import { ok, toErrorEnvelope, VALIDATION_ERROR } from './ipcResult';
+import { ok, toErrorEnvelope, validationError } from './ipcResult';
 import type { AutomationRunService } from '../services/AutomationRunService';
 import type { EmailPurchaseService } from '../services/EmailPurchaseService';
 import type { IpcEnvelope } from '../../shared/schemas/ipc-envelope.schema';
@@ -23,7 +23,7 @@ export function registerAutomationIpc(
     IPC_CHANNELS.RUN_START,
     async (_event: unknown, request?: unknown): Promise<IpcEnvelope<{ runId: string }>> => {
       const parsed = IpcContractRegistry.run.start.request.safeParse(request);
-      if (!parsed.success) return VALIDATION_ERROR;
+      if (!parsed.success) return validationError(parsed.error);
       try {
         return ok(await runService.start(parsed.data));
       } catch (err: unknown) {
@@ -48,7 +48,7 @@ export function registerAutomationIpc(
     IPC_CHANNELS.RUN_STOP_THREAD,
     async (_event: unknown, request?: unknown): Promise<IpcEnvelope<{ stopped: boolean }>> => {
       const parsed = IpcContractRegistry.run.stopThread.request.safeParse(request);
-      if (!parsed.success) return VALIDATION_ERROR;
+      if (!parsed.success) return validationError(parsed.error);
       try {
         return ok({ stopped: await runService.stopThread(parsed.data.accountId) });
       } catch (err: unknown) {
@@ -94,7 +94,7 @@ export function registerAutomationIpc(
     IPC_CHANNELS.EMAIL_READ_OTP,
     async (_event: unknown, request?: unknown): Promise<IpcEnvelope<{ otp: string | null }>> => {
       const parsed = IpcContractRegistry.email.readOtp.request.safeParse(request);
-      if (!parsed.success) return VALIDATION_ERROR;
+      if (!parsed.success) return validationError(parsed.error);
       try {
         const otp = await emailService.readOtp(parsed.data.purchasedEmailId, parsed.data.type);
         return ok({ otp });

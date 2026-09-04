@@ -52,7 +52,11 @@ export interface AuthResult {
 export interface AuthOptions {
   /**
    * Bắt buộc đi đường đăng ký, kể cả khi tài khoản đến từ accounts.txt.
-   * Dùng cho `npm run dev -- --signup`.
+   *
+   * Trong app: `CapcutEngineService` bật cờ này khi `isNewAccount` — email vừa
+   * được thuê/mua trong lượt chạy nên CapCut chưa có account nào dùng nó. Bản
+   * engine standalone bật bằng cờ CLI `npm run dev -- --signup`; cờ đó KHÔNG tồn
+   * tại trong app, nên câu log không được nhắc tới nó.
    */
   forceSignup?: boolean;
   log: (msg: string) => void;
@@ -90,7 +94,9 @@ export async function ensureInApp(
   const trySignup = opts.forceSignup || !looksExisting(account);
   log(
     trySignup
-      ? `↪️  Đi đường ĐĂNG KÝ (${opts.forceSignup ? 'do --signup' : 'tài khoản mới sinh'})`
+      ? `↪️  Đi đường ĐĂNG KÝ (${
+          opts.forceSignup ? 'do email mới, chưa có account CapCut' : 'tài khoản mới sinh'
+        })`
       : `↪️  Đi đường ĐĂNG NHẬP (tài khoản từ ${account.source})`
   );
 

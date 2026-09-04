@@ -21,6 +21,10 @@ import path from 'node:path';
 import { chromium, type Page } from 'playwright-core';
 
 import { assertHittable } from '../src/main/services/capcut/diag';
+import { findTaskRow } from '../src/main/services/capcut/missionRunner';
+import { skipOnboardingSurvey, closeBlockingPricingModal, ensurePageUsable } from '../src/main/services/capcut/overlays';
+import { findExportButton, ensureNodeToolbar } from '../src/main/services/capcut/missions/videoStudio';
+import type { CapcutMissionEnv } from '../src/main/services/capcut/types';
 
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const CANVAS_PANEL = '[aria-label="Canvas prompt panel"]';
@@ -324,7 +328,261 @@ async function main(): Promise<void> {
       (await n('[class*="subscriptionModal"]')) >= 1,
       await n('[class*="subscriptionModal"]')
     );
-    check('lúc đó KHÔNG có node ảnh mới nào', (await n('.react-flow__node[data-id]')) === 0, await n('.react-flow__node[data-id]'));
+    await close();
+  }
+
+  // ------------------- khảo sát onboarding: bấm Skip mà KHÔNG kiểm đã tắt chưa
+  /**
+   * Trạng thái đo được lúc 2026-09-04 05:44, NGAY SAU khi `signupCapcut` in
+   * "✅ ĐĂNG KÝ THÀNH CÔNG" và "→ Đã bấm Skip khảo sát":
+   * modal "Which of the following roles best describes you?" (3 bước, `1 / 3`)
+   * vẫn còn `.lv-modal-mask` `display: block` + wrapper `z-index: 1101`.
+   *
+   * Hậu quả trong cùng lượt: Design Studio trượt CẢ 4 nhiệm vụ với "Không thấy
+   * panel chat AI agent", popover nhiệm vụ mở ra 0 dòng. `isInsideApp` chỉ đọc
+   * URL nên vẫn trả true — signup báo thành công với modal đang phủ trang.
+   */
+  {
+    const { page, close } = await open(browser, 'tools/fixtures/dom-role-survey-modal.html');
+    const n = counter(page);
+    console.log('\n=== khảo sát onboarding @05:44 — Skip đã bấm mà modal vẫn còn ===');
+
+    check('mask modal đang display:block (modal thật sự phủ trang)',
+      (await n('.lv-modal-mask[style*="display: block"]')) === 1,
+      await n('.lv-modal-mask[style*="display: block"]'));
+    check('wrapper modal cũng display:block',
+      (await n('.lv-modal-wrapper[style*="display: block"]')) === 1);
+    check('nút thoát .skip-mrkR37 phân giải đúng 1',
+      (await n('.skip-mrkR37')) === 1, await n('.skip-mrkR37'));
+
+    /**
+     * Loại giả thuyết `locator(a, b).first()` bốc trúng vỏ khác — cái bẫy đã ăn
+     * `TitleBarFreeCredits`. Ở đây OR-list ra đúng MỘT element, và nó đúng là
+     * `.skip-mrkR37`, nên selector không phải nguyên nhân.
+     */
+    const orList = await page
+      .locator('.skip-mrkR37, button:has-text("Skip"), div[role="button"]:text-is("Skip"), button:has-text("Not now")')
+      .evaluateAll((els) => els.map((el) => el.tagName + '.' + String(el.className)));
+    check('OR-list Skip ra đúng 1 element và đó là .skip-mrkR37',
+      orList.length === 1 && orList[0] === 'DIV.skip-mrkR37', orList);
+
+    check('khảo sát có 3 bước nên một lần Skip có thể chưa đủ',
+      (await page.evaluate(() => document.body.innerText.includes('1 / 3'))) === true);
+    check('trong trạng thái này KHÔNG có panel chat AI agent để Design Studio thao tác',
+      (await n('[class*="skillPanel"]')) === 0, await n('[class*="skillPanel"]'));
+
+    /**
+     * Bài test thật: fixture là DOM tĩnh nên bấm Skip KHÔNG thể xoá mask. Hàm dọn
+     * khảo sát vì vậy phải báo THẤT BẠI — bản cũ trả void và in "Đã bấm Skip
+     * khảo sát" vô điều kiện, tức là không có cách nào phân biệt được.
+     */
+    const said: string[] = [];
+    const gone = await skipOnboardingSurvey(page, (m) => said.push(m));
+    check('mask không tắt thì hàm trả false (không nói dối)', gone === false, gone);
+    check('log nói rõ khảo sát VẪN CÒN',
+      said.some((m) => /vẫn còn/i.test(m)), said);
+    check('log KHÔNG khẳng định đã bỏ được khảo sát',
+      !said.some((m) => /đã bỏ khảo sát/i.test(m)), said);
+
+    await close();
+  }
+
+  // ------------------- popover nhiệm vụ: reward của API lệch reward của chính UI
+  /**
+   * Đo được lúc 2026-09-04 05:48 (không có modal khảo sát trong dump này, nên
+   * đây là lỗi ĐỘC LẬP): `task_list` của CapCut trả `reward_amount = 210` cho
+   * `pwa_install` và `push_authorize`, còn popover của chính CapCut in `+70`.
+   * `findTaskRow` khớp cả title VÀ reward nên ra 0 dòng và ném lỗi.
+   *
+   * Bộ lọc reward KHÔNG được bỏ: hai dòng "Chat with AI agent" chỉ khác nhau ở
+   * reward. Nên lùi về title-only, và CHỈ nhận khi title ra đúng một dòng.
+   */
+  {
+    const { page, close } = await open(browser, 'tools/fixtures/dom-task-popover-reward.html');
+    const n = counter(page);
+    console.log('\n=== popover nhiệm vụ @05:48 — reward API 210 vs UI +70 ===');
+
+    check('không có modal khảo sát trong dump này (lỗi độc lập)',
+      (await n('.skip-mrkR37')) === 0);
+    check('popover có 10 dòng nhiệm vụ', (await n('[class*="taskRow"]')) === 10,
+      await n('[class*="taskRow"]'));
+    check('dòng Install hiển thị +70, không phải +210',
+      (await page.evaluate(() => {
+        const row = Array.from(document.querySelectorAll('[class*="taskRow"]')).find((e) =>
+          (e.textContent ?? '').includes('Install CapCut Web Desktop')
+        );
+        return (row?.textContent ?? '').includes('+70');
+      })) === true);
+
+    const byBoth = await page
+      .locator('[class*="taskRow"]')
+      .filter({ hasText: 'Install CapCut Web Desktop' })
+      .filter({ hasText: '+210' })
+      .count();
+    check('lọc title + +210 ra 0 dòng (đúng lỗi đã gặp)', byBoth === 0, byBoth);
+
+    const found = await findTaskRow(page, 'Install CapCut Web Desktop', 210)
+      .then(() => 'ok')
+      .catch((e: unknown) => (e as Error).message);
+    check('findTaskRow vẫn tìm được dòng khi reward lệch', found === 'ok', found);
+
+    // Bảo đảm cũ phải còn: title trùng 2 dòng thì KHÔNG được bốc bừa.
+    const ambiguous = await findTaskRow(page, 'Chat with AI agent', 12345)
+      .then(() => 'KHÔNG ném — bảo đảm chống nhầm đã mất')
+      .catch(() => 'ném');
+    check('title trùng 2 dòng + reward không khớp thì vẫn NÉM', ambiguous === 'ném', ambiguous);
+
+    await close();
+  }
+
+  // ------------------- node toolbar: nút Export nhận bằng tooltip nên không ra
+  /**
+   * Đo được lúc 2026-09-04 05:55: node toolbar có ĐÚNG 5 nút — tức là trạng thái
+   * "khoẻ" theo tương quan đã đo (`nút thứ 3/5` → `do_action err_no=0` 6/6 lượt)
+   * — nhưng `findExportButton` vẫn ném "Không nhận ra nút Export trong 5 nút
+   * (đã soi tooltip từng nút)": không nút nào cho tooltip khớp `/export/i`.
+   *
+   * DOM có sẵn một mỏ neo KHÔNG hash và không cần hover:
+   *   <button data-testid="studio-node-export-trigger" ...>
+   *
+   * Cẩn thận: trong cùng trang còn `data-testid="global-export-trigger"` — export
+   * cấp TRANG, không phải của node. Nên phải khoá đúng `studio-node-export-trigger`.
+   */
+  {
+    const { page, close } = await open(browser, 'tools/fixtures/dom-node-toolbar-export.html');
+    const n = counter(page);
+    console.log('\n=== node toolbar @05:55 — Export không nhận ra bằng tooltip ===');
+
+    check('node toolbar có đúng 5 nút (trạng thái ảnh đã vẽ xong)',
+      (await n('.react-flow__node-toolbar button')) === 5,
+      await n('.react-flow__node-toolbar button'));
+    check('có đúng 1 [data-testid="studio-node-export-trigger"] trong cả trang',
+      (await n('[data-testid="studio-node-export-trigger"]')) === 1,
+      await n('[data-testid="studio-node-export-trigger"]'));
+    check('nút đó nằm TRONG node toolbar',
+      (await n('.react-flow__node-toolbar [data-testid="studio-node-export-trigger"]')) === 1);
+    check('KHÔNG được nhầm với global-export-trigger (export cấp trang)',
+      (await n('.react-flow__node-toolbar [data-testid="global-export-trigger"]')) === 0);
+
+    const said: string[] = [];
+    const env = { page, log: (m: string) => said.push(m) } as unknown as CapcutMissionEnv;
+    const btn = await findExportButton(page, env)
+      .then((locator) => locator.evaluate((el) => el.getAttribute('data-testid')))
+      .catch((e: unknown) => 'NÉM: ' + (e as Error).message);
+    check('findExportButton tìm ra nút Export mà không cần tooltip',
+      btn === 'studio-node-export-trigger', btn);
+
+    /**
+     * Toolbar của React Flow chỉ mọc cho node ĐANG được chọn. Lượt batch
+     * 04/09/2026 (`francisczeno459`) báo "trong 0 nút của node toolbar" ngay sau
+     * khi `Complete a generation` đã có `do_action err_no=0` — tức ảnh có rồi mà
+     * toolbar không render. `ensureNodeToolbar` phải nhận ra trạng thái sẵn sàng
+     * mà KHÔNG chọn lại node vô ích.
+     */
+    const quiet: string[] = [];
+    const count = await ensureNodeToolbar(
+      page,
+      'ec97a52f-079a-436f-b733-035bebbcf18c',
+      { page, log: (m: string) => quiet.push(m) } as unknown as CapcutMissionEnv
+    ).catch((e: unknown) => 'NÉM: ' + (e as Error).message);
+    check('toolbar đã có nút thì trả về số nút, không chọn lại node', count === 5, count);
+    check('và không in dòng chọn lại nào', quiet.length === 0, quiet);
+
+    await close();
+  }
+
+  // ---------------- node toolbar RỖNG: phải chọn lại node rồi mới chịu bỏ cuộc
+  {
+    const page = await browser.newPage();
+    await page.setContent(
+      '<div class="react-flow__node" data-id="n1" ' +
+        'style="position:fixed;left:50px;top:50px;width:80px;height:80px"></div>' +
+        '<div class="react-flow__node-toolbar"></div>'
+    );
+    console.log('\n=== node toolbar rỗng — chọn lại node trước khi bỏ cuộc ===');
+
+    const said: string[] = [];
+    const env = { page, log: (m: string) => said.push(m) } as unknown as CapcutMissionEnv;
+    const err = await ensureNodeToolbar(page, 'n1', env, 2)
+      .then(() => '')
+      .catch((e: unknown) => (e as Error).message);
+
+    check('toolbar rỗng thì NÉM, không trả về 0 nút', err.length > 0, err.slice(0, 80));
+    check('lỗi nói rõ là toolbar không mọc nút, không phải "không nhận ra Export"',
+      /toolbar không mọc nút nào/.test(err), err.slice(0, 90));
+    check('đã thử chọn lại node đúng số lần', said.filter((m) => /chọn lại node/.test(m)).length === 2, said);
+
+    await page.close();
+  }
+
+  // ------------------- bảng giá Pro phủ trang lúc Design Studio bấm Send canvas
+  /**
+   * Đo được lúc 2026-09-04 06:29: `capcut_web_design_studio_canvas_edit` báo
+   * `canvas_send_no_effect` — và DOM lúc đó có `subscriptionModal-wrapper`
+   * `display: block` cùng `lv-modal-mask` `display: block`. Send không thể tới
+   * đích. Năng lực đóng bảng giá đã có từ 02/09 nhưng chỉ nằm trong
+   * `missions/videoStudio.ts`, nên luồng Design Studio không gọi nó ở đâu cả.
+   */
+  {
+    const { page, close } = await open(browser, 'tools/fixtures/dom-canvas-pricing-modal.html');
+    const n = counter(page);
+    console.log('\n=== Design Studio @06:29 — bảng giá Pro phủ trang lúc bấm Send ===');
+
+    check('có subscriptionModal-wrapper đang display:block',
+      (await n('[class*="subscriptionModal"][style*="display: block"]')) === 1,
+      await n('[class*="subscriptionModal"][style*="display: block"]'));
+    check('có mask modal trong DOM (React của trang có thể đã dọn khi fixture boot lại)',
+      (await n('.lv-modal-mask')) >= 1, await n('.lv-modal-mask'));
+    check('KHÔNG phải modal khảo sát (lỗi khác, cùng lớp)',
+      (await n('.skip-mrkR37')) === 0);
+    check('lúc đó chưa có "Stop generating" ⇒ generate chưa bao giờ bắt đầu',
+      (await page.evaluate(() => document.body.innerText.includes('Stop generating'))) === false);
+
+    const said: string[] = [];
+    const closed = await closeBlockingPricingModal(page, (m) => said.push(m));
+    check('DOM tĩnh không đóng được thì hàm trả false (không nói dối)', closed === false, closed);
+    check('log nói rõ bảng giá VẪN mở', said.some((m) => /VẪN mở/.test(m)), said);
+
+    await close();
+  }
+
+  // ------------------- modal "trang lỗi" của CapCut che nút Send message
+  /**
+   * Đo được lúc 2026-09-04 06:40: `capcut_web_design_studio_ai_chat` báo
+   * "Không thấy nút Send message" — nhưng `aria-label="Send message"` CÓ trong
+   * DOM. Thứ chặn nó là modal do chính CapCut bung ra:
+   *
+   *   页面异常 — 页面异常，请刷新页面重试   ("trang lỗi, hãy refresh rồi thử lại")
+   *   [ Refresh ]
+   *
+   * Lần thứ BA trong ngày một mask `display: block` làm engine chỉ sai địa chỉ,
+   * nên `ensurePageUsable` là chỗ duy nhất biết mọi thứ phủ trang, và modal lạ
+   * thì nó ghi lại tiêu đề + dump chứ không đoán.
+   */
+  {
+    const { page, close } = await open(browser, 'tools/fixtures/dom-page-error-modal.html');
+    const n = counter(page);
+    console.log('\n=== Design Studio @06:40 — modal "trang lỗi" che nút Send message ===');
+
+    check('nút Send message CÓ trong DOM (báo "không thấy" là sai địa chỉ)',
+      (await n('[aria-label="Send message"]')) === 1,
+      await n('[aria-label="Send message"]'));
+    // `>= 1`, không phải `=== 1`: fixture này khi được serve lại thì React của
+    // trang tự boot và số mask dựng ra thay đổi giữa các lần chạy (đo được 1 và
+    // 2). Điều cần khoá là CÓ mask phủ trang, không phải có mấy cái.
+    check('có mask modal đang display:block',
+      (await n('.lv-modal-mask[style*="display: block"]')) >= 1,
+      await n('.lv-modal-mask[style*="display: block"]'));
+    check('KHÔNG phải khảo sát, KHÔNG phải bảng giá (modal thứ ba)',
+      (await n('.skip-mrkR37')) === 0 && (await n('[class*="subscriptionModal"]')) === 0);
+    check('modal mang thông điệp trang lỗi của CapCut',
+      (await page.evaluate(() => document.body.innerText.includes('页面异常'))) === true);
+
+    const said: string[] = [];
+    const usable = await ensurePageUsable(page, (m) => said.push(m));
+    check('DOM tĩnh không dẹp được thì trả false (không nói dối)', usable === false, usable);
+    check('log nêu được thủ phạm thay vì im lặng',
+      said.some((m) => /trang lỗi|chưa nhận diện/i.test(m)), said);
 
     await close();
   }

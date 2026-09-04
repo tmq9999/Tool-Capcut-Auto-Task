@@ -4,16 +4,20 @@ import { Panel } from '@renderer/components/ui/Panel';
 import { SegmentedControl } from '@renderer/components/ui/SegmentedControl';
 import { Select } from '@renderer/components/ui/Select';
 import { Switch } from '@renderer/components/ui/Switch';
-import type { GeneralSettingsDTO } from '@shared/schemas/settings.schema';
+import type { GeneralSettingsDTO, LogSettingsDTO } from '@shared/schemas/settings.schema';
 
 export interface GeneralSettingsPanelProps {
   settings: GeneralSettingsDTO;
   onChange: (settings: GeneralSettingsDTO) => void;
+  logs: LogSettingsDTO;
+  onLogsChange: (logs: LogSettingsDTO) => void;
 }
 
 export const GeneralSettingsPanel: React.FC<GeneralSettingsPanelProps> = ({
   settings,
   onChange,
+  logs,
+  onLogsChange,
 }) => {
   return (
     <Panel
@@ -30,12 +34,21 @@ export const GeneralSettingsPanel: React.FC<GeneralSettingsPanelProps> = ({
           <SegmentedControl
             options={[
               { value: 'dark', label: 'Dark Mode (Mặc định)' },
-              { value: 'light', label: 'Light' },
+              { value: 'light', label: 'Light (chưa có bảng màu)', disabled: true },
             ]}
             value={settings.theme}
             onChange={(val) => onChange({ ...settings, theme: val as GeneralSettingsDTO['theme'] })}
             size="md"
           />
+          {/*
+            Ô này giờ ĐIỀU KHIỂN THẬT class `dark` ở `<html>` (xem
+            `app/appPreferences.ts`) — trước đây `index.html` hard-code nên chọn gì
+            cũng như nhau. `Light` khoá lại vì bảng màu trong `tailwind.config.ts`
+            chỉ có một bộ tối, bỏ class `dark` là chữ đen trên nền đen.
+          */}
+          <p className="font-label-xs text-label-xs text-on-surface-variant">
+            Bảng màu sáng chưa được thiết kế nên tạm khoá.
+          </p>
         </div>
 
         {/* Language Selector */}
@@ -50,8 +63,37 @@ export const GeneralSettingsPanel: React.FC<GeneralSettingsPanelProps> = ({
             }
           >
             <option value="vi">Tiếng Việt (Mặc định)</option>
-            <option value="en">English</option>
+            <option value="en" disabled>English (chưa dịch)</option>
           </Select>
+          <p className="font-label-xs text-label-xs text-on-surface-variant">
+            Toàn bộ chữ trong app đang là tiếng Việt; bản tiếng Anh chưa dịch.
+          </p>
+        </div>
+
+        {/* Log Retention — AGENTS §18 */}
+        <div className="space-y-1">
+          <label className="block font-label-md text-label-md text-on-surface-variant">
+            Giữ nhật ký (Log retention)
+          </label>
+          <Select
+            value={logs.retention}
+            onChange={(e) =>
+              onLogsChange({ ...logs, retention: e.target.value as LogSettingsDTO['retention'] })
+            }
+          >
+            <option value="7">7 ngày</option>
+            <option value="30">30 ngày (Mặc định)</option>
+            <option value="90">90 ngày</option>
+            <option value="never">Không tự xoá</option>
+          </Select>
+          {/*
+            AGENTS §18 yêu cầu dọn log theo hạn; `runLogRetentionCleanup` chạy lúc
+            mở app nhưng trước đây KHÔNG có ô nào để đổi hạn — cài đặt lưu xuống DB
+            mà người dùng không sờ tới được (audit 04/09/2026).
+          */}
+          <p className="font-label-xs text-label-xs text-on-surface-variant">
+            Log quá hạn được dọn mỗi lần mở app.
+          </p>
         </div>
 
         {/* Toggles */}
@@ -77,7 +119,7 @@ export const GeneralSettingsPanel: React.FC<GeneralSettingsPanelProps> = ({
                 Khôi phục phiên làm việc
               </span>
               <span className="font-label-xs text-label-xs text-on-surface-variant">
-                Tải lại trạng thái trước khi tắt ứng dụng
+                Mở lại đúng trang đang xem trước khi tắt
               </span>
             </div>
             <Switch

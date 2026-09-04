@@ -105,12 +105,22 @@ export const BrowserSettingsPanel: React.FC<BrowserSettingsPanelProps> = ({
               onChange({ ...settings, provider: e.target.value as BrowserSettingsDTO['provider'] })
             }
           >
-            <option value="gpm">GPM Login (Local API)</option>
-            <option value="gologin">GoLogin (Cloud Profile API)</option>
+            {/*
+              Bốn tên còn lại chưa có một file implementation nào — `providerStack`
+              trả `UnsupportedBrowserRuntime` và main từ chối lượt chạy TRƯỚC khi mua
+              email. Khoá ở đây cho khớp dropdown Dashboard, đúng quyết định
+              "tạm thời chỉ dùng Multilogin" (04/09/2026).
+            */}
             <option value="multilogin">Multilogin (Local / Cloud)</option>
-            <option value="camoufox">Camoufox (Anti-detect Firefox Engine)</option>
-            <option value="patchright">Patchright (Undetected Chromium)</option>
+            <option value="gpm" disabled>GPM Login (chưa hỗ trợ)</option>
+            <option value="gologin" disabled>GoLogin (chưa hỗ trợ)</option>
+            <option value="camoufox" disabled>Camoufox (chưa hỗ trợ)</option>
+            <option value="patchright" disabled>Patchright (chưa hỗ trợ)</option>
           </Select>
+          <p className="font-label-xs text-label-xs text-on-surface-variant">
+            Ô này chỉ chọn nơi để nhập thông tin đăng nhập. Browser dùng cho một lượt
+            chạy chọn ở Dashboard.
+          </p>
         </div>
 
         {/* Conditional Configuration based on Provider */}

@@ -48,12 +48,29 @@ export const AccountUpdateInputSchema = z.object({
 
 export type AccountUpdateInputDTO = z.infer<typeof AccountUpdateInputSchema>;
 
+/**
+ * Số dòng tối đa một lần `accounts.list` được trả về.
+ *
+ * Export ra ngoài vì renderer PHẢI kẹp request theo đúng con số này. Cùng lý do
+ * với `LOG_PAGE_SIZE_MAX`: trang Logs từng gửi `pageSize` lớn hơn mức schema cho
+ * phép, IPC trả VALIDATION_ERROR và trang trống trơn dù DB đầy dữ liệu. Trang
+ * Accounts đang đặt đúng bằng mức trần (500) — chỉ cần ai nhích lên một là vỡ y
+ * hệt. Hai con số phải khớp thì phải có MỘT nguồn.
+ */
+export const ACCOUNT_PAGE_SIZE_MAX = 500;
+
 export const AccountFilterSchema = z.object({
   query: z.string().optional(),
   status: z.string().optional(),
   emailProvider: z.string().optional(),
+  /**
+   * Mốc "tạo từ ngày" dạng ISO. Bộ lọc "Ngày tạo" của toolbar trước đây không có
+   * khoá nào để gửi nên chỉ đổi state rồi bật chip "Active Filters" — repo đổi
+   * mốc này sang dạng ngày của SQLite (xem `AccountRepository.buildFilterClause`).
+   */
+  createdFrom: z.string().datetime().optional(),
   page: z.number().int().min(1).default(1),
-  pageSize: z.number().int().min(1).max(500).default(50)
+  pageSize: z.number().int().min(1).max(ACCOUNT_PAGE_SIZE_MAX).default(50)
 }).strict();
 
 export type AccountFilterDTO = z.infer<typeof AccountFilterSchema>;

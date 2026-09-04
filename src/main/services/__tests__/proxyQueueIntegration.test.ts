@@ -114,6 +114,7 @@ function manualConfig(threadCount: number) {
     typeDelayMinMs: 0,
     typeDelayMaxMs: 0,
     module: 'trial',
+    skipWithoutTrial: false,
     emailSource: {
       mode: 'manual',
       entries: Array.from({ length: threadCount }, (_unused, i) => 'w' + (i + 1) + '@x.com|p')

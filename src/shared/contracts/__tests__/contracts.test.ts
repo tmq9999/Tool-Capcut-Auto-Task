@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { IPC_CHANNELS, IPC_EVENTS, FUTURE_IPC_CHANNELS } from '../ipc-channels';
+import { IPC_CHANNELS, IPC_EVENTS } from '../ipc-channels';
 import { PingResponseSchema, PingEnvelopeSchema } from '../api';
 import type { ElectronBridge, PingResponse } from '../api';
 
@@ -33,6 +33,8 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
       'ACCOUNTS_CREATE',
       'ACCOUNTS_UPDATE',
       'ACCOUNTS_DELETE',
+      'ACCOUNTS_EXPORT',
+      'ACCOUNTS_TASKS',
       'LOGS_LIST',
       'LOGS_CLEAR',
       'RUN_START',
@@ -58,15 +60,14 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
     }
   });
 
-  it('freezes unpromoted future IPC channel constants separately without duplicate active channels', () => {
-    const futureRecord = FUTURE_IPC_CHANNELS as Record<string, string>;
-    expect(futureRecord.SETTINGS_GET).toBeUndefined();
-    expect(futureRecord.SETTINGS_SAVE).toBeUndefined();
-    expect(futureRecord.CREDENTIALS_TEST).toBeUndefined();
+  it('promotes accounts:export into the active channel list exactly once', () => {
+    // `accounts:export` từng là chỗ trống trong `FUTURE_IPC_CHANNELS`; nay đã có
+    // handler thật ở `accountsIpc.ts` nên nó phải là kênh gọi được, và chỉ một lần.
+    expect(IPC_CHANNELS.ACCOUNTS_EXPORT).toBe('accounts:export');
 
-    expect(futureRecord.ACCOUNTS_LIST).toBeUndefined();
-    expect(futureRecord.LOGS_LIST).toBeUndefined();
-    expect(FUTURE_IPC_CHANNELS.ACCOUNTS_EXPORT).toBe('accounts:export');
+    const values = Object.values(IPC_CHANNELS) as string[];
+    expect(new Set(values).size).toBe(values.length);
+    expect(values.filter((v) => v === 'accounts:export')).toHaveLength(1);
   });
 
   it('validates strict PingResponseSchema against positive and negative payloads', () => {
@@ -152,7 +153,9 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
                 typeDelayMinMs: 50,
                 typeDelayMaxMs: 150,
                 module: 'trial',
+                skipWithoutTrial: false,
                 proxyMode: 'direct',
+                proxyRegion: 'random',
                 emailSourceMode: 'manual',
                 emailApiProvider: 'gmail94',
                 otpService: 'facebook',
@@ -195,7 +198,15 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
         list: async () => ({ success: true, data: { items: [], total: 0 } }),
         create: async () => ({ success: true, data: { id: 'acc-1' } }),
         update: async () => ({ success: true, data: { success: true } }),
-        remove: async () => ({ success: true, data: { deletedCount: 0 } })
+        remove: async () => ({ success: true, data: { deletedCount: 0 } }),
+        export: async () => ({
+          success: true,
+          data: { canceled: false, filePath: 'C:/tmp/accounts.txt', exportedCount: 0 }
+        }),
+        tasks: async () => ({
+          success: true,
+          data: { items: [], doneCount: 0, creditsEarned: 0 }
+        })
       },
       logs: {
         list: async () => ({ success: true, data: { items: [], total: 0 } }),

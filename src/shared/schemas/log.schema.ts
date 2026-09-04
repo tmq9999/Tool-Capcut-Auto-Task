@@ -17,11 +17,22 @@ export const CanonicalRuntimeLogSchema = z.object({
 
 export type CanonicalRuntimeLog = z.infer<typeof CanonicalRuntimeLogSchema>;
 
+/**
+ * Số dòng tối đa một lần `logs.list` được trả về.
+ *
+ * Export ra ngoài vì phía renderer PHẢI kẹp request theo đúng con số này. Trước
+ * 04/09/2026 trang Logs gửi `pageSize = 1000` trong khi schema chặn ở 500, nên
+ * `logsIpc` trả VALIDATION_ERROR và trang chỉ hiện "Không tải được nhật ký
+ * runtime." với 0 dòng — dù DB có 1573 dòng. Hai con số phải khớp thì phải có
+ * MỘT nguồn.
+ */
+export const LOG_PAGE_SIZE_MAX = 500;
+
 export const LogFilterSchema = z.object({
   level: z.string().optional(),
   email: z.string().optional(),
   page: z.number().int().min(1).default(1),
-  pageSize: z.number().int().min(1).max(500).default(100)
+  pageSize: z.number().int().min(1).max(LOG_PAGE_SIZE_MAX).default(100)
 }).strict();
 
 export type LogFilterDTO = z.infer<typeof LogFilterSchema>;

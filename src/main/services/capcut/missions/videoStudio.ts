@@ -31,6 +31,7 @@ import type { Locator, Page } from 'playwright-core';
 import { assertHittable, dump, mustSee, StepError } from '../diag';
 import { clickIfVisible, humanClick, isDisabled, pick, rand, waitEnabled } from '../human';
 import type { MissionGroup } from '../missionRunner';
+import { closeBlockingPricingModal } from '../overlays';
 import { fillEditor } from '../steps';
 import type { CapcutMissionEnv } from '../types';
 import { URLS } from '../urls';
@@ -92,21 +93,12 @@ const PRO_UPSELL = 'Use advanced features with Pro';
  * trên card upsell Pro — chính bản cũ làm thế. Mở rồi thì mọi bước sau vô nghĩa:
  * lượt 2026-09-02 16:45 chờ node mới 200 giây trong khi bảng giá đang che, rồi
  * lượt thử 2 không mở được dropdown chế độ tạo (`missing_option_Image...`).
+ *
+ * Thân hàm đã chuyển sang `capcut/overlays.ts` để luồng Design Studio dùng chung
+ * — 04/09/2026 nó thiếu đúng bước này và báo `canvas_send_no_effect`.
  */
 async function closeSubscriptionModal(sp: Page, env: CapcutMissionEnv): Promise<void> {
-  const modal = sp.locator('[class*="subscriptionModal"]').first();
-  if (!(await modal.isVisible({ timeout: 500 }).catch(() => false))) return;
-
-  await sp.keyboard.press('Escape').catch(() => {});
-  await sp.waitForTimeout(900);
-  if (await modal.isVisible({ timeout: 500 }).catch(() => false)) {
-    await clickIfVisible(
-      sp,
-      sp.locator('[class*="subscriptionModal"] [aria-label="Close"], [class*="subscriptionModal"] [class*="close"]'),
-      2500
-    );
-  }
-  env.log('⚠️  Bảng giá Pro đang mở — đã đóng để luồng đi tiếp');
+  await closeBlockingPricingModal(sp, env.log);
 }
 
 /**
@@ -183,7 +175,67 @@ async function nodeIds(sp: Page): Promise<string[]> {
     .catch(() => [] as string[]);
 }
 
-async function findExportButton(sp: Page, env: CapcutMissionEnv): Promise<Locator> {
+/**
+ * Bảo đảm node toolbar ĐÃ mọc nút, chọn lại node nếu chưa.
+ *
+ * Toolbar của React Flow chỉ render cho node ĐANG được chọn. Lượt batch
+ * 04/09/2026 (`francisczeno459`) báo `Không nhận ra nút Export trong 0 nút của
+ * node toolbar` NGAY SAU khi `Complete a generation` đã có `do_action err_no=0`
+ * — ảnh có rồi mà toolbar trống, nên node đã mất selection. Nghi phạm gần nhất:
+ * cú `clickIfVisible("Got it")` dẹp guide ngay trước đó click ra ngoài node.
+ *
+ * Không đoán tiếp: chọn lại node rồi ĐỌC LẠI, và chỉ bỏ cuộc sau `attempts` lần.
+ * Lỗi ném ra nói "toolbar không mọc nút nào" chứ không phải "không nhận ra
+ * Export" — hai nguyên nhân khác nhau cần hai cách sửa khác nhau.
+ *
+ * @returns số nút trên toolbar khi đã sẵn sàng.
+ */
+export async function ensureNodeToolbar(
+  sp: Page,
+  nodeId: string,
+  env: CapcutMissionEnv,
+  attempts = 3
+): Promise<number> {
+  const toolbar = sp.locator('.react-flow__node-toolbar button');
+
+  for (let i = 1; i <= attempts; i += 1) {
+    const n = await toolbar.count().catch(() => 0);
+    if (n > 0) return n;
+
+    env.log(`Node toolbar chưa có nút — chọn lại node (lần ${i}/${attempts})`);
+    await humanClick(sp, sp.locator(`.react-flow__node[data-id="${nodeId}"]`).first()).catch(() => {});
+    await sp.waitForTimeout(rand(1200, 2000));
+  }
+
+  const last = await toolbar.count().catch(() => 0);
+  if (last > 0) return last;
+
+  throw new StepError(
+    `Node toolbar không mọc nút nào sau ${attempts} lần chọn lại node ${nodeId}`,
+    await dump(sp, 'node_toolbar_empty')
+  );
+}
+
+export async function findExportButton(sp: Page, env: CapcutMissionEnv): Promise<Locator> {
+  /**
+   * Mỏ neo ĐẦU TIÊN: `data-testid` của chính CapCut, không hash và không cần
+   * hover. Đo 04/09/2026 05:55 — node toolbar 5 nút, tooltip không nút nào khớp
+   * `/export/i` nên đường dưới ném, mà DOM lại có sẵn
+   * `data-testid="studio-node-export-trigger"` (fixture
+   * `tools/fixtures/dom-node-toolbar-export.html`).
+   *
+   * Bắt buộc giới hạn trong `.react-flow__node-toolbar`: cùng trang còn
+   * `data-testid="global-export-trigger"` là export cấp TRANG, bấm vào đó là
+   * sai đích y như cái bẫy `Save to library` ở dưới.
+   */
+  const byTestId = sp.locator(
+    '.react-flow__node-toolbar [data-testid="studio-node-export-trigger"]'
+  );
+  if ((await byTestId.count().catch(() => 0)) === 1) {
+    env.log('Nút Export nhận bằng data-testid=studio-node-export-trigger');
+    return byTestId.first();
+  }
+
   const btns = sp.locator('.react-flow__node-toolbar button');
   const n = await btns.count().catch(() => 0);
 
@@ -206,7 +258,8 @@ async function findExportButton(sp: Page, env: CapcutMissionEnv): Promise<Locato
   }
 
   throw new StepError(
-    `Không nhận ra nút Export trong ${n} nút của node toolbar (đã soi tooltip từng nút)`,
+    `Không nhận ra nút Export trong ${n} nút của node toolbar ` +
+      '(không có data-testid=studio-node-export-trigger, và đã soi tooltip từng nút)',
     await dump(sp, 'export_btn_unidentified')
   );
 }
@@ -369,6 +422,10 @@ export const videoStudioGroup: MissionGroup = {
     // Dep guide "Save once, reuse anytime" — chinh no lam moc them nut
     // "Save to library" vao node toolbar va gay nhap nhang selector.
     await clickIfVisible(sp, sp.locator('button').filter({ hasText: /^Got it$/ }), 3000);
+
+    // Dẹp guide xong có thể làm node mất selection ⇒ toolbar biến mất. Đọc lại
+    // và chọn lại node nếu cần, thay vì để `findExportButton` báo "0 nút".
+    await ensureNodeToolbar(sp, target, env);
 
     const exportBtn = await findExportButton(sp, env);
     // Nút bị disabled trong lúc CapCut còn đang xử lý ảnh -> phải chờ, và PHẢI

@@ -4,6 +4,7 @@ import type { IpcRegistrar } from './registerIpc';
 import type { SettingsService } from '../services/SettingsService';
 import type { ServiceConnectionManager } from '../services/ServiceConnectionManager';
 import type { IpcEnvelope } from '../../shared/schemas/ipc-envelope.schema';
+import { validationError } from './ipcResult';
 import type { AppSettingsDTO } from '../../shared/schemas/settings.schema';
 import type { CredentialStatusDTO, SanitizedDiagnosticResult } from '../../shared/schemas/diagnostics.schema';
 
@@ -38,13 +39,10 @@ export function registerSettingsIpc(
     async (_event: unknown, request?: unknown): Promise<IpcEnvelope<{ success: boolean }>> => {
       const validation = IpcContractRegistry.settings.save.request.safeParse(request);
       if (!validation.success) {
-        return {
-          success: false,
-          error: {
-            code: 'ERR_VALIDATION_FAILED',
-            message: 'Invalid settings save payload.'
-          }
-        };
+        // Câu cũ là "Invalid settings save payload." — tiếng Anh giữa UI tiếng
+        // Việt và không nói field nào sai. Xoá trắng ô "Luồng" trên Dashboard là
+        // rơi vào đây (`threadCount: 0` vi phạm `.min(1)`), autosave hỏng im lặng.
+        return validationError(validation.error);
       }
 
       try {
@@ -72,13 +70,7 @@ export function registerSettingsIpc(
     async (_event: unknown, request?: unknown): Promise<IpcEnvelope<SanitizedDiagnosticResult>> => {
       const validation = IpcContractRegistry.credentials.test.request.safeParse(request);
       if (!validation.success) {
-        return {
-          success: false,
-          error: {
-            code: 'ERR_VALIDATION_FAILED',
-            message: 'Invalid credential test payload.'
-          }
-        };
+        return validationError(validation.error);
       }
 
       try {

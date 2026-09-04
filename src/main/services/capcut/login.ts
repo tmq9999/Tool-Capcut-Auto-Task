@@ -23,6 +23,9 @@
 
 import type { BrowserContext, Locator, Page } from 'playwright-core';
 
+import { dump, StepError } from './diag';
+import { skipOnboardingSurvey } from './overlays';
+
 /**
  * Thông tin đăng nhập tối thiểu mà engine cần. Bản gốc là `Credentials` trong
  * `src/config.ts` (CLI đọc `.env`); trong app nguồn là bảng `accounts` của
@@ -69,7 +72,12 @@ async function clickUntilVisible(trigger: Locator, target: Locator, attempts = 6
     await trigger.click({ timeout: 3000 }).catch(() => {});
     if (await target.isVisible({ timeout: 600 }).catch(() => false)) return;
   }
-  throw new Error('Không mở được form đăng nhập bằng email');
+  // Không có hiện trường thì lỗi này chỉ là một câu chữ: CHANGELOG đã ghi một
+  // account chết vì `waitFor: Timeout 25000ms` mà không ai điều tra tiếp được.
+  throw new StepError(
+    'Không mở được form đăng nhập bằng email',
+    await dump(trigger.page(), 'login_form_email_khong_mo')
+  );
 }
 
 /** Kiểm tra đã đăng nhập chưa (đang ở trong app và không còn ở trang login/signup) */
@@ -140,7 +148,17 @@ export async function loginCapcut(
     level: 2,
     name: /^(Create an account|Tạo tài khoản|Welcome back|Chào mừng bạn trở lại)$/,
   });
-  await heading.waitFor({ state: 'visible', timeout: 25000 });
+  /**
+   * `waitFor` 25s ném lỗi Playwright TRẦN — không ảnh, không DOM. CHANGELOG ghi
+   * `yuzhpxhu31823` chết đúng ở đây (`locator.waitFor: Timeout 25000ms`) và đến
+   * giờ vẫn "chưa có nguyên nhân gốc" vì không có hiện trường để xem.
+   */
+  await heading.waitFor({ state: 'visible', timeout: 25000 }).catch(async (e: unknown) => {
+    throw new StepError(
+      'Không thấy heading Welcome back / Create an account sau 25s: ' + (e as Error).message,
+      await dump(page, 'login_heading_khong_hien')
+    );
+  });
   const headingText = (await heading.textContent())?.replace(/\s+/g, ' ').trim() ?? '';
 
   if (/Create an account|Tạo tài khoản/.test(headingText)) {
@@ -168,15 +186,8 @@ export async function loginCapcut(
     .catch(() => {});
   await page.waitForTimeout(5000);
 
-  // Bỏ qua màn hình khảo sát nếu có
-  const skipBtn = page
-    .locator('.skip-mrkR37, button:has-text("Skip"), div[role="button"]:text-is("Skip")')
-    .first();
-  if (await skipBtn.isVisible({ timeout: 6000 }).catch(() => false)) {
-    await skipBtn.click({ timeout: 8000 }).catch(() => {});
-    log('   → Đã bấm Skip khảo sát');
-    await page.waitForTimeout(3000);
-  }
+  // Bỏ khảo sát onboarding — và kiểm modal đã tắt thật (xem `onboarding.ts`)
+  await skipOnboardingSurvey(page, log);
 
   // Đóng modal quảng cáo / onboarding nếu che UI
   const closeModal = page
@@ -199,8 +210,9 @@ export async function loginCapcut(
   }
 
   if (!(await isLoggedIn(page))) {
-    throw new Error(
-      `Đăng nhập thất bại (URL hiện tại: ${page.url()}). Có thể sai mật khẩu hoặc bị chặn captcha.`
+    throw new StepError(
+      `Đăng nhập thất bại (URL hiện tại: ${page.url()}). Có thể sai mật khẩu hoặc bị chặn captcha.`,
+      await dump(page, 'dang_nhap_that_bai')
     );
   }
 

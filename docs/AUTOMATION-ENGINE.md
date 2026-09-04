@@ -196,8 +196,10 @@ Bước đo tiếp: dump DOM **ngay sau** cú click icon (hiện chỉ dump khi 
 thất bại), và thử click trực tiếp `.Lv_Task-wrapper` để tách giả thuyết 1 khỏi 2.
 
 
-Khi thêm nhiệm vụ mới hoặc CapCut đổi UI: chạy `npm run capture` để ghi một lượt
-làm tay, rồi trích DOM thành fixture và viết assertion **trước** khi sửa selector.
+Khi thêm nhiệm vụ mới hoặc CapCut đổi UI: chạy một lượt làm tay qua
+`node scripts/live-capcut-run.mjs` (engine tự `dump()` DOM vào
+`<userData>/debug/`), trích DOM đó thành fixture dưới `tools/fixtures/` rồi viết
+assertion trong `npm run selectors` **trước** khi sửa selector.
 Đó là cách duy nhất trong dự án này để không sửa mù.
 
 

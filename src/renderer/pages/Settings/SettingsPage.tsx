@@ -14,6 +14,7 @@ import {
   type KnownServiceName,
 } from './settingsController';
 import { DEFAULT_APP_SETTINGS } from '@shared/settings/default-settings';
+import { applyTheme, writeBootPreferences } from '@renderer/app/appPreferences';
 
 export const SettingsPage: React.FC = () => {
   const bridge = useMemo<ISettingsBridge>(() => {
@@ -59,12 +60,37 @@ export const SettingsPage: React.FC = () => {
     };
   }, [controller]);
 
+  /**
+   * Khôi phục mặc định CHỈ những mục trang này hiện ra.
+   *
+   * Bản cũ ghi đè cả `DEFAULT_APP_SETTINGS`, tức là xoá luôn `automation` (số
+   * luồng, độ trễ, quy tắc mật khẩu — sửa ở Dashboard) và `customEmail` (domain,
+   * API) mà không nói gì: người dùng bấm nút ở trang Settings rồi mất cấu hình ở
+   * trang khác (audit 04/09/2026).
+   */
   const handleResetDefaults = () => {
-    controller.updateSettings(() => JSON.parse(JSON.stringify(DEFAULT_APP_SETTINGS)));
+    const defaults = JSON.parse(JSON.stringify(DEFAULT_APP_SETTINGS)) as typeof DEFAULT_APP_SETTINGS;
+    controller.updateSettings((current) => ({
+      ...current,
+      general: defaults.general,
+      browser: defaults.browser,
+      logs: defaults.logs,
+      exportConfig: defaults.exportConfig
+    }));
   };
 
   const handleSaveSettings = async () => {
     await controller.save();
+    /**
+     * Áp ngay hai cài đặt hiển thị sau khi lưu, và cập nhật bộ đệm khởi động —
+     * nếu chỉ ghi DB thì người dùng phải khởi động lại app mới thấy tác dụng.
+     */
+    const general = controller.getState().settings.general;
+    writeBootPreferences(window.localStorage, {
+      theme: general.theme,
+      sessionRestore: general.sessionRestore
+    });
+    applyTheme(general.theme, document.documentElement);
   };
 
   const handleTestConnection = async (serviceName: KnownServiceName) => {
@@ -167,6 +193,10 @@ export const SettingsPage: React.FC = () => {
                 settings={state.settings.general}
                 onChange={(general) =>
                   controller.updateSettings((prev) => ({ ...prev, general }))
+                }
+                logs={state.settings.logs}
+                onLogsChange={(logs) =>
+                  controller.updateSettings((prev) => ({ ...prev, logs }))
                 }
               />
             </div>

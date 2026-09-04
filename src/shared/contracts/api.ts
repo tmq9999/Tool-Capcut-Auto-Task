@@ -29,6 +29,18 @@ import type {
   AccountUpdateInputDTO
 } from '../schemas/account.schema';
 import {
+  AccountExportRequestSchema,
+  AccountExportResultSchema,
+  type AccountExportRequestDTO,
+  type AccountExportResultDTO
+} from '../schemas/account-export.schema';
+import {
+  AccountTasksRequestSchema,
+  AccountTasksResponseSchema,
+  type AccountTasksRequestDTO,
+  type AccountTasksResponseDTO
+} from '../schemas/account-task.schema';
+import {
   CredentialStatusDTOSchema,
   type CredentialStatusDTO,
   SanitizedDiagnosticResultSchema,
@@ -102,6 +114,14 @@ export const IpcContractRegistry = {
     delete: {
       request: z.object({ ids: z.array(z.string().min(1)).min(1) }).strict(),
       response: z.object({ deletedCount: z.number().int().min(0) }).strict()
+    },
+    export: {
+      request: AccountExportRequestSchema,
+      response: AccountExportResultSchema
+    },
+    tasks: {
+      request: AccountTasksRequestSchema,
+      response: AccountTasksResponseSchema
     }
   },
   logs: {
@@ -170,6 +190,13 @@ export interface ElectronBridge {
     create(input: AccountCreateInputDTO): Promise<IpcEnvelope<{ id: string }>>;
     update(id: string, data: AccountUpdateInputDTO): Promise<IpcEnvelope<{ success: boolean }>>;
     remove(ids: string[]): Promise<IpcEnvelope<{ deletedCount: number }>>;
+    /**
+     * Xuất ra file. Main tự mở hộp thoại lưu và tự ghi đĩa; renderer nhận lại
+     * đường dẫn + số dòng, KHÔNG nhận nội dung (AGENTS §13).
+     */
+    export(request: AccountExportRequestDTO): Promise<IpcEnvelope<AccountExportResultDTO>>;
+    /** Tiến độ 12 nhiệm vụ CapCut của một account, đọc từ `account_tasks`. */
+    tasks(request: AccountTasksRequestDTO): Promise<IpcEnvelope<AccountTasksResponseDTO>>;
   };
   logs: {
     list(filter: LogFilterDTO): Promise<IpcEnvelope<{ items: CanonicalRuntimeLog[]; total: number }>>;

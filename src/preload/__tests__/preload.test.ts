@@ -69,6 +69,7 @@ describe('Preload Bridge (Task 2.1.3 RED)', () => {
     expect(typeof bridge.accounts.create).toBe('function');
     expect(typeof bridge.accounts.update).toBe('function');
     expect(typeof bridge.accounts.remove).toBe('function');
+    expect(typeof bridge.accounts.export).toBe('function');
 
     expect(bridge.logs).toBeDefined();
     expect(typeof bridge.logs.list).toBe('function');
@@ -228,6 +229,26 @@ describe('Preload runtime channels', () => {
     await bridge.accounts.remove(['acc-1']);
 
     expect(mockIpcRenderer.invoke).toHaveBeenCalledWith(IPC_CHANNELS.ACCOUNTS_DELETE, { ids: ['acc-1'] });
+  });
+
+  it('forwards accounts.export as one request payload', async () => {
+    mockIpcRenderer.invoke.mockResolvedValue({
+      success: true,
+      data: { canceled: false, filePath: 'C:/tmp/a.txt', exportedCount: 1 }
+    });
+    const bridge = await loadBridge();
+
+    await bridge.accounts.export({
+      format: 'TXT',
+      fields: ['email'],
+      scope: { kind: 'all' }
+    });
+
+    expect(mockIpcRenderer.invoke).toHaveBeenCalledWith(IPC_CHANNELS.ACCOUNTS_EXPORT, {
+      format: 'TXT',
+      fields: ['email'],
+      scope: { kind: 'all' }
+    });
   });
 
   it('forwards email.readOtp with the optional type', async () => {

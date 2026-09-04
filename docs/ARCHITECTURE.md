@@ -56,12 +56,15 @@ window.electronAPI = {
 | app | `app:ping` | — |
 | settings | `settings:get`, `settings:save` | — |
 | credentials | `credentials:test` | `services:on-status-changed` |
-| accounts | `accounts:list`, `accounts:create`, `accounts:update`, `accounts:delete` | — |
+| accounts | `accounts:list`, `accounts:create`, `accounts:update`, `accounts:delete`, `accounts:export`, `accounts:tasks` | — |
 | logs | `logs:list`, `logs:clear` | `logs:on-entry` |
 | run | `run:start`, `run:stop`, `run:stop-thread`, `run:threads`, `run:progress` | `run:on-progress` |
 | email | `email:providers`, `email:read-otp` | — |
 
-`FUTURE_IPC_CHANNELS` giữ chỗ `accounts:export`. Handler nằm ở
+`accounts:export` ghi file ở MAIN (giải mã `password_capcut`/`email_data` không rời
+main process — AGENTS §13) và `accounts:tasks` đọc tiến độ 12 nhiệm vụ từ
+`account_tasks`; cả hai đã có handler thật nên `FUTURE_IPC_CHANNELS` không còn.
+Handler nằm ở
 `src/main/ipc/{settingsIpc,accountsIpc,logsIpc,automationIpc}.ts`, gom lại trong
 `registerIpc.ts`; mọi trả về đi qua `ipcResult.ts` để lỗi được normalize thành mã
 chuẩn thay vì rò stack trace.

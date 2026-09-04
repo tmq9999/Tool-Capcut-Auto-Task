@@ -13,6 +13,23 @@ export const BrowserRuntimeEnum = z.enum([
 ]);
 export type BrowserRuntime = z.infer<typeof BrowserRuntimeEnum>;
 
+/**
+ * Browser THẬT SỰ chạy được. Enum ở trên giữ đủ 5 giá trị để dữ liệu cũ trong
+ * `app_settings` còn parse được, nhưng chỉ những giá trị ở đây mới có provider +
+ * launcher.
+ *
+ * Audit 04/09/2026: GoLogin/GPM/Camoufox/Patchright không có một file
+ * implementation nào (`find` ra 0 kết quả); `runtime/providerStack.ts` trả
+ * `UnsupportedBrowserRuntime`. Mà dropdown Dashboard không khoá gì, và `start()`
+ * MUA EMAIL trước khi mở browser — nên chọn nhầm là mất tiền rồi mới báo lỗi.
+ * Một nguồn duy nhất để UI khoá và main chặn, không để hai chỗ tự đoán.
+ */
+export const IMPLEMENTED_BROWSER_RUNTIMES: readonly BrowserRuntime[] = ['multilogin'];
+
+export function isBrowserImplemented(browser: BrowserRuntime): boolean {
+  return IMPLEMENTED_BROWSER_RUNTIMES.includes(browser);
+}
+
 export const AutomationModuleEnum = z.enum(['trial', 'team', 'credit']);
 export type AutomationModule = z.infer<typeof AutomationModuleEnum>;
 
@@ -33,6 +50,19 @@ export const EmailSourceConfigSchema = z.discriminatedUnion('mode', [
 ]);
 export type EmailSourceConfig = z.infer<typeof EmailSourceConfigSchema>;
 
+/**
+ * Vùng KiotProxy gửi kèm khi xin proxy mới. KiotProxy có 4 lựa chọn
+ * (`bac`/`trung`/`nam`/`random`) nhưng `random` KHÔNG phải giá trị gửi đi: nó
+ * nghĩa là không gửi khoá `region` và để KiotProxy tự chọn — đúng đường đang chạy
+ * được hôm nay. Vì vậy contract của một lượt chạy chỉ nhận ba vùng thật.
+ */
+export const ProxyRegionEnum = z.enum(['bac', 'trung', 'nam']);
+export type ProxyRegion = z.infer<typeof ProxyRegionEnum>;
+
+/** Lựa chọn trên Dashboard, có thêm `random` = không chỉ định vùng. */
+export const ProxyRegionChoiceEnum = z.enum(['bac', 'trung', 'nam', 'random']);
+export type ProxyRegionChoice = z.infer<typeof ProxyRegionChoiceEnum>;
+
 export const ProxyConfigSchema = z.discriminatedUnion('mode', [
   z.object({
     mode: z.literal('direct'),
@@ -45,7 +75,8 @@ export const ProxyConfigSchema = z.discriminatedUnion('mode', [
      * account", so an operator can reserve the rest for another tool.
      */
     keys: z.array(z.string().min(1)).default([]),
-    region: z.string().optional()
+    /** Chỉ có khi người dùng chọn một vùng cụ thể; `random` không sinh khoá này. */
+    region: ProxyRegionEnum.optional()
   }).strict()
 ]);
 export type ProxyConfig = z.infer<typeof ProxyConfigSchema>;
@@ -79,6 +110,13 @@ export const AutomationRunConfigSchema = z.object({
   typeDelayMinMs: z.number().int().min(0).max(60_000),
   typeDelayMaxMs: z.number().int().min(0).max(60_000),
   module: AutomationModuleEnum,
+  /**
+   * Bỏ qua account không có ưu đãi Pro ≥ 7 ngày thay vì vẫn chạy 12 nhiệm vụ.
+   * Mặc định của Dashboard là `false` (fail-open): cổng trial đọc bằng selector,
+   * mà lượt 02/09/2026 chứng minh fail-closed sẽ âm thầm loại cả 21 account khi
+   * selector vỡ — trong app thì mỗi account bỏ qua là một hộp thư đã trả tiền.
+   */
+  skipWithoutTrial: z.boolean(),
   emailSource: EmailSourceConfigSchema,
   proxy: ProxyConfigSchema,
   password: PasswordConfigSchema,

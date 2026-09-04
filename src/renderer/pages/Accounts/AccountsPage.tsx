@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useSyncExternalStore } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Download, Trash2, Edit, Plus, AlertCircle } from 'lucide-react';
 import { RowSelectionState } from '@tanstack/react-table';
 import { AppHeader } from '@renderer/layouts/AppHeader';
@@ -12,20 +13,11 @@ import { AddAccountDrawer } from './AddAccountDrawer';
 import { EditAccountDrawer } from './EditAccountDrawer';
 import { DeleteAccountDialog } from './DeleteAccountDialog';
 import { ExportDialog } from './ExportDialog';
-import { AccountsController, type IAccountsBridge } from './accountsController';
+import { TaskProgressDialog } from './TaskProgressDialog';
+import { AccountsController, dateFilterToCreatedFrom, type IAccountsBridge } from './accountsController';
 import { Account, AccountFilterState, ExportFormat } from '@shared/types/account';
-import { ExportFieldName } from '@shared/types/settings';
-import type { ExportSettingsDTO, ExportField } from '@shared/schemas/settings.schema';
+import type { ExportSettingsDTO } from '@shared/schemas/settings.schema';
 import { DEFAULT_APP_SETTINGS } from '@shared/settings/default-settings';
-
-const CANONICAL_TO_DISPLAY_FIELD: Record<ExportField, ExportFieldName> = {
-  email: 'Email',
-  passwordCapcut: 'Password CapCut',
-  emailData: 'Email Data',
-  credit: 'Credit',
-  subscription: 'Subscription',
-  createdAt: 'Create At',
-};
 
 const CANONICAL_TO_DISPLAY_FORMAT: Record<'xlsx' | 'csv' | 'txt', ExportFormat> = {
   xlsx: 'XLSX',
@@ -49,10 +41,19 @@ const OFFLINE_BRIDGE: IAccountsBridge = {
       success: false,
       error: { code: 'CONFIG_ERROR', message: 'Không có kết nối tới tiến trình chính.' },
     }),
+    export: async () => ({
+      success: false,
+      error: { code: 'CONFIG_ERROR', message: 'Không có kết nối tới tiến trình chính.' },
+    }),
+    tasks: async () => ({
+      success: false,
+      error: { code: 'CONFIG_ERROR', message: 'Không có kết nối tới tiến trình chính.' },
+    }),
   },
 };
 
 export const AccountsPage: React.FC = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
   const controller = useMemo(() => {
     const api = window.electronAPI;
     return new AccountsController(api ? { accounts: api.accounts } : OFFLINE_BRIDGE);
@@ -106,32 +107,65 @@ export const AccountsPage: React.FC = () => {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+  /** Account đang xem tiến độ 12 nhiệm vụ; null = hộp thoại đóng. */
+  const [taskAccount, setTaskAccount] = useState<Account | null>(null);
 
-  // Filtered accounts calculation
+  /**
+   * Nút Export trên Dashboard dẫn sang đây kèm `?export=1` — chỉ có MỘT hộp thoại
+   * xuất trong app, đúng chỗ chọn được phạm vi/định dạng/cột. Xoá tham số ngay sau
+   * khi mở để bấm F5 hay quay lại không tự bật hộp thoại lần nữa.
+   */
+  useEffect(() => {
+    if (searchParams.get('export') !== '1') return;
+    setIsExportDialogOpen(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete('export');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  /**
+   * Bộ lọc GỬI XUỐNG SERVER. Một nguồn duy nhất cho cả `load()` và phạm vi
+   * "Đang lọc" của hộp thoại xuất — xuất theo bộ lọc mà lệch bộ lọc đang xem
+   * thì người dùng nhận file khác hẳn cái đang nhìn.
+   */
+  const serverFilter = useMemo(
+    () => ({
+      query: filters.searchQuery,
+      status: filters.statusFilter,
+      emailProvider: filters.providerFilter,
+      createdFrom: dateFilterToCreatedFrom(filters.dateFilter),
+    }),
+    [filters.searchQuery, filters.statusFilter, filters.providerFilter, filters.dateFilter]
+  );
+
+  /**
+   * Đẩy bộ lọc XUỐNG SERVER. Bản cũ chỉ `load()` một lần rồi lọc phía client trên
+   * 500 dòng đầu — có 2000 account thì cái nằm ở dòng 900 tìm không ra dù DB có
+   * (audit 04/09/2026). Debounce vì ô tìm kiếm gõ từng ký tự.
+   */
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void controller.load(serverFilter);
+      setCurrentPage(1);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [controller, serverFilter]);
+
+  /**
+   * Ba bộ lọc trên đã chạy Ở SERVER nên KHÔNG lọc lại ở đây — lọc hai lần thì kết
+   * quả server trả về đúng lại bị cắt bởi phép so client-side yếu hơn.
+   * `browserFilter` vẫn ở client vì contract chưa có khoá tương ứng.
+   */
   const filteredAccounts = useMemo(() => {
     return accounts.filter((acc) => {
-      const q = filters.searchQuery.toLowerCase();
-      const matchesSearch =
-        !q ||
-        acc.email.toLowerCase().includes(q) ||
-        (acc.proxy && acc.proxy.toLowerCase().includes(q)) ||
-        (acc.notes && acc.notes.toLowerCase().includes(q));
-
-      const matchesStatus =
-        filters.statusFilter === 'all' || acc.status === filters.statusFilter;
-
-      const matchesProvider =
-        filters.providerFilter === 'all' ||
-        acc.provider.toLowerCase() === filters.providerFilter.toLowerCase();
-
       const matchesBrowser =
         filters.browserFilter === 'all' ||
         (acc.browserProfile &&
           acc.browserProfile.toLowerCase().includes(filters.browserFilter.toLowerCase()));
 
-      return matchesSearch && matchesStatus && matchesProvider && matchesBrowser;
+      return matchesBrowser;
     });
-  }, [accounts, filters]);
+  }, [accounts, filters.browserFilter]);
 
   // Checked count
   const checkedAccountIds = Object.keys(rowSelection).filter((k) => rowSelection[k]);
@@ -184,6 +218,7 @@ export const AccountsPage: React.FC = () => {
     () =>
       createAccountsColumns({
         onEditAccount: handleEditAccount,
+        onViewTasks: (account) => setTaskAccount(account),
       }),
     []
   );
@@ -269,6 +304,7 @@ export const AccountsPage: React.FC = () => {
               rowSelection={rowSelection}
               onRowSelectionChange={setRowSelection}
               getRowId={(row) => row.id}
+              pagination={{ pageIndex: currentPage - 1, pageSize }}
               emptyText={
                 controllerState.isLoading
                   ? 'Đang tải danh sách tài khoản...'
@@ -314,11 +350,24 @@ export const AccountsPage: React.FC = () => {
         onClose={() => setIsExportDialogOpen(false)}
         checkedCount={checkedCount}
         filteredCount={filteredAccounts.length}
-        totalCount={accounts.length}
-        exportFields={exportConfig.checkedFields.map(
-          (f) => CANONICAL_TO_DISPLAY_FIELD[f] ?? 'Email'
-        )}
+        /**
+         * Tổng THẬT trong DB, không phải số dòng đã tải. Phạm vi "Tất cả" xuất
+         * hết bảng nên con số trên nút phải là con số đó.
+         */
+        totalCount={controllerState.total}
+        exportFields={exportConfig.checkedFields}
         defaultFormat={CANONICAL_TO_DISPLAY_FORMAT[exportConfig.defaultFormat] ?? 'TXT'}
+        checkedIds={checkedAccountIds}
+        currentFilter={serverFilter}
+        onExport={(request) => controller.exportAccounts(request)}
+      />
+
+      <TaskProgressDialog
+        isOpen={taskAccount !== null}
+        onClose={() => setTaskAccount(null)}
+        accountId={taskAccount?.id ?? null}
+        email={taskAccount?.email ?? ''}
+        loadTasks={(accountId) => controller.loadTasks(accountId)}
       />
     </div>
   );

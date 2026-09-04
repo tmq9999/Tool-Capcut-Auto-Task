@@ -4,6 +4,8 @@ import { Button } from '@renderer/components/ui/Button';
 
 export interface DashboardActionBarProps {
   accountCount?: number;
+  /** Số dòng lưới đang thực sự giữ; nhỏ hơn tổng thì hiện "đang tải / tổng". */
+  loadedCount?: number;
   proxyCount?: number;
   browserName?: string;
   onSaveConfig?: () => void;
@@ -15,6 +17,7 @@ export interface DashboardActionBarProps {
 
 export const DashboardActionBar: React.FC<DashboardActionBarProps> = ({
   accountCount = 10,
+  loadedCount,
   proxyCount = 10,
   browserName = 'Multilogin',
   onSaveConfig,
@@ -29,7 +32,16 @@ export const DashboardActionBar: React.FC<DashboardActionBarProps> = ({
       <div className="flex items-center gap-4 font-body-sm text-body-sm text-on-surface-variant">
         <div className="flex items-center gap-1.5">
           <User className="w-3.5 h-3.5 text-primary" />
-          <span className="font-medium text-on-surface">{accountCount}</span>
+          {/*
+            Hiện "đang tải / tổng" khi lưới bị cắt: bản cũ chỉ hiện tổng thật trong
+            DB trong khi lưới chỉ nạp 200 dòng mới nhất — người dùng đếm không ra
+            (audit 04/09/2026).
+          */}
+          <span className="font-medium text-on-surface">
+            {typeof loadedCount === 'number' && loadedCount < accountCount
+              ? loadedCount + ' / ' + accountCount
+              : accountCount}
+          </span>
           <span className="text-xs">Tài khoản</span>
         </div>
 

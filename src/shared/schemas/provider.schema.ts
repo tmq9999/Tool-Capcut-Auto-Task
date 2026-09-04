@@ -11,6 +11,18 @@ export const EmailApiProviderEnum = z.enum(['gmail94', 'dongvanfb']);
 export type EmailApiProvider = z.infer<typeof EmailApiProviderEnum>;
 
 /**
+ * Slug dịch vụ OTP của tool này. Gmail94 thuê hộp thư THEO dịch vụ và `otp/read`
+ * lọc mã theo đúng slug đã thuê, nên slug phải khớp site đang tự động hoá.
+ *
+ * Đo được trên `GET https://gmail94.com/api/services` (04/09/2026): gmail94 có
+ * `{"id":29,"name":"CapCut","slug":"capcut","price":"1000"}`. Slug này là HẰNG,
+ * không phải nút điều chỉnh của người dùng: tool chỉ tự động hoá CapCut, và một
+ * ô không màn hình nào sửa được mà giá trị lại sai thì chỉ sinh ra lỗi "thuê hộp
+ * facebook rồi chờ mã CapCut" — đúng thứ đã xảy ra trước 04/09/2026.
+ */
+export const CAPCUT_OTP_SERVICE = 'capcut';
+
+/**
  * Every email source a run can draw from. `customdomain` is a catch-all domain
  * the operator owns: addresses are generated locally and read back over HTTP, so
  * it costs nothing and needs no API key.

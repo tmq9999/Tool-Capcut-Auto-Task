@@ -60,11 +60,25 @@ describe('registerAccountsIpc', () => {
     };
   }
 
+  function exportService(overrides: Record<string, unknown> = {}) {
+    return {
+      export: async () => ({ canceled: false, filePath: 'C:/tmp/accounts.txt', exportedCount: 3 }),
+      ...overrides
+    };
+  }
+
+  function taskService(overrides: Record<string, unknown> = {}) {
+    return {
+      listByAccount: () => ({ items: [], doneCount: 0, creditsEarned: 0 }),
+      ...overrides
+    };
+  }
+
   it('lists accounts through the service with a validated filter', async () => {
     let seen: unknown = null;
     registerAccountsIpc(registrar, accountsService({
       list: (filter: unknown) => { seen = filter; return listResult; }
-    }) as never);
+    }) as never, exportService() as never, taskService() as never);
 
     const envelope = await registrar.invoke(IPC_CHANNELS.ACCOUNTS_LIST, { page: 2, pageSize: 25 });
 
@@ -73,18 +87,20 @@ describe('registerAccountsIpc', () => {
   });
 
   it('rejects a filter with an out-of-range page size', async () => {
-    registerAccountsIpc(registrar, accountsService() as never);
+    registerAccountsIpc(registrar, accountsService() as never, exportService() as never, taskService() as never);
 
     const envelope = await registrar.invoke(IPC_CHANNELS.ACCOUNTS_LIST, { page: 1, pageSize: 5000 });
 
-    expect(envelope).toEqual({
-      success: false,
-      error: { code: 'ERR_VALIDATION_FAILED', message: 'Yêu cầu không hợp lệ.' }
-    });
+    // Lỗi phải NÊU field, không chỉ "Yêu cầu không hợp lệ." — xem `ipcResult.ts`.
+    expect(envelope.success).toBe(false);
+    if (envelope.success) return;
+    expect(envelope.error.code).toBe('ERR_VALIDATION_FAILED');
+    expect(envelope.error.details?.field).toBe('pageSize');
+    expect(String(envelope.error.details?.reason)).toMatch(/500/);
   });
 
   it('creates an account and returns only its id', async () => {
-    registerAccountsIpc(registrar, accountsService() as never);
+    registerAccountsIpc(registrar, accountsService() as never, exportService() as never, taskService() as never);
 
     const envelope = await registrar.invoke(IPC_CHANNELS.ACCOUNTS_CREATE, {
       email: 'a@b.com',
@@ -98,7 +114,7 @@ describe('registerAccountsIpc', () => {
   });
 
   it('updates an account with a secret operation', async () => {
-    registerAccountsIpc(registrar, accountsService() as never);
+    registerAccountsIpc(registrar, accountsService() as never, exportService() as never, taskService() as never);
 
     const envelope = await registrar.invoke(IPC_CHANNELS.ACCOUNTS_UPDATE, {
       id: 'acc-1',
@@ -109,7 +125,7 @@ describe('registerAccountsIpc', () => {
   });
 
   it('deletes accounts and reports the count', async () => {
-    registerAccountsIpc(registrar, accountsService() as never);
+    registerAccountsIpc(registrar, accountsService() as never, exportService() as never, taskService() as never);
 
     const envelope = await registrar.invoke(IPC_CHANNELS.ACCOUNTS_DELETE, { ids: ['acc-1', 'acc-2'] });
 
@@ -119,21 +135,126 @@ describe('registerAccountsIpc', () => {
   it('normalizes a repository failure into a persistence error', async () => {
     registerAccountsIpc(registrar, accountsService({
       list: () => { throw new Error('db locked'); }
-    }) as never);
+    }) as never, exportService() as never, taskService() as never);
 
     const envelope = await registrar.invoke(IPC_CHANNELS.ACCOUNTS_LIST, { page: 1, pageSize: 50 });
 
     expect(envelope).toMatchObject({ success: false, error: { code: 'ERR_PERSISTENCE_FAILED' } });
   });
 
+  it('xuất account: chuyển nguyên yêu cầu đã kiểm cho service và trả lại đường dẫn', async () => {
+    let seen: unknown = null;
+    registerAccountsIpc(registrar, accountsService() as never, exportService({
+      export: async (req: unknown) => {
+        seen = req;
+        return { canceled: false, filePath: 'C:/tmp/accounts.csv', exportedCount: 2 };
+      }
+    }) as never, taskService() as never);
+
+    const envelope = await registrar.invoke(IPC_CHANNELS.ACCOUNTS_EXPORT, {
+      format: 'CSV',
+      fields: ['email', 'passwordCapcut'],
+      scope: { kind: 'checked', ids: ['acc-1', 'acc-2'] }
+    });
+
+    expect(envelope).toEqual({
+      success: true,
+      data: { canceled: false, filePath: 'C:/tmp/accounts.csv', exportedCount: 2 }
+    });
+    expect(seen).toEqual({
+      format: 'CSV',
+      fields: ['email', 'passwordCapcut'],
+      scope: { kind: 'checked', ids: ['acc-1', 'acc-2'] }
+    });
+  });
+
+  it('xuất account: định dạng lạ thì trả lỗi NÊU field, không gọi service', async () => {
+    let called = false;
+    registerAccountsIpc(registrar, accountsService() as never, exportService({
+      export: async () => { called = true; return { canceled: true, filePath: null, exportedCount: 0 }; }
+    }) as never, taskService() as never);
+
+    const envelope = await registrar.invoke(IPC_CHANNELS.ACCOUNTS_EXPORT, {
+      format: 'PDF',
+      fields: ['email'],
+      scope: { kind: 'all' }
+    });
+
+    expect(called).toBe(false);
+    expect(envelope.success).toBe(false);
+    if (envelope.success) return;
+    expect(envelope.error.code).toBe('ERR_VALIDATION_FAILED');
+    expect(envelope.error.details?.field).toBe('format');
+  });
+
+  it('xuất account: lỗi có mã của service được giữ nguyên cho người dùng', async () => {
+    registerAccountsIpc(registrar, accountsService() as never, exportService({
+      export: async () => {
+        throw new ProviderError('CONFIG_ERROR', 'Không có tài khoản nào khớp phạm vi đã chọn.');
+      }
+    }) as never, taskService() as never);
+
+    const envelope = await registrar.invoke(IPC_CHANNELS.ACCOUNTS_EXPORT, {
+      format: 'TXT',
+      fields: ['email'],
+      scope: { kind: 'all' }
+    });
+
+    expect(envelope).toEqual({
+      success: false,
+      error: { code: 'CONFIG_ERROR', message: 'Không có tài khoản nào khớp phạm vi đã chọn.' }
+    });
+  });
+
+  it('tiến độ nhiệm vụ: trả về danh sách của đúng account được hỏi', async () => {
+    let seen: unknown = null;
+    registerAccountsIpc(
+      registrar,
+      accountsService() as never,
+      exportService() as never,
+      {
+        listByAccount: (req: unknown) => {
+          seen = req;
+          return { items: [], doneCount: 0, creditsEarned: 0 };
+        }
+      } as never
+    );
+
+    const envelope = await registrar.invoke(IPC_CHANNELS.ACCOUNTS_TASKS, { accountId: 'acc-9' });
+
+    expect(envelope).toEqual({
+      success: true,
+      data: { items: [], doneCount: 0, creditsEarned: 0 }
+    });
+    expect(seen).toEqual({ accountId: 'acc-9' });
+  });
+
+  it('tiến độ nhiệm vụ: thiếu accountId thì trả lỗi nêu field', async () => {
+    registerAccountsIpc(
+      registrar,
+      accountsService() as never,
+      exportService() as never,
+      { listByAccount: () => ({ items: [], doneCount: 0, creditsEarned: 0 }) } as never
+    );
+
+    const envelope = await registrar.invoke(IPC_CHANNELS.ACCOUNTS_TASKS, {});
+
+    expect(envelope.success).toBe(false);
+    if (envelope.success) return;
+    expect(envelope.error.code).toBe('ERR_VALIDATION_FAILED');
+    expect(envelope.error.details?.field).toBe('accountId');
+  });
+
   it('removes every handler it registered on cleanup', async () => {
-    const cleanup = registerAccountsIpc(registrar, accountsService() as never);
+    const cleanup = registerAccountsIpc(registrar, accountsService() as never, exportService() as never, taskService() as never);
     cleanup();
 
     expect(registrar.removed.sort()).toEqual([
       IPC_CHANNELS.ACCOUNTS_CREATE,
       IPC_CHANNELS.ACCOUNTS_DELETE,
+      IPC_CHANNELS.ACCOUNTS_EXPORT,
       IPC_CHANNELS.ACCOUNTS_LIST,
+      IPC_CHANNELS.ACCOUNTS_TASKS,
       IPC_CHANNELS.ACCOUNTS_UPDATE
     ].sort());
   });
@@ -189,6 +310,7 @@ describe('registerAutomationIpc', () => {
     typeDelayMinMs: 10,
     typeDelayMaxMs: 20,
     module: 'trial',
+    skipWithoutTrial: false,
     emailSource: { mode: 'api', provider: 'gmail94', service: 'facebook' },
     proxy: { mode: 'proxykey' },
     password: { mode: 'random', length: 12, uppercase: true, numbers: true, special: false }

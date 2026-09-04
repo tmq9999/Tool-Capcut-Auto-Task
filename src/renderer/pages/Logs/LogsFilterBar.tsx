@@ -46,6 +46,9 @@ export const LogsFilterBar: React.FC<LogsFilterBarProps> = ({
             <option value="INFO">INFO</option>
             <option value="WAITING">WAITING</option>
             <option value="SUCCESS">SUCCESS</option>
+            {/* WARNING thiếu trong bản cũ dù `log.schema.ts` có và engine bắn rất
+                nhiều dòng loại này (audit 04/09/2026). */}
+            <option value="WARNING">WARNING</option>
             <option value="ERROR">ERROR</option>
           </Select>
         </div>

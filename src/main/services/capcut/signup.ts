@@ -35,6 +35,8 @@
 import type { BrowserContext, Locator, Page } from 'playwright-core';
 
 import type { CapcutCredentials, LogFn } from './login';
+import { dump, StepError } from './diag';
+import { skipOnboardingSurvey } from './overlays';
 
 const SIGNUP_URL =
   'https://www.capcut.com/signup?redirect_url=https%3A%2F%2Fwww.capcut.com%2Fmy-edit&lang=en';
@@ -94,7 +96,10 @@ async function clickUntilVisible(trigger: Locator, target: Locator, attempts = 6
     await trigger.click({ timeout: 3000 }).catch(() => {});
     if (await target.isVisible({ timeout: 600 }).catch(() => false)) return;
   }
-  throw new Error('Không mở được form email');
+  throw new StepError(
+    'Không mở được form email',
+    await dump(trigger.page(), 'signup_form_email_khong_mo')
+  );
 }
 
 /**
@@ -274,16 +279,10 @@ async function dismissOnboarding(page: Page, log: LogFn): Promise<void> {
     await page.waitForTimeout(4000);
   }
 
-  const skip = page
-    .locator(
-      '.skip-mrkR37, button:has-text("Skip"), div[role="button"]:text-is("Skip"), button:has-text("Not now")'
-    )
-    .first();
-  if (await skip.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await skip.click({ timeout: 8000 }).catch(() => {});
-    log('   → Đã bấm Skip khảo sát');
-    await page.waitForTimeout(3000);
-  }
+  // Khảo sát onboarding 3 bước: bấm Skip rồi ĐỌC LẠI DOM xem mask đã tắt chưa.
+  // Bản cũ bấm một lần, nuốt lỗi, in "Đã bấm Skip khảo sát" vô điều kiện — nên
+  // modal phủ trang suốt phiên mà không ai biết (xem `onboarding.ts`).
+  await skipOnboardingSurvey(page, log);
 
   const close = page
     .locator('button[aria-label="Close"], div[aria-label="Close"], .semi-modal-close')
@@ -357,7 +356,10 @@ export async function signupCapcut(
   const pwInputs = page.locator('input[type="password"]');
   const pwCount = await pwInputs.count();
   if (pwCount === 0) {
-    throw new Error(`Không tìm thấy ô nhập password (heading hiện tại: "${heading}")`);
+    throw new StepError(
+      `Không tìm thấy ô nhập password (heading hiện tại: "${heading}")`,
+      await dump(page, 'signup_khong_thay_o_password')
+    );
   }
 
   await fillVerified(pwInputs.first(), creds.password, 'Password', log);
@@ -425,8 +427,11 @@ export async function signupCapcut(
   }
 
   if (!(await isInsideApp(page))) {
-    throw new Error(
-      `Đăng ký chưa hoàn tất (URL: ${page.url()}). Có thể mã sai, bị captcha, hoặc email bị chặn.`
+    // Đăng ký hỏng ở bước cuối là mất một hộp thư đã trả tiền — bắt buộc phải có
+    // hiện trường, không thì lần sau vẫn không biết vì sao.
+    throw new StepError(
+      `Đăng ký chưa hoàn tất (URL: ${page.url()}). Có thể mã sai, bị captcha, hoặc email bị chặn.`,
+      await dump(page, 'dang_ky_chua_hoan_tat')
     );
   }
 

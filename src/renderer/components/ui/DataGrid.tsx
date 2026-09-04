@@ -3,6 +3,7 @@ import {
   ColumnDef,
   flexRender,
   getCoreRowModel,
+  getPaginationRowModel,
   useReactTable,
   RowSelectionState,
   OnChangeFn,
@@ -24,6 +25,19 @@ export interface DataGridProps<TData> {
   tableClassName?: string;
   rowClassName?: (row: Row<TData>) => string;
   stickyHeader?: boolean;
+  /**
+   * Cắt trang ngay trong lưới. Không truyền thì hiện hết `data` như cũ.
+   *
+   * Audit 04/09/2026: trang Accounts có thanh phân trang nhưng lưới KHÔNG cắt gì
+   * (`getPaginationRowModel` chưa từng được thêm) và nhận nguyên mảng đã lọc —
+   * bấm ‹ › chỉ đổi nhãn "1-50 trong N", bảng đứng yên.
+   */
+  pagination?: { pageIndex: number; pageSize: number };
+  /**
+   * Ref tới chính khung cuộn của lưới. Trang Logs cần nó cho "Auto Scroll":
+   * ô tích đó trước đây chỉ đổi state, không có một dòng code cuộn nào.
+   */
+  scrollRef?: React.Ref<HTMLDivElement>;
 }
 
 export function DataGrid<TData>({
@@ -39,21 +53,26 @@ export function DataGrid<TData>({
   tableClassName,
   rowClassName,
   stickyHeader = true,
+  pagination,
+  scrollRef,
 }: DataGridProps<TData>): React.JSX.Element {
   const table = useReactTable({
     data,
     columns,
     state: {
       rowSelection: rowSelection ?? {},
+      ...(pagination ? { pagination } : {}),
     },
     enableRowSelection: Boolean(onRowSelectionChange),
     onRowSelectionChange,
     getRowId,
     getCoreRowModel: getCoreRowModel(),
+    ...(pagination ? { getPaginationRowModel: getPaginationRowModel() } : {}),
   });
 
   return (
     <div
+      ref={scrollRef}
       className={twMerge(
         'w-full h-full overflow-auto bg-table-bg relative custom-scrollbar flex flex-col',
         className

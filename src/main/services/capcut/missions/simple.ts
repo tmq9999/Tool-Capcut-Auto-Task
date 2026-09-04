@@ -28,6 +28,21 @@ async function clickGo(env: CapcutMissionEnv, title: string, reward: number): Pr
  * Như `clickGo` nhưng trên MỘT TRANG CHỈ ĐỊNH — nhiệm vụ bật thông báo làm việc
  * trên tab mới của riêng nó, không phải `env.page`.
  */
+/**
+ * Nhãn nút của dòng nhiệm vụ quyết định phải làm gì.
+ *
+ * `Claim` KHÔNG phải trạng thái để bỏ qua: nó nghĩa là CapCut đã ghi nhận hành
+ * động (do_action bắn từ trước) và đang chờ nhận thưởng. Bản cũ chỉ bấm khi nhãn
+ * là `Go`, nên `capcut_web_push_authorize` đứng mãi ở đó rồi timeout 45 giây —
+ * đo 04/09/2026, xem `__tests__/simple.test.ts`.
+ */
+export function decideRowAction(buttonText: string): 'go' | 'claim' | 'skip' {
+  const text = buttonText.trim();
+  if (/^go$/i.test(text)) return 'go';
+  if (/^claim$/i.test(text)) return 'claim';
+  return 'skip';
+}
+
 async function clickGoOnPage(
   page: Page,
   env: CapcutMissionEnv,
@@ -39,16 +54,25 @@ async function clickGoOnPage(
   // 2026-09-03 02:5x mất đúng những dòng đó nên không biết mắt xích nào đứt khi
   // `pwa_install` báo "tìm dòng ... ra 0 kết quả".
   await withTaskPopover(page, async () => {
-    const row = await findTaskRow(page, title, reward);
+    const row = await findTaskRow(page, title, reward, env.log);
     const btn = row.locator('button').first();
     const text = (await btn.innerText().catch(() => '')).trim();
-    // Nút có thể đã là Done/Tomorrow nếu nhiệm vụ vừa xong ở lần thử trước.
-    if (/^go$/i.test(text)) {
-      await btn.click({ timeout: 8000 }).catch(() => {});
-      await page.waitForTimeout(rand(1800, 2600));
-      env.log(`Đã bấm Go ở dòng "${title}"`);
-    } else {
-      env.log(`Nút của "${title}" đang là "${text || 'N/A'}", không bấm Go`);
+
+    switch (decideRowAction(text)) {
+      case 'go':
+        await btn.click({ timeout: 8000 }).catch(() => {});
+        await page.waitForTimeout(rand(1800, 2600));
+        env.log(`Đã bấm Go ở dòng "${title}"`);
+        break;
+      case 'claim':
+        // Nút đã là Claim ⇒ do_action bắn từ trước, chờ nó lần nữa là chờ vô ích.
+        // Bấm Claim chỉ là THAO TÁC UI; kết luận xong vẫn do snapshot của CapCut.
+        await btn.click({ timeout: 8000 }).catch(() => {});
+        await page.waitForTimeout(rand(1800, 2600));
+        env.log(`Đã bấm Claim ở dòng "${title}" (CapCut đã ghi nhận hành động từ trước)`);
+        break;
+      default:
+        env.log(`Nút của "${title}" đang là "${text || 'N/A'}", không bấm gì`);
     }
   }, env.log);
 }

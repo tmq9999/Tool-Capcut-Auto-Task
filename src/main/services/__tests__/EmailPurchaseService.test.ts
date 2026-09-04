@@ -169,13 +169,85 @@ describe('EmailPurchaseService.purchase with Gmail94', () => {
     await expect(service.purchase('gmail94', 1, {})).rejects.toMatchObject({ code: 'CONFIG_ERROR' });
   });
 
-  it('defaults the service slug to facebook when none is supplied', async () => {
+  /**
+   * Slug mặc định phải là `capcut`, không phải `facebook`: gmail94 thuê hộp thư
+   * THEO dịch vụ, và `otp/read` lọc mã theo đúng slug đã thuê. Thuê hộp
+   * `facebook` rồi chờ mã CapCut là chờ mãi mãi.
+   */
+  it('defaults the service slug to capcut when none is supplied', async () => {
     storeKey('gmail94', 'GM-KEY');
     const service = createService();
 
     await service.purchase('gmail94', 1, {});
 
-    expect(gmail.createCalls[0].service).toBe('facebook');
+    expect(gmail.createCalls[0].service).toBe('capcut');
+  });
+
+  /**
+   * Hộp thư đã thuê mà chưa dùng là TIỀN ĐÃ TRẢ. Lượt 04/09/2026 thuê
+   * `songhajun652@gmail.com` rồi `xcli profile-quick` lỗi vì launcher Multilogin
+   * đã tắt — hộp thư đó mất trắng vì lượt sau lại đi thuê hộp mới.
+   * `orderId` đã có trong `purchased_emails`, chỉ là chưa ai dùng lại.
+   */
+  it('dùng lại hộp thư đã thuê mà chưa tiêu trước khi thuê hộp mới', async () => {
+    storeKey('gmail94', 'GM-KEY');
+    const service = createService();
+
+    // Lượt trước thuê 2 hộp và không dùng hộp nào.
+    await service.purchase('gmail94', 2, {});
+    expect(gmail.createCalls).toHaveLength(2);
+
+    const again = await service.purchase('gmail94', 2, {});
+
+    // Không gọi vendor lần nào nữa, và trả về đúng hai hộp cũ kèm order id cũ.
+    expect(gmail.createCalls).toHaveLength(2);
+    expect(again.purchased.map((row) => row.email)).toEqual(['mail1@gmail.com', 'mail2@gmail.com']);
+    expect(again.purchased.map((row) => row.orderId)).toEqual(['order-1', 'order-2']);
+  });
+
+  it('chỉ thuê thêm cho phần còn thiếu', async () => {
+    storeKey('gmail94', 'GM-KEY');
+    const service = createService();
+
+    await service.purchase('gmail94', 1, {});
+    const result = await service.purchase('gmail94', 3, {});
+
+    // 1 hộp dùng lại + 2 hộp thuê mới = 3 lần gọi vendor tổng cộng.
+    expect(gmail.createCalls).toHaveLength(3);
+    expect(result.purchased).toHaveLength(3);
+  });
+
+  it('hộp thư đã tiêu thì KHÔNG dùng lại', async () => {
+    storeKey('gmail94', 'GM-KEY');
+    const service = createService();
+
+    const first = await service.purchase('gmail94', 1, {});
+    // accountId null: bảng `purchased_emails` có FK sang `accounts`, và test này
+    // không dựng account nào — điều được kiểm là cờ `consumed_at`.
+    service.markConsumed(first.purchased[0].id, null);
+
+    await service.purchase('gmail94', 1, {});
+
+    expect(gmail.createCalls).toHaveLength(2);
+  });
+
+  /**
+   * Nhả lại hộp thư khi luồng chết trước khi dùng tới nó: `AutomationRunService`
+   * gọi `markConsumed` ngay lúc tạo account, tức là TRƯỚC khi browser mở, nên
+   * browser lỗi là hộp thư bị đánh dấu đã tiêu mà chưa dùng gì.
+   */
+  it('release đưa hộp thư chưa dùng trở lại hàng chờ', async () => {
+    storeKey('gmail94', 'GM-KEY');
+    const service = createService();
+
+    const first = await service.purchase('gmail94', 1, {});
+    service.markConsumed(first.purchased[0].id, null);
+    service.release(first.purchased[0].id);
+
+    const again = await service.purchase('gmail94', 1, {});
+
+    expect(gmail.createCalls).toHaveLength(1);
+    expect(again.purchased[0].orderId).toBe('order-1');
   });
 });
 

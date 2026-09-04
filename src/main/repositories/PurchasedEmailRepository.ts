@@ -126,4 +126,19 @@ export class PurchasedEmailRepository {
     ).run(accountId, id);
     return result.changes > 0;
   }
+
+  /**
+   * Đưa một hộp thư đã bị đánh dấu "đã tiêu" trở lại hàng chờ.
+   *
+   * `AutomationRunService` gọi `markConsumed` ngay lúc tạo account, tức là TRƯỚC
+   * khi browser mở. Lượt 04/09/2026: `xcli profile-quick` lỗi vì launcher
+   * Multilogin đã tắt, nên hộp thư vừa thuê (đã trả tiền, `order_id` còn nguyên)
+   * bị đánh dấu đã tiêu mà chưa dùng gì. Hàm này để luồng thất bại nhả nó ra.
+   */
+  release(id: string): boolean {
+    const result = this.db.prepare(
+      'UPDATE purchased_emails SET consumed_at = NULL, account_id = NULL WHERE id = ?'
+    ).run(id);
+    return result.changes > 0;
+  }
 }

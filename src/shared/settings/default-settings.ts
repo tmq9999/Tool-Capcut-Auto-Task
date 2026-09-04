@@ -1,4 +1,5 @@
 import type { AppSettingsDTO } from '../schemas/settings.schema';
+import { CAPCUT_OTP_SERVICE } from '../schemas/provider.schema';
 
 export const DEFAULT_APP_SETTINGS: AppSettingsDTO = {
   general: {
@@ -28,10 +29,12 @@ export const DEFAULT_APP_SETTINGS: AppSettingsDTO = {
     typeDelayMinMs: 50,
     typeDelayMaxMs: 150,
     module: 'credit',
+    skipWithoutTrial: false,
     proxyMode: 'direct',
+    proxyRegion: 'random',
     emailSourceMode: 'manual',
     emailApiProvider: 'gmail94',
-    otpService: 'facebook',
+    otpService: CAPCUT_OTP_SERVICE,
     passwordMode: 'random',
     passwordLength: 12,
     includeUppercase: true,

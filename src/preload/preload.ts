@@ -8,6 +8,8 @@ import type {
   AccountFilterDTO,
   AccountUpdateInputDTO
 } from '../shared/schemas/account.schema';
+import type { AccountExportRequestDTO } from '../shared/schemas/account-export.schema';
+import type { AccountTasksRequestDTO } from '../shared/schemas/account-task.schema';
 import type { LogFilterDTO, CanonicalRuntimeLog } from '../shared/schemas/log.schema';
 import type {
   AutomationRunConfigDTO,
@@ -44,7 +46,11 @@ const bridge: ElectronBridge = {
     create: (input: AccountCreateInputDTO) => ipcRenderer.invoke(IPC_CHANNELS.ACCOUNTS_CREATE, input),
     update: (id: string, data: AccountUpdateInputDTO) =>
       ipcRenderer.invoke(IPC_CHANNELS.ACCOUNTS_UPDATE, { id, data }),
-    remove: (ids: string[]) => ipcRenderer.invoke(IPC_CHANNELS.ACCOUNTS_DELETE, { ids })
+    remove: (ids: string[]) => ipcRenderer.invoke(IPC_CHANNELS.ACCOUNTS_DELETE, { ids }),
+    export: (request: AccountExportRequestDTO) =>
+      ipcRenderer.invoke(IPC_CHANNELS.ACCOUNTS_EXPORT, request),
+    tasks: (request: AccountTasksRequestDTO) =>
+      ipcRenderer.invoke(IPC_CHANNELS.ACCOUNTS_TASKS, request)
   },
   logs: {
     list: (filter: LogFilterDTO) => ipcRenderer.invoke(IPC_CHANNELS.LOGS_LIST, filter),

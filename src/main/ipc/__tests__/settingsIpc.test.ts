@@ -64,7 +64,9 @@ describe('Settings IPC Registration (Task 2.1.3 RED)', () => {
       typeDelayMinMs: 50,
       typeDelayMaxMs: 150,
       module: 'trial',
+      skipWithoutTrial: false,
       proxyMode: 'direct',
+      proxyRegion: 'random',
       emailSourceMode: 'manual',
       emailApiProvider: 'gmail94',
       otpService: 'facebook',
@@ -209,13 +211,17 @@ describe('Settings IPC Registration (Task 2.1.3 RED)', () => {
     const response = await handler!({}, malformedRequest);
     expect(saveSettingsWithCredentialsMock).not.toHaveBeenCalled();
 
-    expect(response).toEqual({
-      success: false,
-      error: {
-        code: 'ERR_VALIDATION_FAILED',
-        message: 'Invalid settings save payload.',
-      },
-    });
+    /**
+     * Từ 04/09/2026 lỗi validation phải NÊU TÊN FIELD. Câu cũ là
+     * "Invalid settings save payload." — tiếng Anh giữa UI tiếng Việt và không
+     * nói gì; xoá trắng ô "Luồng" trên Dashboard rơi đúng vào đây và autosave
+     * hỏng im lặng. `code` giữ nguyên nên renderer không phải đổi cách bắt lỗi.
+     */
+    expect(response.success).toBe(false);
+    if (response.success) return;
+    expect(response.error.code).toBe('ERR_VALIDATION_FAILED');
+    expect(String(response.error.details?.field)).toContain('browser');
+    expect(response.error.message).toContain('browser');
   });
 
   it('failing service returns fixed normalized ERR_PERSISTENCE_FAILED without leaking raw errors or secrets', async () => {
@@ -304,13 +310,10 @@ describe('Settings IPC Registration (Task 2.1.3 RED)', () => {
     const response = await handler!({}, { serviceName: '' });
     expect(testConnectionMock).not.toHaveBeenCalled();
 
-    expect(response).toEqual({
-      success: false,
-      error: {
-        code: 'ERR_VALIDATION_FAILED',
-        message: 'Invalid credential test payload.',
-      },
-    });
+    expect(response.success).toBe(false);
+    if (response.success) return;
+    expect(response.error.code).toBe('ERR_VALIDATION_FAILED');
+    expect(String(response.error.details?.field)).toContain('serviceName');
   });
 
   it('cleanup removes all three handlers exactly once and is idempotent', () => {

@@ -168,6 +168,7 @@ function baseConfig(overrides: Partial<AutomationRunConfigDTO> = {}): Automation
     typeDelayMaxMs: 0,
     // Chỉ module `credit` có engine; `trial`/`team` bị `runThreadWorkload` từ chối.
     module: 'credit',
+    skipWithoutTrial: false,
     emailSource: { mode: 'manual', entries: ['worker@example.com|mail-pass'] },
     proxy: { mode: 'direct', entries: [] },
     password: { mode: 'random', length: 12, uppercase: true, numbers: true, special: false },
@@ -268,6 +269,70 @@ describe('toTaskProgressRows', () => {
     expect(rows.every((row) => row.status === 4)).toBe(true);
   });
 
+  /**
+   * Đo được 04/09/2026 06:5x: tab chính của CapCut chết giữa lượt
+   * ("❌ Tab chính đã bị đóng"), nên `waitForSnapshot` cuối không lấy được
+   * `task_list` mới và rơi về snapshot ĐẦU TIÊN — báo cáo in
+   * "CapCut ghi nhận: 0/12 nhiệm vụ" trong khi 3 nhiệm vụ đã có
+   * `do_action err_no=0`. Ghi status 1 cho chúng là XOÁ tiến độ thật khỏi DB,
+   * và lượt sau sẽ làm lại từ đầu.
+   *
+   * `do_action err_no=0` là đúng bằng chứng mà AGENTS.md §30 công nhận; khi tab
+   * đã chết thì không còn cách nào đọc lại `task_status` nữa.
+   */
+  it('nhiệm vụ có do_action err_no=0 vẫn là 4 dù snapshot cuối bị cũ', () => {
+    const rows = toTaskProgressRows(outcomes, {
+      ...snapshot,
+      done: 0,
+      credits: 0,
+      stale: true,
+      missing: ['capcut_web_pwa_install', 'capcut_web_video_studio_export']
+    });
+
+    const install = rows.find((row) => row.key === 'capcut_web_pwa_install');
+    const exportRow = rows.find((row) => row.key === 'capcut_web_video_studio_export');
+    expect(install?.status).toBe(4);
+    // Nhiệm vụ KHÔNG có proof vẫn phải là 1 — không suy diễn hộ CapCut.
+    expect(exportRow?.status).toBe(1);
+  });
+
+  /**
+   * Mặt còn lại của cùng một luật: snapshot TƯƠI thì nó thắng. Proof mà CapCut
+   * vừa đọc lại vẫn liệt vào `missing` nghĩa là CapCut không tính.
+   */
+  it('snapshot còn tươi thì proof KHÔNG được lật ngược missing', () => {
+    const rows = toTaskProgressRows(outcomes, {
+      ...snapshot,
+      missing: ['capcut_web_pwa_install', 'capcut_web_video_studio_export']
+    });
+
+    expect(rows.every((row) => row.status === 1)).toBe(true);
+  });
+
+  it('proof có err_no khác 0 thì KHÔNG được coi là xong', () => {
+    const failed: TaskOutcome[] = [{
+      key: 'capcut_web_pwa_install',
+      title: 'Install the app',
+      reward: 30,
+      done: false,
+      attempts: 1,
+      proof: {
+        actionKey: 'capcut_web_pwa_install',
+        opId: 'op-1',
+        errNo: 8001003,
+        errTips: 'risk control',
+        at: Date.UTC(2026, 8, 4, 1, 0, 0)
+      }
+    }];
+
+    const rows = toTaskProgressRows(failed, {
+      ...snapshot,
+      stale: true,
+      missing: ['capcut_web_pwa_install']
+    });
+    expect(rows[0].status).toBe(1);
+  });
+
   it('trả mảng rỗng khi engine không đọc được nhiệm vụ nào', () => {
     expect(toTaskProgressRows([], { ...snapshot, total: 0, done: 0, missing: [] })).toEqual([]);
   });
@@ -314,6 +379,52 @@ describe('AutomationRunService ghi tiến độ nhiệm vụ', () => {
     ).toBe(true);
   });
 
+  /**
+   * Đọc DB sau lượt chạy 12/12 ngày 04/09/2026 thấy hàng account ghi
+   * `automation_step = 'Đã dừng sau khi kiểm tra kết nối'` — câu của thời engine
+   * chưa được cắm vào, khi luồng chỉ giữ browser rồi tắt. `shutdownThread` ghi đè
+   * vô điều kiện nên kết quả thật ("Đủ 12/12 nhiệm vụ") bị xoá khỏi UI.
+   */
+  it('giữ kết quả nhiệm vụ làm bước cuối, không ghi đè bằng câu dừng máy', async () => {
+    const service = createService(new StubCapcutRunner(fullResult({ missing: [] })));
+
+    await service.start(baseConfig());
+    await service.waitForCompletion();
+
+    const lastStep = String(
+      accounts.updates.filter((e) => e.id === 'acc-1').at(-1)?.data.automationStep ?? ''
+    );
+    expect(lastStep).toContain('nhiệm vụ');
+    expect(lastStep).not.toContain('kiểm tra kết nối');
+  });
+
+  /**
+   * Ưu đãi Pro đọc được rồi thì phải xuống DB: cột Subscription của bản xuất
+   * account (AGENTS.md §21) lấy từ đây, và trước 04/09/2026 nó luôn rỗng.
+   */
+  it('ghi ưu đãi Pro engine đọc được vào hàng account', async () => {
+    const runner = new StubCapcutRunner(fullResult({ subscription: 'Pro trial 7 ngày' }));
+    const service = createService(runner);
+
+    await service.start(baseConfig());
+    await service.waitForCompletion();
+
+    expect(
+      accounts.updates.some((entry) => entry.data.subscription === 'Pro trial 7 ngày')
+    ).toBe(true);
+  });
+
+  it('không ghi subscription khi engine không đọc được gì', async () => {
+    const service = createService(new StubCapcutRunner(fullResult()));
+
+    await service.start(baseConfig());
+    await service.waitForCompletion();
+
+    expect(
+      accounts.updates.every((entry) => !('subscription' in entry.data))
+    ).toBe(true);
+  });
+
   it('không gọi record khi account bị bỏ qua (không có dòng tiến độ nào)', async () => {
     const progress = new RecordingProgressSink();
     const runner = new StubCapcutRunner(fullResult({ skipped: true, tasks: [] }));
@@ -345,6 +456,32 @@ describe('AutomationRunService ghi tiến độ nhiệm vụ', () => {
     await service.waitForCompletion();
 
     expect(progress.calls).toEqual([]);
+  });
+});
+
+describe('AutomationRunService truyền cờ "bỏ qua nếu không có trial"', () => {
+  /**
+   * `CapcutEngineService` đọc `skipWithoutTrial` từ lâu nhưng không ai truyền nên
+   * nó luôn `false` (audit 04/09/2026). Nay đi từ ô trên Dashboard xuống engine.
+   */
+  it('bật ở Dashboard thì runAccount nhận đúng cờ đó', async () => {
+    const runner = new StubCapcutRunner(fullResult());
+    const service = createService(runner);
+
+    await service.start(baseConfig({ skipWithoutTrial: true }));
+    await service.waitForCompletion();
+
+    expect(runner.lastInput?.skipWithoutTrial).toBe(true);
+  });
+
+  it('không bật thì cờ vẫn xuống engine là false, không phải undefined', async () => {
+    const runner = new StubCapcutRunner(fullResult());
+    const service = createService(runner);
+
+    await service.start(baseConfig({ skipWithoutTrial: false }));
+    await service.waitForCompletion();
+
+    expect(runner.lastInput?.skipWithoutTrial).toBe(false);
   });
 });
 
