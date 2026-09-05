@@ -8,6 +8,13 @@ chỉ ghi những gì có bằng chứng trong mã nguồn, log chạy thật v�
 
 ---
 
+## Live verification addendum — 2026-09-05
+
+Release `v2.4.1-live` is published from commit `00504d5`. A real Gmail94
+mailbox completed the CapCut flow end-to-end: `12/12` tasks and `670/670`
+credits, with successful browser teardown. Detailed evidence and verification
+limits are recorded in [`docs/releases/2026-09-05-v2.4.1-live.md`](docs/releases/2026-09-05-v2.4.1-live.md).
+
 ## [2.4.1] — 2026-09-05
 
 Mọi mục dưới đây đến từ 4 lượt audit song song (`docs/superpowers/plans/2026-09-04-audit-fix-plan.md`),
@@ -463,5 +470,4 @@ Nguồn: [`docs/report/verification-report.html`](docs/report/verification-repor
    `Promise.all`, key chỉ nhả ở teardown → chuyển sang worker pool đúng bằng số
    key khả dụng.
 8. Thiếu API dừng theo luồng.
-
 
