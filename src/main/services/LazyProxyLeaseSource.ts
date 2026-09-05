@@ -54,8 +54,8 @@ export class LazyProxyLeaseSource implements IProxyLeaseSource {
     return this.manager;
   }
 
-  async acquire(): Promise<AcquiredProxyLease> {
-    return this.ensureManager().acquire();
+  async acquire(signal?: AbortSignal): Promise<AcquiredProxyLease> {
+    return this.ensureManager().acquire(signal);
   }
 
   async availableSlots(): Promise<number | null> {

@@ -28,6 +28,7 @@ import { EmailPurchaseService } from '../services/EmailPurchaseService';
 import { AccountService } from '../services/AccountService';
 import { LogBus } from '../services/LogBus';
 import { AutomationRunService } from '../services/AutomationRunService';
+import { createAutomationWorkSourceFactory } from '../services/AutomationWorkSource';
 import { CapcutEngineService } from '../services/CapcutEngineService';
 import {
   createBrowserLauncher,
@@ -161,8 +162,10 @@ export function createProviderStack(
     });
   };
 
+  const workSources = createAutomationWorkSourceFactory(emailPurchaseService);
   const automationRunService = new AutomationRunService({
-    emails: emailPurchaseService,
+    workSources,
+    emailOtp: emailPurchaseService,
     proxies: proxySource,
     browser: new DispatchingBrowserRuntime(browserRuntimes),
     accounts: accountService,

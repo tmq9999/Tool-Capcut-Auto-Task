@@ -4,6 +4,8 @@ import {
   AutomationRunProgressSchema,
   DEFAULT_TEST_RUN_DURATION_MS
 } from '../automation.schema';
+import { SanitizedDiagnosticResultSchema } from '../diagnostics.schema';
+import { AccountStatusEnum } from '../account.schema';
 
 const baseConfig = {
   threadCount: 3,
@@ -57,6 +59,22 @@ describe('automation.schema', () => {
     expect(parsed.emailSource.mode).toBe('manual');
   });
 
+  it('accepts blank manual elements as textarea position markers', () => {
+    const parsed = AutomationRunConfigSchema.parse({
+      ...baseConfig,
+      module: 'credit',
+      emailSource: {
+        mode: 'manual',
+        entries: ['good@example.com', '', 'bad-line']
+      }
+    });
+
+    expect(parsed.emailSource).toEqual({
+      mode: 'manual',
+      entries: ['good@example.com', '', 'bad-line']
+    });
+  });
+
   it('requires a custom password value when password mode is custom', () => {
     expect(
       AutomationRunConfigSchema.safeParse({
@@ -77,13 +95,49 @@ describe('automation.schema', () => {
     const parsed = AutomationRunProgressSchema.parse({
       runId: 'run-1',
       state: 'running',
-      threadTotal: 3,
-      threadsStarted: 2,
-      threadsStopped: 0,
-      threadsFailed: 1,
+      workerTarget: 3,
+      workersActive: 2,
+      accountsAccepted: 2,
+      accountsCompleted: 0,
+      accountsFailed: 1,
+      accountsStopped: 0,
       message: 'Đã khởi chạy 2/3 profile'
     });
     expect(parsed.state).toBe('running');
+  });
+
+  it.each(['completed', 'blocked'] as const)('accepts terminal run state %s', (state) => {
+    const parsed = AutomationRunProgressSchema.parse({
+      runId: 'run-1',
+      state,
+      workerTarget: 3,
+      workersActive: 0,
+      accountsAccepted: 4,
+      accountsCompleted: 3,
+      accountsFailed: 1,
+      accountsStopped: 0,
+      message: 'terminal',
+      terminalReason: {
+        code: state === 'completed' ? 'MANUAL_EXHAUSTED' : 'INSUFFICIENT_FUNDS',
+        provider: state === 'blocked' ? 'gmail94' : undefined,
+        details: state === 'blocked' ? { balance: 1000, unitPrice: 1000 } : undefined
+      }
+    });
+
+    expect(parsed.state).toBe(state);
+  });
+
+  it('accepts INSUFFICIENT_FUNDS as a sanitized provider code', () => {
+    expect(SanitizedDiagnosticResultSchema.parse({
+      code: 'INSUFFICIENT_FUNDS',
+      message: 'Số dư Gmail94 không đủ.',
+      timestamp: '2026-09-05T00:00:00.000Z',
+      details: { balance: 1000, unitPrice: 1000 }
+    }).code).toBe('INSUFFICIENT_FUNDS');
+  });
+
+  it('accepts stopped as an account status', () => {
+    expect(AccountStatusEnum.parse('stopped')).toBe('stopped');
   });
 });
 

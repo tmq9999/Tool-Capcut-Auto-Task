@@ -17,6 +17,17 @@ xuất account **implement**, browser **tạm thời chỉ Multilogin**, setting
 
 ### Added
 
+- **Cơ chế chạy liên tục và tối ưu hiệu năng tự động hóa (Continuous Automation & Performance).**
+  - **Worker liên tục (Continuous Workers):** Nguồn API tiếp tục nạp email mới cho worker slot ngay khi tài khoản trước hoàn thành cho đến khi có lệnh Stop hoặc điều kiện dừng có kiểu (`completed`, `stopped`, `blocked`, `failed`).
+  - **Nguồn thủ công (Manual Workload):** Chạy hết toàn bộ danh sách email hợp lệ đã nhập, với `threadCount` chỉ đóng vai trò trần đồng thời (concurrency ceiling).
+  - **Mua email JIT và preflight Gmail94:** Khảo sát dung lượng trước khi chạy (số dư ví, giá dịch vụ `capcut`, timestamp); đặt chỗ email nguyên tử trong SQLite (Migration 005) để tránh đụng độ giữa các luồng; chỉ mua từng email sau khi đã giữ thành công proxy.
+  - **Kết quả tài khoản và phiên chạy trung thực:** Lỗi trong quá trình chạy được bảo toàn thành `error` sau khi dọn dẹp browser/proxy; bộ đếm hoàn thành, lỗi, dừng được ghi nhận độc lập và chính xác 1 lần.
+  - **Đối soát bằng chứng thống nhất (Unified Proof Reconciliation):** Thay thế các khoảng chờ 45 giây độc lập bằng một hạn mức thời gian còn lại (PWA 12s, Notifications 20s, Design 90s, Video 240s); bộ nhớ bằng chứng trong phiên (`proofMemory`) ngăn chạy lại nhiệm vụ đã thành công.
+  - **Khôi phục tab chính tối đa 1 lần (One-Tab Page Recovery):** Tái sử dụng tab CapCut đang mở và giới hạn thay thế đúng 1 tab mỗi account run tại các ranh giới an toàn.
+  - **Tắt ứng dụng ưu tiên dừng tự động hóa & Single-Instance Lock:** Chuỗi tắt có giới hạn thời gian (dừng worker 15s -> flush log 2s -> đóng SQLite); khóa đơn phiên bản Electron trước khi khởi tạo database và provider.
+  - **Khóa tính năng Custom Domain Mail:** Vô hiệu hóa chế độ Domain Mail trên Dashboard UI, Settings panel và runner harness theo yêu cầu quản trị.
+
+
 - **Xuất account ra file — TXT · CSV · XLSX (AGENTS §21).** Nút "Xuất" trên trang
   Tài khoản trước đây chỉ gọi `onClose()`. Việc chạy TRỌN VẸN ở main process vì
   hai cột bắt buộc của §21 ("Password CapCut", "Email Data") nằm trong DB dạng đã

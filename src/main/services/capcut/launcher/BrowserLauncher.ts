@@ -70,6 +70,10 @@ export interface LaunchOptions {
    * định của launcher.
    */
   headless?: boolean;
+  /** Cancels waits and process startup owned by this launch. */
+  signal?: AbortSignal;
+  /** Called as soon as the vendor reports the profile id, before CDP attach. */
+  onProfileStarted?: (profileId: string) => void;
 }
 
 /**
@@ -108,6 +112,7 @@ export interface CdpAttachOptions {
   intervalMs?: number;
   log?: LauncherLog;
   sleep?: (ms: number) => Promise<void>;
+  signal?: AbortSignal;
 }
 
 export interface CdpAttachment {
@@ -132,17 +137,46 @@ export async function connectOverCdpWithRetry(
   const intervalMs = options.intervalMs ?? 2500;
   const log = options.log ?? NO_LAUNCHER_LOG;
   const sleep = options.sleep ?? defaultSleep;
+  const signal = options.signal;
   const url = `http://127.0.0.1:${port}`;
   let lastErr: unknown;
 
   for (let i = 1; i <= attempts; i++) {
+    signal?.throwIfAborted();
     try {
-      return await chromium.connectOverCDP(url);
+      const connection = chromium.connectOverCDP(url);
+      if (!signal) return await connection;
+      const aborted = new Promise<never>((_resolve, reject) => {
+        const onAbort = (): void => reject(signal.reason ?? new Error('Aborted'));
+        signal.addEventListener('abort', onAbort, { once: true });
+        void connection.then(
+          (browser) => {
+            signal.removeEventListener('abort', onAbort);
+            if (signal.aborted) void browser.close().catch(() => {});
+          },
+          () => signal.removeEventListener('abort', onAbort)
+        );
+      });
+      return await Promise.race([connection, aborted]);
     } catch (e) {
+      signal?.throwIfAborted();
       lastErr = e;
       if (i < attempts) {
         log(`   ... chờ browser mở port CDP (${i}/${attempts})`);
-        await sleep(intervalMs);
+        if (!signal) {
+          await sleep(intervalMs);
+        } else {
+          let onAbort: (() => void) | null = null;
+          const aborted = new Promise<never>((_resolve, reject) => {
+            onAbort = () => reject(signal.reason ?? new Error('Aborted'));
+            signal.addEventListener('abort', onAbort, { once: true });
+          });
+          try {
+            await Promise.race([sleep(intervalMs), aborted]);
+          } finally {
+            if (onAbort) signal.removeEventListener('abort', onAbort);
+          }
+        }
       }
     }
   }

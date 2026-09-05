@@ -7,10 +7,12 @@ import type { IProxyLeaseSource } from '../AutomationRunService';
 class FakeManager implements IProxyLeaseSource {
   public acquires = 0;
   public releaseAllCalls = 0;
+  public acquireSignals: Array<AbortSignal | undefined> = [];
   constructor(public readonly token: string, public readonly keys?: string[]) {}
 
-  async acquire(): Promise<AcquiredProxyLease> {
+  async acquire(signal?: AbortSignal): Promise<AcquiredProxyLease> {
     this.acquires += 1;
+    this.acquireSignals.push(signal);
     return {
       leaseId: 'lease-' + this.acquires,
       keyValue: 'K',
@@ -221,5 +223,23 @@ describe('LazyProxyLeaseSource với danh sách key chỉ định', () => {
     await source.acquire();
 
     expect(built[0].keys).toEqual([]);
+  });
+
+  it('forwards the caller AbortSignal to the lazily created source', async () => {
+    const built: FakeManager[] = [];
+    const source = new LazyProxyLeaseSource(
+      { readSimpleKey: () => 'TOKEN' },
+      (options: ProxyLeaseManagerOptions) => {
+        const manager = new FakeManager(options.apiToken, options.keys);
+        built.push(manager);
+        return manager;
+      }
+    );
+    const controller = new AbortController();
+
+    await source.acquire(controller.signal);
+
+    expect(built).toHaveLength(1);
+    expect(built[0].acquireSignals).toEqual([controller.signal]);
   });
 });

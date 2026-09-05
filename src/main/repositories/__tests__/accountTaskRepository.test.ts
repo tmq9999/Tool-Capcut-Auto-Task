@@ -92,7 +92,7 @@ describe('migration 004 — bảng tiến độ nhiệm vụ', () => {
       ).run();
 
       // Nâng lên bản có 004: chỉ áp dụng thêm 1 migration, không đụng bảng cũ.
-      expect(runMigrations(legacy).appliedCount).toBe(1);
+      expect(runMigrations(legacy, MIGRATIONS.slice(0, 4)).appliedCount).toBe(1);
 
       const account = legacy.prepare("SELECT email, credit FROM accounts WHERE id = 'acc-old'")
         .get() as { email: string; credit: number } | undefined;

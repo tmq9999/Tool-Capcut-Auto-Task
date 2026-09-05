@@ -23,9 +23,11 @@ import path from 'node:path';
 import type { BrowserContext, Page } from 'playwright-core';
 
 import type { CapcutAccountResult, CapcutTaskRunner } from './AutomationRunService';
+import { measureStage } from './stageTiming';
 import { ensureInApp } from './capcut/auth';
 import { setDumpDir } from './capcut/diag';
 import { ensureSampleImage } from './capcut/image';
+import { PrimaryPageResolver } from './capcut/pageRecovery';
 import { runAllTasks, type TaskSnapshotSummary } from './capcut/runTasks';
 import { checkProTrial, isEligible, MIN_TRIAL_DAYS } from './capcut/trial';
 import type { TaskOutcome, CapcutPace } from './capcut/types';
@@ -150,40 +152,53 @@ export class CapcutEngineService implements CapcutTaskRunner {
      * `options` mà không ai truyền nên cờ luôn `false` (audit 04/09/2026).
      */
     skipWithoutTrial?: boolean;
+    signal: AbortSignal;
     log: (status: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR', step: string, message: string) => void;
   }): Promise<CapcutAccountResult> {
-    const { page, context, email, password, log } = input;
+    input.signal.throwIfAborted();
+    const { context, email, password, log } = input;
 
-    /**
-     * Tab chính chết là nguyên nhân đã cắt ngắn hai lượt chạy 04/09/2026
-     * (`❌ Tab chính đã bị đóng`, `Target page ... has been closed`) mà không có
-     * dòng nào cho biết ai đóng nó. `crash` và `close` là hai nguyên nhân khác
-     * nhau và cần hai cách sửa khác nhau — renderer sập vs có ai gọi `close()` —
-     * nên phải phân biệt được ngay trong log thay vì suy đoán từ dump.
-     */
-    page.on('close', () => log('WARNING', 'Browser', 'Tab chính vừa ĐÓNG — các bước sau sẽ trượt'));
-    page.on('crash', () => log('ERROR', 'Browser', 'Tab chính CRASH (renderer sập) — không phải do code gọi close()'));
+    const resolver = new PrimaryPageResolver(
+      context,
+      input.page,
+      (message) => log('WARNING', 'Browser', message)
+    );
+    let page = await resolver.resolve('authentication');
+    input.signal.throwIfAborted();
 
     // OTP của riêng luồng này (đường đăng ký) ưu tiên hơn nguồn cấu hình chung.
     const getOtp = input.getOtp
       ? async (_email: string): Promise<string> => (input.getOtp as () => Promise<string>)()
       : this.options.getOtp;
 
-    const auth = await ensureInApp(
-      page,
-      context,
-      { email, password, source: 'db' },
-      {
-        // `source: 'db'` giữ nguyên để nhánh fallback (đăng ký → email đã tồn tại
-        // → đăng nhập) không đổi; `forceSignup` mới là thứ chọn đường ĐI TRƯỚC.
-        forceSignup: input.isNewAccount,
-        log: (m) => log('INFO', 'Đăng nhập', m),
-        getOtp
-      }
+    const auth = await measureStage(
+      'authentication-otp',
+      () =>
+        ensureInApp(
+          page,
+          context,
+          { email, password, source: 'db' },
+          {
+            // `source: 'db'` giữ nguyên để nhánh fallback (đăng ký → email đã tồn tại
+            // → đăng nhập) không đổi; `forceSignup` mới là thứ chọn đường ĐI TRƯỚC.
+            forceSignup: input.isNewAccount,
+            log: (m) => log('INFO', 'Đăng nhập', m),
+            getOtp
+          }
+        ),
+      (m) => log('INFO', 'Đăng nhập', m)
     );
+    input.signal.throwIfAborted();
     log('SUCCESS', 'Đăng nhập', `Đã ở trong app (đường: ${auth.mode})`);
 
-    const trial = await checkProTrial(page, context, (m) => log('INFO', 'Ưu đãi', m));
+    page = await resolver.resolve('trial');
+    input.signal.throwIfAborted();
+    const trial = await measureStage(
+      'trial-check',
+      () => checkProTrial(page, context, (m) => log('INFO', 'Ưu đãi', m)),
+      (m) => log('INFO', 'Ưu đãi', m)
+    );
+    input.signal.throwIfAborted();
     /**
      * Câu để hiển thị, không phải object: `accounts.subscription` là một `string`
      * (AGENTS.md §15) và cột Subscription của bản xuất đọc thẳng từ đó.
@@ -215,9 +230,14 @@ export class CapcutEngineService implements CapcutTaskRunner {
       page,
       context,
       sampleImage,
+      signal: input.signal,
       maxRounds: input.maxRounds,
       pace: input.pace,
-      log: (m) => log('INFO', 'Nhiệm vụ', m)
+      log: (m) => log('INFO', 'Nhiệm vụ', m),
+      resolvePage: (stage) => {
+        input.signal.throwIfAborted();
+        return resolver.resolve(stage);
+      }
     });
 
     if (!snapshot) {

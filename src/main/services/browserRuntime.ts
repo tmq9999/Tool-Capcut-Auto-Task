@@ -18,14 +18,31 @@ export interface MultiloginTokenSource {
 
 export interface MultiloginQuickProfileApi {
   startQuickProfile(token: string, params: StartQuickProfileParams): Promise<MultiloginQuickProfile>;
-  getQuickProfileStatuses(token: string): Promise<MultiloginQuickProfileStatus[]>;
-  stopProfile(token: string, profileId: string): Promise<void>;
+  getQuickProfileStatuses(token: string, timeoutMs?: number): Promise<MultiloginQuickProfileStatus[]>;
+  stopProfile(token: string, profileId: string, timeoutMs?: number): Promise<void>;
 }
 
 export interface MultiloginBrowserRuntimeOptions {
   sleep?: (ms: number) => Promise<void>;
   portTimeoutMs?: number;
   portPollIntervalMs?: number;
+}
+
+function waitWithSignal(
+  sleep: (ms: number) => Promise<void>,
+  ms: number,
+  signal?: AbortSignal
+): Promise<void> {
+  if (!signal) return sleep(ms);
+  signal.throwIfAborted();
+  let onAbort: (() => void) | null = null;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason ?? new Error('Aborted'));
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  return Promise.race([sleep(ms), aborted]).finally(() => {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  });
 }
 
 /** Automation type that makes the launcher publish a remote-debugging port. */
@@ -61,10 +78,15 @@ export class MultiloginBrowserRuntime implements IBrowserRuntimeApi {
    * Best effort: a profile without a resolved port is still a usable launch, it
    * simply cannot be attached to yet, so this never fails the start.
    */
-  private async resolvePort(token: string, profileId: string): Promise<number | null> {
+  private async resolvePort(
+    token: string,
+    profileId: string,
+    signal?: AbortSignal
+  ): Promise<number | null> {
     const attempts = Math.max(1, Math.ceil(this.portTimeoutMs / this.portPollIntervalMs));
 
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+      signal?.throwIfAborted();
       let statuses: MultiloginQuickProfileStatus[];
       try {
         statuses = await this.api.getQuickProfileStatuses(token);
@@ -76,7 +98,7 @@ export class MultiloginBrowserRuntime implements IBrowserRuntimeApi {
       if (own?.port) return own.port;
 
       if (attempt < attempts - 1) {
-        await this.sleep(this.portPollIntervalMs);
+        await waitWithSignal(this.sleep, this.portPollIntervalMs, signal);
       }
     }
 
@@ -87,7 +109,10 @@ export class MultiloginBrowserRuntime implements IBrowserRuntimeApi {
     headless: boolean;
     proxy?: BrowserProxySettings;
     browser?: BrowserRuntime;
+    signal?: AbortSignal;
+    onProfileStarted?: (profileId: string) => void;
   }): Promise<StartedProfile> {
+    params.signal?.throwIfAborted();
     const token = await this.auth.getAccessToken();
     const quickParams: StartQuickProfileParams = {
       isHeadless: params.headless,
@@ -98,7 +123,8 @@ export class MultiloginBrowserRuntime implements IBrowserRuntimeApi {
     }
 
     const profile = await this.api.startQuickProfile(token, quickParams);
-    const port = profile.port ?? (await this.resolvePort(token, profile.profileId));
+    params.onProfileStarted?.(profile.profileId);
+    const port = profile.port ?? (await this.resolvePort(token, profile.profileId, params.signal));
 
     return { profileId: profile.profileId, port, browserType: profile.browserType };
   }
@@ -160,6 +186,8 @@ export class DispatchingBrowserRuntime implements IBrowserRuntimeApi {
     headless: boolean;
     proxy?: BrowserProxySettings;
     browser?: BrowserRuntime;
+    signal?: AbortSignal;
+    onProfileStarted?: (profileId: string) => void;
   }): Promise<StartedProfile> {
     const runtime = this.resolve(params.browser);
     const profile = await runtime.startProfile(params);

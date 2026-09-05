@@ -46,7 +46,7 @@ class FakeLogger implements SafeDiagnosticLogger {
   }
 }
 
-describe('Shutdown Lifecycle Manager (Task 9 RED)', () => {
+describe('Shutdown Lifecycle Manager', () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -55,50 +55,35 @@ describe('Shutdown Lifecycle Manager (Task 9 RED)', () => {
     vi.useRealTimers();
   });
 
-  it('orders execution correctly: flush before close before quit, closing DB once and quitting once', async () => {
-    const executionOrder: string[] = [];
-
-    const mockDb = new FakeDatabase();
-    const originalClose = mockDb.close.bind(mockDb);
-    mockDb.close = () => {
-      executionOrder.push('close_db');
-      originalClose();
-    };
-
-    const mockLogBus = {
-      flush: async () => {
-        executionOrder.push('flush_logbus');
-      }
-    };
-
-    const mockApp = new FakeApp();
-    const originalQuit = mockApp.quit.bind(mockApp);
-    mockApp.quit = () => {
-      executionOrder.push('app_quit');
-      originalQuit();
-    };
-
-    const logger = new FakeLogger();
-
+  it('stops automation before log flush, database close, and quit', async () => {
+    const order: string[] = [];
     const manager = createShutdownManager({
-      db: mockDb,
-      logBus: mockLogBus,
-      app: mockApp,
-      logger,
-      timeoutMs: 2000
+      automation: {
+        stop: async (code) => {
+          expect(code).toBe('APP_SHUTDOWN');
+          order.push('stop_automation');
+        }
+      },
+      logBus: {
+        flush: async () => {
+          order.push('flush_logs');
+        }
+      },
+      db: {
+        open: true,
+        close: () => {
+          order.push('close_db');
+        }
+      },
+      app: {
+        quit: () => {
+          order.push('quit');
+        }
+      }
     });
 
-    const event = new FakeEvent();
-    const shutdownPromise = manager.handleBeforeQuit(event);
-
-    await shutdownPromise;
-
-    expect(event.preventDefaultCalls).toBe(1);
-    expect(executionOrder).toEqual(['flush_logbus', 'close_db', 'app_quit']);
-    expect(mockDb.open).toBe(false);
-    expect(mockDb.closeCalls).toBe(1);
-    expect(mockApp.quitCalls).toBe(1);
-    expect(logger.logs.length).toBe(0);
+    await manager.handleBeforeQuit(new FakeEvent());
+    expect(order).toEqual(['stop_automation', 'flush_logs', 'close_db', 'quit']);
   });
 
   it('prevents re-entry: second before-quit while shutting down does not repeat preventDefault, close, or quit', async () => {
@@ -116,7 +101,7 @@ describe('Shutdown Lifecycle Manager (Task 9 RED)', () => {
       logBus: { flush: () => pendingFlush },
       app: mockApp,
       logger,
-      timeoutMs: 2000
+      logFlushTimeoutMs: 2000
     });
 
     const event1 = new FakeEvent();
@@ -137,12 +122,67 @@ describe('Shutdown Lifecycle Manager (Task 9 RED)', () => {
     expect(mockApp.quitCalls).toBe(1);
   });
 
-  it('enforces 2000ms timeout on hanging flush, logs only ERR_SHUTDOWN_TIMEOUT, and completes close and quit', async () => {
+  it('reports an automation timeout separately and still flushes, closes, and quits', async () => {
+    const order: string[] = [];
+    const logger = new FakeLogger();
+    const db = new FakeDatabase();
+    const app = new FakeApp();
+    const manager = createShutdownManager({
+      automation: { stop: async () => new Promise<void>(() => {}) },
+      logBus: { flush: async () => { order.push('flush_logs'); } },
+      db,
+      app,
+      logger,
+      automationTimeoutMs: 100,
+      logFlushTimeoutMs: 200
+    });
+
+    const shutdown = manager.handleBeforeQuit(new FakeEvent());
+    await vi.advanceTimersByTimeAsync(100);
+    await shutdown;
+
+    expect(logger.logs).toEqual([{
+      code: 'ERR_SHUTDOWN_AUTOMATION_TIMEOUT',
+      message: 'Automation stop timed out during shutdown.'
+    }]);
+    expect(order).toEqual(['flush_logs']);
+    expect(db.closeCalls).toBe(1);
+    expect(app.quitCalls).toBe(1);
+  });
+
+  it('reports a log timeout separately after automation has stopped', async () => {
+    const order: string[] = [];
+    const logger = new FakeLogger();
+    const db = new FakeDatabase();
+    const app = new FakeApp();
+    const manager = createShutdownManager({
+      automation: { stop: async () => { order.push('stop_automation'); } },
+      logBus: { flush: async () => new Promise<void>(() => {}) },
+      db,
+      app,
+      logger,
+      automationTimeoutMs: 100,
+      logFlushTimeoutMs: 200
+    });
+
+    const shutdown = manager.handleBeforeQuit(new FakeEvent());
+    await vi.advanceTimersByTimeAsync(200);
+    await shutdown;
+
+    expect(order).toEqual(['stop_automation']);
+    expect(logger.logs).toEqual([{
+      code: 'ERR_SHUTDOWN_LOG_TIMEOUT',
+      message: 'LogBus flush timed out during shutdown.'
+    }]);
+    expect(db.closeCalls).toBe(1);
+    expect(app.quitCalls).toBe(1);
+  });
+
+  it('enforces 2000ms timeout on hanging flush, logs only ERR_SHUTDOWN_LOG_TIMEOUT, and completes close and quit', async () => {
     const mockDb = new FakeDatabase();
     const mockApp = new FakeApp();
     const logger = new FakeLogger();
 
-    // Never-resolving flush promise
     const hangingFlush = new Promise<void>(() => {});
 
     const manager = createShutdownManager({
@@ -150,13 +190,12 @@ describe('Shutdown Lifecycle Manager (Task 9 RED)', () => {
       logBus: { flush: () => hangingFlush },
       app: mockApp,
       logger,
-      timeoutMs: 2000
+      logFlushTimeoutMs: 2000
     });
 
     const event = new FakeEvent();
     const shutdownPromise = manager.handleBeforeQuit(event);
 
-    // Advance fake timer by 2000ms to trigger timeout
     await vi.advanceTimersByTimeAsync(2000);
     await shutdownPromise;
 
@@ -167,7 +206,7 @@ describe('Shutdown Lifecycle Manager (Task 9 RED)', () => {
 
     expect(logger.logs).toEqual([
       {
-        code: 'ERR_SHUTDOWN_TIMEOUT',
+        code: 'ERR_SHUTDOWN_LOG_TIMEOUT',
         message: 'LogBus flush timed out during shutdown.'
       }
     ]);
@@ -190,7 +229,7 @@ describe('Shutdown Lifecycle Manager (Task 9 RED)', () => {
       logBus: rejectingLogBus,
       app: mockApp,
       logger,
-      timeoutMs: 2000
+      logFlushTimeoutMs: 2000
     });
 
     const event = new FakeEvent();
@@ -218,7 +257,7 @@ describe('Shutdown Lifecycle Manager (Task 9 RED)', () => {
       db: mockDb,
       app: mockApp,
       logger,
-      timeoutMs: 2000
+      logFlushTimeoutMs: 2000
     });
 
     const event = new FakeEvent();

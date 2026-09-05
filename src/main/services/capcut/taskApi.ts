@@ -195,38 +195,85 @@ export class TaskStore {
     return [...this.grants];
   }
 
-  /**
-   * Bằng chứng hoàn thành một nhiệm vụ.
-   * Xét cả action đã tới TRƯỚC khi hàm này được gọi — `do_action` bắn rất nhanh
-   * sau thao tác, có thể xong trước khi runner kịp chờ.
-   */
-  waitForAction(actionKey: string, timeoutMs: number, sinceMs: number): Promise<ActionProof> {
-    const already = this.actions.find((a) => a.actionKey === actionKey && a.at >= sinceMs);
+  waitForAction(
+    actionKey: string,
+    timeoutMs: number,
+    sinceMs: number,
+    signal?: AbortSignal
+  ): Promise<ActionProof> {
+    signal?.throwIfAborted();
+    const already = this.actions.find(
+      (action) => action.actionKey === actionKey && action.at >= sinceMs
+    );
     if (already) return Promise.resolve(already);
 
     return new Promise<ActionProof>((resolve, reject) => {
-      const waiter: ActionWaiter = { actionKey, sinceMs, resolve };
+      let timer: NodeJS.Timeout | null = null;
+      const cleanup = (): void => {
+        this.actionWaiters.delete(waiter);
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const onAbort = (): void => {
+        cleanup();
+        reject(signal?.reason ?? new Error('Aborted'));
+      };
+      const waiter: ActionWaiter = {
+        actionKey,
+        sinceMs,
+        resolve: (proof) => {
+          cleanup();
+          resolve(proof);
+        }
+      };
       this.actionWaiters.add(waiter);
-      const timer = setTimeout(() => {
-        if (!this.actionWaiters.delete(waiter)) return;
-        reject(new Error(`không thấy do_action "${actionKey}" sau ${timeoutMs}ms`));
+      timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(
+          'không thấy do_action "' + actionKey + '" sau ' + timeoutMs + 'ms'
+        ));
       }, timeoutMs);
       timer.unref?.();
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 
   /** Chỉ nhận snapshot MỚI hơn `afterMs`. Không bao giờ trả về bản cũ. */
-  waitForSnapshot(afterMs: number, timeoutMs: number): Promise<TaskSnapshot> {
+  waitForSnapshot(
+    afterMs: number,
+    timeoutMs: number,
+    signal?: AbortSignal
+  ): Promise<TaskSnapshot> {
+    signal?.throwIfAborted();
     if (this.snap && this.snap.at > afterMs) return Promise.resolve(this.snap);
 
     return new Promise<TaskSnapshot>((resolve, reject) => {
-      const waiter: SnapWaiter = { afterMs, resolve };
+      let timer: NodeJS.Timeout | null = null;
+      const cleanup = (): void => {
+        this.snapWaiters.delete(waiter);
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const onAbort = (): void => {
+        cleanup();
+        reject(signal?.reason ?? new Error('Aborted'));
+      };
+      const waiter: SnapWaiter = {
+        afterMs,
+        resolve: (snapshot) => {
+          cleanup();
+          resolve(snapshot);
+        }
+      };
       this.snapWaiters.add(waiter);
-      const timer = setTimeout(() => {
-        if (!this.snapWaiters.delete(waiter)) return;
-        reject(new Error(`không nhận được task_list mới sau ${timeoutMs}ms`));
+      timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(
+          'không nhận được task_list mới sau ' + timeoutMs + 'ms'
+        ));
       }, timeoutMs);
       timer.unref?.();
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 }

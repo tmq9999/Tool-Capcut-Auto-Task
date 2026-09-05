@@ -404,9 +404,9 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                 options={[
                   { value: 'manual', label: 'Manual' },
                   { value: 'api', label: 'API' },
-                  { value: 'custom', label: 'Custom' },
+                  { value: 'custom', label: 'Custom (Đã khóa)', disabled: true },
                 ]}
-                value={config.emailSourceMode}
+                value={config.emailSourceMode === 'custom' ? 'api' : config.emailSourceMode}
                 onChange={(value) => onChange({ emailSourceMode: value })}
                 size="sm"
                 disabled={disabled}
@@ -420,7 +420,7 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                       <span className="font-code text-[11px] text-primary">@{customEmail.domain}</span>
                     </div>
                     <span className="text-[10px] text-on-surface-variant leading-snug block">
-                      Tự sinh {config.threadCount} địa chỉ khi bấm BẮT ĐẦU.
+                      {'Duy trì tối đa ' + config.threadCount + ' luồng; mỗi luồng tự sinh địa chỉ mới khi sẵn sàng.'}
                     </span>
                   </div>
                   <span className="text-[10px] text-on-surface-variant leading-snug">
@@ -453,7 +453,7 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                         </span>
                       </div>
                       <span className="text-[10px] text-on-surface-variant leading-snug">
-                        Mua {config.threadCount} email khi bấm BẮT ĐẦU.
+                        {'Duy trì tối đa ' + config.threadCount + ' luồng; chỉ lấy 1 email khi một luồng đã có proxy và sẵn sàng.'}
                       </span>
                     </div>
                   ) : (
@@ -474,6 +474,9 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                     onChange={(e) => onChange({ emailList: e.target.value })}
                     className="h-[52px] min-h-[52px] py-1 text-[11px]"
                   />
+                  <span className="text-[10px] text-on-surface-variant leading-snug">
+                    {'Xử lý mọi dòng hợp lệ, tối đa ' + config.threadCount + ' dòng cùng lúc.'}
+                  </span>
                 </div>
               )}
             </div>

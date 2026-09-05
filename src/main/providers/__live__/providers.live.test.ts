@@ -173,10 +173,18 @@ describe('Gmail94 (live)', () => {
 
     const profile = await provider.getProfile(apiKey as string);
     report('Gmail94 account', (profile.name ?? 'n/a') + ', balance ' + (profile.balance ?? 'n/a'));
+    expect(typeof profile.balance).toBe('number');
+    expect(Number.isFinite(profile.balance)).toBe(true);
+    expect(profile.balance as number).toBeGreaterThanOrEqual(0);
 
     const services = await provider.listServices();
     report('Gmail94 services', services.map((entry) => entry.slug).join(', ') || '(trống)');
     expect(Array.isArray(services)).toBe(true);
+    const capcut = services.find((entry) => entry.slug === 'capcut');
+    expect(capcut).toBeDefined();
+    expect(typeof capcut?.price).toBe('number');
+    expect(Number.isFinite(capcut?.price)).toBe(true);
+    expect(capcut?.price as number).toBeGreaterThan(0);
   }, 60_000);
 
   it.skipIf(!apiKey || !isFlagOn('VERIFY_GMAIL94_BUY'))(

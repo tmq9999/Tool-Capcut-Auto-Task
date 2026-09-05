@@ -2,21 +2,18 @@
  * =============================================================================
  * CHẠY THẬT MỘT LUỒNG QUA CHÍNH APP — không click tay
  * =============================================================================
- * Mục đích: nghiệm thu Pha 4b của `docs/MERGE-PLAN.md` bằng đúng đường mà người
- * dùng đi: renderer → preload → IPC `run:start` → AutomationRunService → engine.
+ * Mục đích: nghiệm thu bằng đúng đường mà người dùng đi:
+ * renderer → preload → IPC `run:start` → AutomationRunService → engine.
  *
- * Cách làm: mở app đã build, gắn CDP vào cửa sổ của nó, rồi gọi
- * `window.electronAPI.run.start(...)` với threadCount = 1. Không dựng lại
- * provider stack, không gọi service trực tiếp — nếu bất kỳ mắt xích IPC nào sai
- * thì bài này phải fail.
- *
- * CHẠY:  node scripts/live-capcut-run.mjs [--email=...] [--minutes=45] [--threads=1]
+ * CHẠY:  node scripts/live-capcut-run.mjs [--email=...] [--minutes=45] [--threads=1] [--stop-after=1]
  *
  *   --email=custom       (mặc định) sinh địa chỉ trên domain catch-all — MIỄN PHÍ
- *   --email=api:gmail94  thuê hộp thư thật từ gmail94 — CÓ TRẢ PHÍ (1.000đ/hộp,
- *                        dịch vụ `capcut`), rồi ĐĂNG KÝ account CapCut mới
- *   --threads=N          số luồng song song. Mỗi luồng tốn 1 hộp thư và giữ 1
- *                        proxy key, nên N nhân lên cả chi phí lẫn rủi ro.
+ *   --email=api:gmail94  thuê hộp thư thật từ gmail94 — CÓ TRẢ PHÍ (yêu cầu
+ *                        phê duyệt riêng và VERIFY_GMAIL94_BUY=1)
+ *   --email=api:dongvanfb thuê hộp thư thật từ DongVanFB — CÓ TRẢ PHÍ (yêu cầu
+ *                        phê duyệt riêng và VERIFY_DONGVANFB_BUY=1)
+ *   --threads=N          số luồng song song (1..20).
+ *   --stop-after=N       dừng sau N account terminal (mặc định 1, tối đa 200).
  *
  * Yêu cầu: `npm run build` xong, Multilogin đang bật, credentials đã lưu trong app.
  */
@@ -24,6 +21,11 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { chromium } from 'playwright-core';
+import {
+  assertBillableEmailAllowed,
+  isTerminalRunState,
+  terminalAccountCount
+} from './live-capcut-options.mjs';
 
 const PORT = 9333;
 const ELECTRON = path.resolve('node_modules/electron/dist/electron.exe');
@@ -34,15 +36,19 @@ const ELECTRON = path.resolve('node_modules/electron/dist/electron.exe');
  */
 function parseEmailSource(argv) {
   const flag = argv.find((arg) => arg.startsWith('--email='));
-  const raw = flag ? flag.slice('--email='.length) : 'custom';
+  const raw = flag ? flag.slice('--email='.length) : 'api:gmail94';
 
-  if (raw === 'custom') return { mode: 'custom' };
+  if (raw === 'custom') {
+    throw new Error(
+      'Nguồn email custom domain hiện đã bị khóa. Vui lòng dùng: api:gmail94 | api:dongvanfb'
+    );
+  }
 
   const api = /^api:(gmail94|dongvanfb)$/.exec(raw);
   if (api) return { mode: 'api', provider: api[1] };
 
   throw new Error(
-    `--email="${raw}" không hợp lệ. Dùng: custom | api:gmail94 | api:dongvanfb`
+    `--email="${raw}" không hợp lệ. Dùng: api:gmail94 | api:dongvanfb`
   );
 }
 
@@ -58,12 +64,22 @@ const LIMIT_MINUTES = (() => {
   return value;
 })();
 
-/** Số luồng song song. Xem `docs/MERGE-PLAN.md` Pha 5/6 — đường chưa nghiệm thu. */
+/** Số luồng song song. */
 const THREADS = (() => {
   const flag = process.argv.slice(2).find((arg) => arg.startsWith('--threads='));
   const value = flag ? Number(flag.slice('--threads='.length)) : 1;
   if (!Number.isInteger(value) || value < 1 || value > 20) {
     throw new Error(`--threads="${flag}" không hợp lệ: phải là số nguyên 1..20`);
+  }
+  return value;
+})();
+
+const STOP_AFTER = (() => {
+  const flag = process.argv.slice(2)
+    .find((arg) => arg.startsWith('--stop-after='));
+  const value = flag ? Number(flag.slice('--stop-after='.length)) : 1;
+  if (!Number.isInteger(value) || value < 1 || value > 200) {
+    throw new Error('--stop-after phải là số nguyên 1..200');
   }
   return value;
 })();
@@ -81,7 +97,8 @@ const RUN_CONFIG = {
   emailSource,
   proxy: { mode: 'proxykey', keys: [] },
   password: { mode: 'random', length: 12, uppercase: true, numbers: true, special: false },
-  testDurationMs: 10_000
+  testDurationMs: 10_000,
+  skipWithoutTrial: false
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -98,7 +115,17 @@ async function attach() {
 }
 
 async function main() {
-  console.log('[LIVE] nguồn email:', JSON.stringify(emailSource), '| hạn harness:', LIMIT_MINUTES, 'phút');
+  assertBillableEmailAllowed(emailSource, process.env);
+
+  console.log(
+    '[LIVE] nguồn email:',
+    JSON.stringify(emailSource),
+    '| stop-after:',
+    STOP_AFTER,
+    '| hạn harness:',
+    LIMIT_MINUTES,
+    'phút'
+  );
   if (emailSource.mode === 'api') {
     console.log('[LIVE] ⚠️  Chế độ API sẽ THUÊ hộp thư thật — thao tác có trả phí.');
   }
@@ -124,7 +151,11 @@ async function main() {
     console.log(`[${status}] ${step} | ${email} | ${message}`);
   });
   await page.exposeFunction('__liveProgress', (p) => {
-    console.log(`[PROGRESS] ${p.state} — ${p.message} (start ${p.threadsStarted}, stop ${p.threadsStopped}, fail ${p.threadsFailed})`);
+    console.log(
+      `[PROGRESS] ${p.state} — ${p.message} ` +
+      `(active ${p.workersActive}/${p.workerTarget}, accepted ${p.accountsAccepted}, ` +
+      `done ${p.accountsCompleted}, failed ${p.accountsFailed}, stopped ${p.accountsStopped})`
+    );
   });
   await page.evaluate(() => {
     window.electronAPI.logs.onEntry((e) => window.__liveLog(e));
@@ -144,15 +175,9 @@ async function main() {
     return;
   }
 
-  // Chờ tới khi phiên dừng. Engine chạy đủ 12 nhiệm vụ nên để hạn rộng.
-  /**
-   * Hạn của HARNESS, không phải của engine. Đo 04/09/2026: lượt 1 account chạy
-   * tới giữa lượt quét 2/4 thì cán mốc 30 phút và app bị đóng khi engine còn
-   * đang làm — nên không có dòng "CapCut ghi nhận x/12" nào để đọc. Engine tự
-   * chặn trên ở `maxRounds`, vậy hạn ở đây chỉ để không treo vô hạn.
-   */
   const deadline = Date.now() + LIMIT_MINUTES * 60_000;
   let last = '';
+  let stopRequested = false;
   while (Date.now() < deadline) {
     const progress = await page
       .evaluate(async () => (await window.electronAPI.run.progress())?.data ?? null)
@@ -162,8 +187,31 @@ async function main() {
       console.log(`[LIVE] state = ${state}`);
       last = state;
     }
-    if (state === 'stopped' || state === 'failed') break;
-    await sleep(5_000);
+    if (
+      !stopRequested &&
+      terminalAccountCount(progress) >= STOP_AFTER &&
+      !isTerminalRunState(state)
+    ) {
+      stopRequested = true;
+      console.log(`[LIVE] đạt ${STOP_AFTER} account terminal — gửi Stop.`);
+      await page.evaluate(async () => window.electronAPI.run.stop());
+    }
+    if (isTerminalRunState(state)) break;
+    await sleep(500);
+  }
+
+  if (!isTerminalRunState(last)) {
+    await page.evaluate(async () => window.electronAPI.run.stop()).catch(() => {});
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const progress = await page
+        .evaluate(async () => (await window.electronAPI.run.progress())?.data ?? null)
+        .catch(() => null);
+      if (isTerminalRunState(progress?.state)) {
+        last = progress.state;
+        break;
+      }
+      await sleep(500);
+    }
   }
 
   console.log('[LIVE] xong — đóng app.');

@@ -102,6 +102,7 @@ export class XcliLauncher implements BrowserLauncher {
    * dừng được profile nhưng để lại một kết nối CDP mồ côi.
    */
   private readonly attached = new Map<string, Browser>();
+  private readonly stopping = new Map<string, Promise<void>>();
 
   constructor(options: XcliLauncherOptions = {}) {
     this.log = options.log ?? NO_LAUNCHER_LOG;
@@ -155,6 +156,7 @@ export class XcliLauncher implements BrowserLauncher {
   }
 
   async launch(opts: LaunchOptions): Promise<LaunchedProfile> {
+    opts.signal?.throwIfAborted();
     if (opts.headless) {
       this.log(
         '   ⚠️  Đường xcli không có tham số headless đã đo được — profile vẫn chạy có cửa sổ'
@@ -164,46 +166,52 @@ export class XcliLauncher implements BrowserLauncher {
     const args = this.buildArgs(opts);
 
     this.log('   → Đang khởi chạy Multilogin quick profile qua xcli...');
+    let commandFailed = false;
     const { stdout, stderr } = await execFileAsync(this.xcliPath, args, {
       windowsHide: true,
       cwd: this.xcliCwd,
       env: process.env,
-      maxBuffer: 10 * 1024 * 1024
+      maxBuffer: 10 * 1024 * 1024,
+      // Once dispatched, collect the id before honoring Stop. Killing the CLI
+      // cannot undo an already accepted server-side quick-profile creation.
+      timeout: 30_000
+    }).catch((error: unknown) => {
+      commandFailed = true;
+      const result = error as { stdout?: unknown; stderr?: unknown } | null;
+      return {
+        stdout: typeof result?.stdout === 'string' ? result.stdout : '',
+        stderr: typeof result?.stderr === 'string' ? result.stderr : ''
+      };
     });
-
     const output = `${stdout}\n${stderr}`;
     const portMatch = output.match(/port:\s*(\d+)/i);
     const idMatch = output.match(/ID\s+([a-f0-9-]{16,})/i);
-
-    if (!portMatch) {
-      this.log(`   ⚠️  Output xcli: ${output.trim().slice(0, 300)}`);
-      throw new ProviderError(
-        'CONFIG_ERROR',
-        'Không tìm thấy CDP port trong output của xcli.',
-        MULTILOGIN_SERVICE_NAME
-      );
-    }
-
-    const port = parseInt(portMatch[1], 10);
 
     // Không có profileId thì KHÔNG có cách dừng profile qua xcli, và một cửa sổ
     // treo cho mỗi account là đúng cái đã làm mất dấu 15/16 profile trong lượt
     // chạy batch 2026-09-01. Dùng đường còn lại: ngắt qua CDP cũng tắt luôn
     // browser Multilogin, rồi mới báo lỗi.
     if (!idMatch) {
-      this.log(`   ⚠️  Output xcli: ${output.trim().slice(0, 300)}`);
-      await this.killByCdp(port);
+      if (portMatch) await this.killByCdp(parseInt(portMatch[1], 10));
       throw new ProviderError(
         'CONFIG_ERROR',
-        'xcli không trả về profile id — đã tắt profile vừa mở để không treo cửa sổ.',
+        'xcli không trả về profile id — không xác nhận được quyền sở hữu profile.',
         MULTILOGIN_SERVICE_NAME
       );
     }
 
     const profileId = idMatch[1];
-    this.log(`   ✅ Profile đã chạy (ID: ${profileId}, Port: ${port})`);
+    const ownershipHandedOff = Boolean(opts.onProfileStarted);
+    opts.onProfileStarted?.(profileId);
 
     try {
+      opts.signal?.throwIfAborted();
+      if (commandFailed) throw new ProviderError('NETWORK_ERROR', 'Lệnh xcli không hoàn tất; profile đã được ghi nhận để thu hồi.', MULTILOGIN_SERVICE_NAME);
+      if (!portMatch) {
+        throw new ProviderError('CONFIG_ERROR', 'Không tìm thấy CDP port trong output của xcli.', MULTILOGIN_SERVICE_NAME);
+      }
+      const port = parseInt(portMatch[1], 10);
+      this.log(`   ✅ Profile đã chạy (ID: ${profileId}, Port: ${port})`);
       // Tắt dialog "Save password" — nó là UI của browser, nằm ngoài DOM nên
       // không click hay ẩn được, và nó che modal Upgrade khi soi giao diện.
       // Phải bơm Preferences TRƯỚC khi Chrome khởi động xong (xem ../prefs.ts).
@@ -212,12 +220,13 @@ export class XcliLauncher implements BrowserLauncher {
       }
 
       // Browser cần thời gian khởi động trước khi nhận kết nối CDP
-      await this.sleep(this.bootWaitMs);
+      await this.wait(this.bootWaitMs, opts.signal);
 
       const attachment = await attachOverCdp(port, {
         attempts: this.connectAttempts,
         log: this.log,
-        sleep: this.sleep
+        sleep: this.sleep,
+        signal: opts.signal
       });
       this.attached.set(profileId, attachment.browser);
 
@@ -226,7 +235,7 @@ export class XcliLauncher implements BrowserLauncher {
     } catch (e) {
       // Mở được profile mà không gắn được vào thì phải dừng nó, nếu không mỗi
       // lượt chạy để lại một cửa sổ browser treo.
-      await this.stopViaXcli(profileId);
+      if (!ownershipHandedOff) await this.stop(profileId);
       throw e;
     }
   }
@@ -244,10 +253,36 @@ export class XcliLauncher implements BrowserLauncher {
    * App luôn là "đóng thật": không có nhánh giữ profile cho lượt sau.
    */
   async stop(profileId: string): Promise<void> {
-    const browser = this.attached.get(profileId);
-    this.attached.delete(profileId);
-    if (browser) await browser.close().catch(() => {});
-    await this.stopViaXcli(profileId);
+    const existing = this.stopping.get(profileId);
+    if (existing) return existing;
+
+    const operation = (async (): Promise<void> => {
+      await this.stopViaXcli(profileId);
+      const browser = this.attached.get(profileId);
+      this.attached.delete(profileId);
+      if (browser) await browser.close().catch(() => {});
+    })();
+    this.stopping.set(profileId, operation);
+    try {
+      await operation;
+    } finally {
+      if (this.stopping.get(profileId) === operation) this.stopping.delete(profileId);
+    }
+  }
+
+  private async wait(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) return this.sleep(ms);
+    signal.throwIfAborted();
+    let onAbort: (() => void) | null = null;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(signal.reason ?? new Error('Aborted'));
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      await Promise.race([this.sleep(ms), aborted]);
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
+    }
   }
 
   /**
@@ -263,11 +298,29 @@ export class XcliLauncher implements BrowserLauncher {
       await execFileAsync(this.xcliPath, ['profile-stop', '--profile-id', profileId], {
         windowsHide: true,
         cwd: this.xcliCwd,
-        env: process.env
+        env: process.env,
+        timeout: 10_000
       });
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error('Profile stop confirmation timed out');
+        const { stdout } = await execFileAsync(this.xcliPath, ['profile-status'], {
+          windowsHide: true, cwd: this.xcliCwd, env: process.env, timeout: remaining
+        });
+        if (!stdout.includes('Profile Status')) throw new Error('Unrecognized profile status output');
+        const row = stdout.split(/\r?\n/).find((line) => line.trim().startsWith(profileId));
+        if (!row || row.trim().split(/\s+/)[1] === 'stopped') break;
+        await this.sleep(Math.min(250, remaining));
+      }
       this.log(`Đã dừng profile ${profileId}`);
-    } catch (e) {
-      this.log(`Không dừng được profile ${profileId}: ${(e as Error).message}`);
+    } catch {
+      this.log(`Không dừng được profile ${profileId}.`);
+      throw new ProviderError(
+        'NETWORK_ERROR',
+        'Không dừng được Multilogin profile ' + profileId + '.',
+        MULTILOGIN_SERVICE_NAME
+      );
     }
   }
 

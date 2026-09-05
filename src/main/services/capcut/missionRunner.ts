@@ -18,8 +18,24 @@ import { ensurePageUsable } from './overlays';
 import type { ActionProof, CapcutTask, TaskSnapshot, TaskStore } from './taskApi';
 import type { CapcutMissionEnv, MissionGroup } from './types';
 import { URLS } from './urls';
+import { measureStage } from '../stageTiming';
+import { abortable, abortableDelay } from './cancellation';
 
 export type { CapcutMissionEnv, MissionGroup, TaskOutcome } from './types';
+
+export interface MissionEvidence {
+  key: string;
+  proof?: ActionProof;
+  snapshotStatus?: number;
+  state: 'verified' | 'proved-awaiting-snapshot' | 'failed';
+  error?: Error;
+}
+
+export interface MissionGroupResult {
+  evidence: Map<string, MissionEvidence>;
+  snapshot: TaskSnapshot | null;
+  actionSettledAt: number;
+}
 
 /**
  * Log được INJECT, không dùng `console.log`: engine chạy trong main process của
@@ -42,14 +58,15 @@ const NO_LOG: LogFn = () => {};
  */
 export function selectGroups(
   snap: TaskSnapshot,
-  groups: MissionGroup[]
+  groups: MissionGroup[],
+  proofBacked: ReadonlySet<string> = new Set()
 ): Array<{ group: MissionGroup; need: Set<string> }> {
   const out: Array<{ group: MissionGroup; need: Set<string> }> = [];
   for (const group of groups) {
     const need = new Set(
-      group.keys.filter((k) => {
-        const t = snap.byKey.get(k);
-        return t !== undefined && t.status !== 4;
+      group.keys.filter((key) => {
+        const task = snap.byKey.get(key);
+        return task !== undefined && task.status !== 4 && !proofBacked.has(key);
       })
     );
     if (need.size > 0) out.push({ group, need });
@@ -113,7 +130,9 @@ export async function findTaskEntries(page: Page): Promise<Locator[]> {
   const found: Locator[] = [];
   for (const sel of TASK_ENTRY_SELECTORS) {
     const loc = page.locator(sel).first();
-    const box = await loc.boundingBox().catch(() => null);
+    // boundingBox auto-waits for a missing node; discovery must be a snapshot.
+    if (await loc.count() === 0) continue;
+    const box = await loc.boundingBox({ timeout: 250 }).catch(() => null);
     if (box && box.width > 4 && box.height > 4) found.push(loc);
   }
   return found;
@@ -142,34 +161,28 @@ async function countTaskRows(page: Page): Promise<number> {
 
 /**
  * Đóng popover nhiệm vụ. Thứ tự thử theo đúng kết quả đo trên popover kẹt thật
- * (profile 1627342b, 2026-09-02): Escape KHÔNG ăn, click ra ngoài KHÔNG ăn,
- * bấm lại nút mở cũng KHÔNG ăn — CapCut ghim popover ở trạng thái
- * `enter_from=signup`. Chỉ reload mới đóng được.
+ * Escape may leave signup popovers pinned. Never click arbitrary background:
+ * live 2026-09-05 hit an Inspiration card, opening a video modal over the header.
+ * Only a canvas-safe boundary may reload; Go/Claim cleanup cannot navigate.
  *
  * `allowReload = false` khi vừa bấm một nút trong popover: reload lúc đó có thể
  * huỷ request `do_action` đang bay.
  */
-export async function closeTaskPopover(page: Page, allowReload: boolean): Promise<boolean> {
+export async function closeTaskPopover(page: Page, allowReload: boolean, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
   if ((await countTaskRows(page)) === 0) return true;
+  const wait = (ms: number): Promise<void> => signal ? abortableDelay(ms, signal) : page.waitForTimeout(ms);
 
   await page.keyboard.press('Escape').catch(() => {});
-  await page.waitForTimeout(600);
+  await wait(600);
   if ((await countTaskRows(page)) === 0) return true;
-
-  // viewportSize() trả null với connectOverCDP -> lấy kích thước thật từ trang.
-  const vp = await page
-    .evaluate(() => ({ w: window.innerWidth, h: window.innerHeight }))
-    .catch(() => null);
-  if (vp) {
-    await page.mouse.click(Math.round(vp.w / 2), Math.round(vp.h - 40)).catch(() => {});
-    await page.waitForTimeout(600);
-    if ((await countTaskRows(page)) === 0) return true;
-  }
 
   if (!allowReload) return false;
 
-  await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-  await page.waitForTimeout(5000);
+  signal?.throwIfAborted();
+  const reload = page.reload({ waitUntil: 'domcontentloaded', timeout: 12_000 });
+  await (signal ? abortable(reload, signal) : reload).catch(() => { signal?.throwIfAborted(); });
+  await wait(5000);
   return (await countTaskRows(page)) === 0;
 }
 
@@ -180,8 +193,8 @@ export async function closeTaskPopover(page: Page, allowReload: boolean): Promis
  *
  * Gọi TRƯỚC `act()` nên reload ở đây là an toàn: chưa có thao tác nào để mất.
  */
-export async function assertNoPopover(page: Page, log: LogFn = NO_LOG): Promise<void> {
-  if (await closeTaskPopover(page, true)) return;
+export async function assertNoPopover(page: Page, log: LogFn = NO_LOG, signal?: AbortSignal): Promise<void> {
+  if (await closeTaskPopover(page, true, signal)) return;
   // Câu này vừa đi vào log (LogBus) vừa là message của StepError: người đọc log
   // thấy ngay lý do, chỗ bắt lỗi vẫn có nguyên văn để báo cáo.
   const why = 'Popover nhiệm vụ không đóng được kể cả sau khi reload — nó sẽ che canvas';
@@ -198,52 +211,108 @@ export async function assertNoPopover(page: Page, log: LogFn = NO_LOG): Promise<
  * 2026-09-02 04:02 là ví dụ: export vỡ nhưng `send_msg` và `generate_done` đều
  * có `do_action err_no=0`, vậy mà báo cáo đổ lỗi cho cả ba.
  */
+export async function reconcileMissionEvidence(
+  group: MissionGroup,
+  env: CapcutMissionEnv,
+  store: TaskStore,
+  need: Set<string>
+): Promise<MissionGroupResult> {
+  const actionStartedAt = Date.now();
+  let actError: Error | null = null;
+  try {
+    await measureStage(
+      'mission-action:' + group.name,
+      () => group.act(env, need),
+      env.log
+    );
+  } catch (error: unknown) {
+    env.signal.throwIfAborted();
+    actError = error instanceof Error ? error : new Error(String(error));
+  }
+
+  const actionSettledAt = Date.now();
+
+  return measureStage(
+    'mission-reconciliation:' + group.name,
+    async () => {
+      const budgetMs = actError ? Math.min(3000, group.proofTimeoutMs) : group.proofTimeoutMs;
+      const deadlineAt = actionSettledAt + budgetMs;
+      const remaining = (): number => Math.max(0, deadlineAt - Date.now());
+
+      const proofEntries = await Promise.all([...need].map(async (key) => {
+        try {
+          const proof = await store.waitForAction(
+            key,
+            remaining(),
+            actionStartedAt,
+            env.signal
+          );
+          return [key, proof] as const;
+        } catch (error: unknown) {
+          env.signal.throwIfAborted();
+          return [key, error instanceof Error ? error : new Error(String(error))] as const;
+        }
+      }));
+
+      // Confirmations often arrive while act() is still waiting for UI cleanup.
+      // Require a snapshot after the proof, not after unrelated cleanup finishes.
+      const proofAt = Math.max(actionStartedAt, ...proofEntries.map(([, value]) =>
+        value instanceof Error ? actionStartedAt : value.at));
+      let snapshot = store.snapshot();
+      if (!snapshot || snapshot.at <= proofAt) {
+        snapshot = remaining() > 0
+          ? await store.waitForSnapshot(proofAt, remaining(), env.signal).catch(() => {
+              env.signal.throwIfAborted();
+              return null;
+            })
+          : null;
+      }
+
+      const evidence = new Map<string, MissionEvidence>();
+      for (const [key, value] of proofEntries) {
+        if (value instanceof Error) {
+          evidence.set(key, { key, state: 'failed', error: actError ?? value });
+          continue;
+        }
+        if (value.errNo !== 0) {
+          evidence.set(key, {
+            key,
+            proof: value,
+            state: 'failed',
+            error: new Error(('do_action err_no=' + value.errNo + ' ' + value.errTips).trim())
+          });
+          continue;
+        }
+
+        const snapshotStatus = snapshot?.byKey.get(key)?.status;
+        evidence.set(key, {
+          key,
+          proof: value,
+          snapshotStatus,
+          state: snapshotStatus === 4 ? 'verified' : 'proved-awaiting-snapshot'
+        });
+      }
+
+      return { evidence, snapshot, actionSettledAt };
+    },
+    env.log
+  );
+}
+
 export async function runGroup(
   group: MissionGroup,
   env: CapcutMissionEnv,
   store: TaskStore,
   need: Set<string>
-): Promise<Map<string, ActionProof | Error>> {
-  const mark = Date.now();
-  const result = new Map<string, ActionProof | Error>();
-
-  /**
-   * Dẹp mọi thứ phủ trang TRƯỚC khi nhóm thao tác. Ngày 04/09/2026 ba modal khác
-   * nhau chặn ba nhiệm vụ khác nhau, và cả ba lần engine báo sai địa chỉ:
-   * khảo sát onboarding → "Không thấy panel chat AI agent"; bảng giá Pro →
-   * `canvas_send_no_effect`; "trang lỗi" của CapCut → "Không thấy nút Send
-   * message" (trong khi `aria-label="Send message"` vẫn ở trong DOM).
-   */
-  await ensurePageUsable(env.page, env.log);
-  await assertNoPopover(env.page, env.log);
-
-  let actError: Error | null = null;
-  try {
-    await group.act(env, need);
-  } catch (e) {
-    actError = e instanceof Error ? e : new Error(String(e));
+): Promise<MissionGroupResult> {
+  env.signal.throwIfAborted();
+  if (!await ensurePageUsable(env.page, env.log)) {
+    throw new StepError('Modal vẫn phủ trang; không thao tác nhiệm vụ.', await dump(env.page, 'mission_overlay_blocked'));
   }
-
-  // Chờ song song: do_action có thể tới theo thứ tự bất kỳ.
-  // Nếu act() đã ném thì không chờ lâu — chỉ thu những bằng chứng đã tới.
-  const timeoutMs = actError ? 3000 : group.proofTimeoutMs;
-
-  await Promise.all(
-    [...need].map(async (key) => {
-      try {
-        const proof = await store.waitForAction(key, timeoutMs, mark);
-        if (proof.errNo !== 0) {
-          result.set(key, new Error(`do_action err_no=${proof.errNo} ${proof.errTips}`.trim()));
-          return;
-        }
-        result.set(key, proof);
-      } catch (e) {
-        result.set(key, actError ?? (e instanceof Error ? e : new Error(String(e))));
-      }
-    })
-  );
-
-  return result;
+  // Simple tasks need this popover. Only canvas missions require it closed.
+  if (!group.keys.every((key) => key === 'capcut_web_pwa_install' || key === 'capcut_web_push_authorize')) await assertNoPopover(env.page, env.log, env.signal);
+  env.signal.throwIfAborted();
+  return reconcileMissionEvidence(group, env, store, need);
 }
 
 /**
@@ -294,132 +363,71 @@ export async function findTaskRow(
 export async function withTaskPopover<T>(
   page: Page,
   fn: () => Promise<T>,
-  log: LogFn = NO_LOG
+  log: LogFn = NO_LOG,
+  options: { signal?: AbortSignal; deadlineAt?: number } = {}
 ): Promise<T> {
-  if ((await countTaskRows(page)) === 0) {
-    /**
-     * Dẹp modal phủ trang TRÊN CHÍNH `page` NÀY, không phải trên `env.page`.
-     *
-     * `runGroup` chỉ gọi `ensurePageUsable(env.page)`, mà nhiệm vụ "bật thông
-     * báo" làm việc trên TAB MỚI do nó tự mở. Đo 04/09/2026 trên account
-     * `markusmkel7097`: tab mới đó có modal khảo sát (`lv-modal-mask`
-     * `display: block` + "best describes you"), popover 0 dòng, và lỗi báo ra là
-     * `Tìm dòng "Enable browser notifications" ... (title-only: 0)` — sai địa chỉ
-     * lần thứ tư của cùng một lớp lỗi.
-     */
-    await ensurePageUsable(page, log);
-
-    // Tab nền bị Chrome tiết chế nên animation popover không chạy tới đâu —
-    // nhiệm vụ "bật thông báo" mở TAB MỚI nên hay rơi vào đúng cảnh này.
-    await page.bringToFront().catch(() => {});
-
-    /** Thử LẦN LƯỢT mọi lối vào của trang hiện tại. Trả về số dòng mở được. */
-    const tryOpenHere = async (): Promise<number> => {
-      const candidates = await findTaskEntries(page);
-      if (candidates.length === 0) {
-        log('   ℹ️  Trang này không có lối vào nhiệm vụ nào có kích thước thật');
-        return 0;
-      }
-
-      for (const entry of candidates) {
-        const what = await describe(entry);
-        log(`   ℹ️  Thử lối vào nhiệm vụ: ${what}`);
-
-        for (let attempt = 1; attempt <= 2; attempt++) {
-          // force: nut hien thi nhung Playwright coi la chua actionable (do tren
-          // tab that 2026-09-02: click thuong timeout 6s, force thi an).
-          await entry
-            .click({ timeout: 5000, force: true })
-            .catch((e: unknown) =>
-              log(`   ℹ️  Bấm lối vào nhiệm vụ lỗi: ${(e as Error).message.slice(0, 90)}`)
-            );
-          const deadline = Date.now() + 8000;
-          while (Date.now() < deadline && (await countTaskRows(page)) === 0) {
-            await page.waitForTimeout(500);
-          }
-          const rows = await countTaskRows(page);
-          if (rows > 0) {
-            log(`   ℹ️  Mở được popover: ${rows} dòng nhiệm vụ (lần bấm ${attempt})`);
-            return rows;
-          }
-        }
-        log(`   ℹ️  ${what} không mở được popover — thử lối vào khác`);
-      }
-      return 0;
-    };
-
-    let rows = await tryOpenHere();
-
-    /**
-     * KIỂM THEO KẾT QUẢ, KHÔNG THEO SỰ TỒN TẠI CỦA NÚT.
-     *
-     * Bản trước chỉ sang `/my-edit` khi KHÔNG tìm được lối vào nào. Đo được trên
-     * account vừa đăng ký (rklqbfsgcvuemg55910, 2026-09-03 04:1x): trang
-     * `/ai-design` của account mới không có `TitleBarTaskList` lẫn
-     * `TitleBarFreeCredits`, nên `findTaskEntry` rơi xuống một nút KHÁC, bấm mãi
-     * popover vẫn 0 dòng — mà vì "đã tìm được lối vào" nên nhánh `/my-edit`
-     * không bao giờ chạy. Giờ tiêu chí là popover CÓ MỌC hay không.
-     *
-     * `/my-edit` là nơi widget nhiệm vụ luôn có (dump lượt mở được: taskRow=19,
-     * TitleBarTaskList=2) — NHƯNG chỉ thế là chưa đủ: cùng lượt đó, ở nhiệm vụ
-     * `push_authorize` nó đã bấm ĐÚNG `div[data-id=TitleBarTaskList]` trên
-     * `/my-edit?start_tab=video` mà popover vẫn 0 dòng. Nên nhánh dự phòng đi
-     * vào `URLS.tasks` (có `enter_source=web_task_earn_credit`) — đường mà tài
-     * liệu làm tay chỉ định — và chờ popover tự mọc trước khi bấm gì.
-     */
-    if (rows === 0 && !page.url().includes('enter_source=web_task_earn_credit')) {
-      log('   ℹ️  Popover không mở được ở trang này — vào trang nhiệm vụ (enter_source=web_task_earn_credit)');
-      await page.goto(URLS.tasks, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-
-      // Trang nhiệm vụ có thể TỰ mở popover; chờ dòng xuất hiện trước khi bấm gì.
-      const deadline = Date.now() + 12000;
-      while (Date.now() < deadline && (await countTaskRows(page)) === 0) {
-        await page.waitForTimeout(500);
-      }
-      rows = await countTaskRows(page);
-      if (rows > 0) {
-        log(`   ℹ️  Trang nhiệm vụ tự mở popover: ${rows} dòng`);
-      } else {
-        rows = await tryOpenHere();
-      }
+  const signal = options.signal ?? new AbortController().signal;
+  const deadlineAt = options.deadlineAt ?? Date.now() + 20_000;
+  const remaining = (): number => {
+    signal.throwIfAborted();
+    if (page.isClosed()) throw new StepError('Tab đã đóng khi mở nhiệm vụ.');
+    const ms = deadlineAt - Date.now();
+    if (ms <= 0) throw new StepError('Hết thời hạn mở popover nhiệm vụ.');
+    return ms;
+  };
+  const waitRows = async (budget: number): Promise<boolean> => {
+    const until = Math.min(deadlineAt, Date.now() + budget);
+    while (Date.now() < until) {
+      remaining();
+      if (await countTaskRows(page) > 0) return true;
+      await abortableDelay(Math.min(200, until - Date.now()), signal);
     }
-
-    if (rows === 0) {
-      log('   ℹ️  Vẫn không mở được popover — bước sau sẽ báo lỗi kèm hiện trường');
+    return await countTaskRows(page) > 0;
+  };
+  const tryHere = async (budget: number): Promise<boolean> => {
+    const until = Math.min(deadlineAt, Date.now() + budget);
+    while (Date.now() < until) {
+      remaining();
+      if (await countTaskRows(page) > 0) return true;
+      const entries = await findTaskEntries(page);
+      for (const entry of entries) {
+        const ms = Math.min(remaining(), until - Date.now());
+        if (ms <= 0) break;
+        log('Thử lối vào nhiệm vụ: ' + await describe(entry));
+        await abortable(entry.click({ timeout: Math.min(1500, ms), force: true }), signal)
+          .catch(() => { signal.throwIfAborted(); });
+        if (await waitRows(Math.min(1000, Math.max(0, until - Date.now())))) return true;
+      }
+      if (Date.now() < until) await abortableDelay(Math.min(200, until - Date.now()), signal);
     }
-  }
+    return false;
+  };
 
+  await measureStage('popover-open', async () => {
+    remaining();
+    if (await countTaskRows(page) > 0) return;
+    if (!await ensurePageUsable(page, log)) throw new StepError('Modal vẫn phủ trang nhiệm vụ.');
+    remaining();
+    await abortable(page.bringToFront(), signal);
+    if (await tryHere(Math.min(5000, remaining()))) return;
+    remaining();
+    if (!page.url().includes('enter_source=web_task_earn_credit')) {
+      log('Vào route nhiệm vụ; vẫn dùng cùng deadline.');
+      await abortable(page.goto(URLS.tasks, { waitUntil: 'domcontentloaded', timeout: remaining() }), signal);
+      if (!await ensurePageUsable(page, log)) throw new StepError('Modal vẫn phủ trang nhiệm vụ.');
+    }
+    if (!await tryHere(remaining())) throw new StepError('Không mở được popover trong thời hạn.');
+  }, log);
+  remaining();
   try {
     return await fn();
   } finally {
-    /**
-     * Popover PHẢI được đóng lại, và lần này được phép reload.
-     *
-     * Bản cũ để `allowReload = false` với lý do "do_action vừa bắn có thể còn
-     * đang bay" — đúng, nên ở đây chờ một nhịp trước khi đóng thay vì bỏ hẳn
-     * việc đóng. Bỏ hẳn thì popover để hở, và đó là nguyên nhân đã đo được của
-     * 10 lỗi `canvas_panel_missing` đêm 2026-09-01.
-     *
-     * Lượt 2026-09-03 05:0x cho thêm một bằng chứng mới: khi `pwa_install` lần
-     * đầu MỞ ĐƯỢC popover (10 dòng), nhóm Design Studio ngay sau đó vỡ với
-     * "Nút Send vẫn disabled" ở modal Inspiration rồi "Không thấy tab workspace
-     * mới" — popover còn hở che đúng nút Send. Trước đó popover chưa bao giờ mở
-     * nên lỗi này không tồn tại.
-     */
-    /**
-     * DỌN DẸP KHÔNG ĐƯỢC PHÉP NÉM.
-     *
-     * `closeTaskPopover` bọc `.catch()` ở mọi thao tác nên nó vô hại. Dòng chờ
-     * 2.5 giây thì KHÔNG — lượt chạy thật 2026-09-03 20:5x chết vì đúng nó:
-     * `page.waitForTimeout: Target page, context or browser has been closed` ném
-     * ra từ trong `finally` ở bước bấm Claim, cuốn theo cả luồng và account về
-     * 0/12 dù chưa nhiệm vụ nào được thử. Lỗi trong `finally` che mất kết quả
-     * thật, nên ở đây mọi thứ đều phải `.catch()`.
-     */
-    await page.waitForTimeout(2500).catch(() => {});
-    const closed = await closeTaskPopover(page, true).catch(() => true);
-    if (!closed) {
-      log('   ℹ️  Popover nhiệm vụ không đóng được kể cả sau khi reload — nhóm sau có thể bị che');
+    // Reload here destroys the deferred PWA prompt and can cancel do_action.
+    // A pinned popover is handled at the next canvas-safe mission boundary.
+    if (!signal.aborted && !page.isClosed()) {
+      await measureStage('popover-close', async () => {
+        if (!await closeTaskPopover(page, false, signal)) log('Popover còn ghim; xử lý ở ranh giới nhóm kế tiếp.');
+      }, log).catch(() => {});
     }
   }
 }
@@ -436,7 +444,8 @@ export async function claimIfPending(
   page: Page,
   task: CapcutTask,
   store: TaskStore,
-  log: LogFn = NO_LOG
+  log: LogFn = NO_LOG,
+  signal?: AbortSignal
 ): Promise<boolean> {
   if (task.status !== 2) return false;
 
@@ -444,14 +453,28 @@ export async function claimIfPending(
   await withTaskPopover(
     page,
     async () => {
+      signal?.throwIfAborted();
       const row = await findTaskRow(page, task.title, task.reward, log);
       await row.locator('button').first().click({ timeout: 8000 }).catch(() => {});
     },
-    log
+    log,
+    { signal }
   );
 
-  const snap = await store.waitForSnapshot(mark, 30000).catch(() => null);
-  const after = snap?.byKey.get(task.taskKey)?.status;
-  const granted = store.seenGrants().some((g) => g.at >= mark && g.errNo === 0);
-  return after === 4 || granted;
+  const deadline = Date.now() + 30_000;
+  let after: number | undefined;
+  let since = mark;
+  while (Date.now() < deadline) {
+    signal?.throwIfAborted();
+    const snap = await store.waitForSnapshot(since, deadline - Date.now(), signal)
+      .catch(() => {
+        signal?.throwIfAborted();
+        return null;
+      });
+    if (!snap) break;
+    since = snap.at;
+    after = snap.byKey.get(task.taskKey)?.status;
+    if (after === 4) return true;
+  }
+  return after === 4;
 }

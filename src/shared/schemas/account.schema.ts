@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const AccountStatusEnum = z.enum([
-  'active', 'processing', 'error', 'disabled', 'waiting', 'done'
+  'active', 'processing', 'error', 'disabled', 'waiting', 'done', 'stopped'
 ]);
 export type AccountStatus = z.infer<typeof AccountStatusEnum>;
 

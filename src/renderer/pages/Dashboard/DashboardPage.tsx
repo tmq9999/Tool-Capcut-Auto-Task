@@ -37,10 +37,12 @@ const OFFLINE_BRIDGE: IDashboardBridge = {
       data: {
         runId: 'none',
         state: 'idle',
-        threadTotal: 0,
-        threadsStarted: 0,
-        threadsStopped: 0,
-        threadsFailed: 0,
+        workerTarget: 0,
+        workersActive: 0,
+        accountsAccepted: 0,
+        accountsCompleted: 0,
+        accountsFailed: 0,
+        accountsStopped: 0,
         message: 'Chưa chạy',
       },
     }),
@@ -94,6 +96,7 @@ export const DashboardPage: React.FC = () => {
   }, [controller]);
 
   const isRunning = controller.isRunning();
+  const hasOwnedProfiles = state.runningThreads.length > 0;
 
   const filteredAccounts = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -147,16 +150,16 @@ export const DashboardPage: React.FC = () => {
       <Button
         variant="secondary"
         size="sm"
-        disabled={!isRunning}
+        disabled={(!isRunning && !hasOwnedProfiles) || state.isStopping}
         onClick={() => void controller.stop()}
       >
-        Dừng phiên
+        {state.isStopping ? 'Đang dừng...' : 'Dừng phiên'}
       </Button>
 
       <Button
         variant="primary"
         size="sm"
-        disabled={isRunning || state.isSubmitting}
+        disabled={isRunning || hasOwnedProfiles || state.isSubmitting || state.isStopping}
         onClick={() => void controller.start()}
       >
         {isRunning ? 'Đang chạy...' : 'Bắt đầu'}
@@ -195,8 +198,18 @@ export const DashboardPage: React.FC = () => {
           loadedCount={state.accounts.length}
           proxyCount={proxyCount}
           browserName={state.config.browser}
-          isRunning={isRunning}
-          onStart={() => (isRunning ? void controller.stop() : void controller.start())}
+          isRunning={isRunning || hasOwnedProfiles}
+          isStopping={state.isStopping}
+          workerTarget={state.progress.workerTarget}
+          workersActive={state.progress.workersActive}
+          accountsAccepted={state.progress.accountsAccepted}
+          accountsCompleted={state.progress.accountsCompleted}
+          accountsFailed={state.progress.accountsFailed}
+          accountsStopped={state.progress.accountsStopped}
+          runState={state.progress.state}
+          runMessage={state.progress.message}
+          terminalReason={state.progress.terminalReason}
+          onStart={() => (isRunning || hasOwnedProfiles ? void controller.stop() : void controller.start())}
           onVerifyData={() => void controller.load()}
           onSaveConfig={() => void controller.saveConfig()}
           saveConfigLabel={
@@ -238,6 +251,7 @@ export const DashboardPage: React.FC = () => {
                     <option value="waiting">Waiting</option>
                     <option value="done">Done</option>
                     <option value="error">Error</option>
+                    <option value="stopped">Stopped</option>
                   </Select>
                 </div>
               </div>

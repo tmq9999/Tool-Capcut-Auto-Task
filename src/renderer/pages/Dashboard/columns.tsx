@@ -1,7 +1,7 @@
 import { ColumnDef } from '@tanstack/react-table';
 import { Square } from 'lucide-react';
 import { Checkbox } from '@renderer/components/ui/Checkbox';
-import { Badge } from '@renderer/components/ui/Badge';
+import { Badge, type BadgeVariant } from '@renderer/components/ui/Badge';
 import type { AccountListItemDTO } from '@shared/schemas/account.schema';
 
 export interface DashboardColumnsOptions {
@@ -11,14 +11,21 @@ export interface DashboardColumnsOptions {
   onStopThread: (accountId: string) => void;
 }
 
-const STATUS_TO_BADGE: Record<AccountListItemDTO['status'], 'done' | 'running' | 'waiting' | 'error'> = {
+const STATUS_TO_BADGE: Record<AccountListItemDTO['status'], BadgeVariant> = {
   active: 'done',
   done: 'done',
   processing: 'running',
   waiting: 'waiting',
   error: 'error',
   disabled: 'error',
+  stopped: 'stopped',
 };
+
+export function accountStatusBadgeVariant(
+  status: AccountListItemDTO['status']
+): BadgeVariant {
+  return STATUS_TO_BADGE[status] ?? 'info';
+}
 
 export function createDashboardColumns(
   options: DashboardColumnsOptions
@@ -105,7 +112,7 @@ export function createDashboardColumns(
     header: 'Status',
     size: 110,
     cell: (info) => (
-      <Badge variant={STATUS_TO_BADGE[info.getValue<AccountListItemDTO['status']>()] ?? 'info'} />
+      <Badge variant={accountStatusBadgeVariant(info.getValue<AccountListItemDTO['status']>())} />
     ),
   },
   {

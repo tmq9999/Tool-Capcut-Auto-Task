@@ -11,7 +11,15 @@ export const SanitizedDiagnosticDetailsSchema = z.record(
 ).optional();
 
 export const SanitizedDiagnosticResultSchema = z.object({
-  code: z.enum(['OK', 'AUTH_ERROR', 'NETWORK_ERROR', 'RATE_LIMITED', 'CONFIG_ERROR', 'PROVIDER_NOT_IMPLEMENTED']),
+  code: z.enum([
+    'OK',
+    'AUTH_ERROR',
+    'NETWORK_ERROR',
+    'RATE_LIMITED',
+    'CONFIG_ERROR',
+    'PROVIDER_NOT_IMPLEMENTED',
+    'INSUFFICIENT_FUNDS'
+  ]),
   message: z.string().min(1),
   timestamp: z.string().datetime(),
   details: SanitizedDiagnosticDetailsSchema

@@ -1,1135 +1,421 @@
-# AGENTS.md — Capcut AutoManager Engineering Rules
+# AGENTS.md - AutoManager v2.4.1 Engineering Contract
 
-## 1. Project Identity
+This file is the always-loaded operating contract for agents working in this
+repository. Keep it concise and current. Put detailed design history in the
+linked documents instead of growing this file indefinitely.
 
-Project name: AutoManager
+Existing source comments written before 2026-09-05 still cite the former
+numeric contract. Interpret those citations through this compatibility map;
+new comments should cite a section name or source-of-truth file instead of a
+number:
 
-Target application stack:
+| Legacy citation | Current authority |
+| --- | --- |
+| §3 Evidence-first development | Source Of Truth; Testing And Verification |
+| §7 Backend layering | Architecture Boundaries |
+| §8-§12 SQLite, migrations, repositories, settings | Persistence And Secrets; `docs/ARCHITECTURE.md` |
+| §13 Credentials and secrets | Persistence And Secrets |
+| §15 Accounts data | State And Outcome Semantics |
+| §16-§17 Runtime logging | Performance And Waiting; CapCut Engine Evidence Rules |
+| §18 Log retention | `docs/ARCHITECTURE.md` and current retention tests |
+| §19 Database indexes | Persistence And Secrets and query-plan tests |
+| §21 Account export | Current export schemas/services/tests and `docs/ARCHITECTURE.md` |
+| §27 Error handling | Persistence And Secrets; Testing And Verification |
+| §30 CapCut automation boundary | CapCut Engine Evidence Rules |
 
-- Electron
+## 1. Mandatory Workflow
+
+Every task must start with the installed Superpowers plugin.
+
+1. Invoke `superpowers:using-superpowers` before analysis, questions, commands,
+   edits, reviews, or planning.
+2. Invoke every applicable Superpowers workflow and read its current `SKILL.md`.
+3. Use `superpowers:brainstorming` before behavior or architecture changes.
+4. Use `superpowers:systematic-debugging` for bugs, failures, hangs, or unexpected
+   performance.
+5. Use `superpowers:writing-plans` for approved multi-step work.
+6. Use `superpowers:test-driven-development` while implementing behavior.
+7. Use `superpowers:verification-before-completion` before any completion claim.
+8. Use `superpowers:finishing-a-development-branch` only when the branch is
+   genuinely ready to finish.
+
+For Antigravity, a Superpowers todo/checklist means a task artifact created with
+`write_to_file` using `IsArtifact: true` and `ArtifactType: "task"`. Update that
+artifact after every completed step. `manage_task` controls background processes;
+it is not a checklist.
+
+Use Context7 for current library, framework, SDK, API, or CLI documentation:
+
+1. Resolve the library ID.
+2. Query the official documentation for one concept per query.
+3. Base library-specific answers and changes on the fetched documentation.
+
+Context7 is not required for repository business logic, local refactoring, or
+reviewing code that is fully defined in this repository.
+
+Before editing:
+
+- Read this file and the source-of-truth document for the subsystem.
+- Inspect implementation, contracts, call sites, and relevant tests.
+- Check `git status --short`; preserve user changes and unrelated work.
+- State assumptions that materially affect behavior.
+- Prefer the smallest correct change; avoid unrelated redesign or dependencies.
+
+## 2. Project State
+
+AutoManager is a commercial Windows-first Electron desktop automation manager.
+
+Current stack:
+
+- Electron 35
 - React 19
-- TypeScript
-- Vite
-- Tailwind CSS
-- SQLite via better-sqlite3
-- Windows desktop is the primary target
+- TypeScript 5.8 in strict mode
+- Vite 6
+- Tailwind CSS 3
+- SQLite through `better-sqlite3`
+- Playwright through `playwright-core`
 
-The application is a commercial desktop automation management tool.
+Current implemented scope:
 
-Dark mode is the default UI theme.
+- CapCut Free Credits automation (`module: "credit"`)
+- Multilogin browser runtime only
+- Gmail94, DongVanFB, and owned custom-domain email sources
+- KiotProxy key leases or direct proxies
+- SQLite-backed settings, accounts, runtime logs, purchased emails, proxy leases,
+  and per-account CapCut task progress
 
-The existing AutoManager Dashboard exported from Stitch is the MASTER visual reference.
+The CapCut engine is integrated under `src/main/services/capcut/`; it is not a
+future placeholder. `trial` and `team` modules and GoLogin, GPM, Camoufox, and
+Patchright runtimes remain unsupported and must fail clearly before a billable
+email purchase.
 
----
+The active reliability/performance change is specified in:
 
-# 2. Mandatory Agent Behavior
+- `docs/superpowers/specs/2026-09-05-continuous-automation-performance-design.md`
+- `docs/superpowers/plans/2026-09-05-continuous-automation-performance.md`
+- `docs/antigravity/2026-09-05-continuous-automation-performance-gemini-3.8.md`
 
-These rules are mandatory for every task in this repository.
+This change is implemented and verified (see `docs/superpowers/reports/2026-09-05-continuous-automation-performance-verification.md`). The runtime implementation under `src/main/services/`, `src/main/services/capcut/`, and `src/renderer/` is the active source of truth.
 
-Before changing code:
+## 3. Source Of Truth
 
-1. Read this AGENTS.md.
-2. Inspect the relevant existing implementation.
-3. Identify the smallest correct change.
-4. Do not invent requirements.
-5. Do not redesign architecture without explicit approval.
-6. Do not silently introduce new dependencies.
-7. Do not implement unrelated features.
+Use these pointers by branch:
 
-If a requested change conflicts with this document:
+- Persistence, IPC, security, and composition: `docs/ARCHITECTURE.md`, then verify
+  current wiring in `src/main/runtime/providerStack.ts`.
+- CapCut selectors, measured browser behavior, proof rules, and risk-control
+  evidence: `docs/AUTOMATION-ENGINE.md`.
+- Continuous workers, just-in-time email acquisition, run states, and performance
+  targets: the active spec linked above and its implementation plan when present.
+- Commands, dependency versions, and package entry points: `package.json` and the
+  relevant config file, not copied prose.
 
-STOP.
+Some older comments and documents still describe the pre-integration browser-hold
+phase. When prose conflicts with executable code and tests, inspect the behavior,
+record the discrepancy, and update the stale documentation within task scope.
 
-Explain the conflict before making changes.
+## 4. Architecture Boundaries
 
-Never silently bypass these rules.
+Renderer access must remain:
 
----
+```text
+React renderer
+  -> typed preload API
+  -> typed IPC contract
+  -> main-process application service
+  -> repository or provider interface
+  -> SQLite or external service
+```
 
-# 3. Evidence-First Development
+BrowserWindow security remains:
 
-Do not guess how existing code works.
+- `nodeIntegration: false`
+- `contextIsolation: true`
 
-Before modifying a subsystem:
+The renderer must not import Node APIs, Electron main internals,
+`better-sqlite3`, credential-bearing SDKs, or decrypted secrets. Preload exposes
+narrow typed methods, never unrestricted `ipcRenderer`, SQL, or filesystem access.
 
-- inspect its files
-- inspect related types/contracts
-- inspect call sites
-- inspect tests where available
+Main-process dependencies flow inward:
 
-For external services:
+```text
+IPC -> application services -> repositories/provider interfaces -> infrastructure
+```
 
-- read existing provider implementation first
-- consult official API documentation when needed
-- verify assumptions with real responses
-- do not invent undocumented API fields
+Providers normalize vendor responses. They do not own React state, SQLite queries,
+navigation, or automation orchestration. Services depend on interfaces and receive
+dependencies explicitly.
 
-When testing real services:
+## 5. Persistence And Secrets
 
-- log only safe diagnostic information
-- never print secrets
+Persistent application state belongs in SQLite at a path derived from
+`app.getPath("userData")`. Do not hard-code a user path or use JSON/localStorage as
+the primary database.
 
-Prefer evidence over assumptions.
+Database initialization must keep:
 
----
-
-# 4. Scope Control
-
-Do NOT add features unless explicitly requested.
-
-Examples of features that must NOT be invented:
-
-- System Health
-- Cluster Status
-- Active Nodes
-- Resource dashboards
-- Network dashboards
-- Analytics dashboards
-- New sidebar pages
-- New monitoring systems
-- New account workflows
-- New provider capabilities
-- New automation flows
-
-Do not reinterpret a task into a larger redesign.
-
-Implement exactly what is requested.
-
----
-
-# 5. UI Source of Truth
-
-The Dashboard visual design is the MASTER reference.
-
-All screens must share the same:
-
-- AppShell
-- Sidebar
-- AppHeader
-- StatusBar
-- typography
-- spacing
-- colors
-- control heights
-- button styles
-- input styles
-- DataGrid style
-- borders
-- radius system
-
-There must be exactly ONE reusable application shell.
-
-Pages:
-
-- Dashboard
-- Accounts
-- Settings
-- Logs
-
-Pages must never implement independent sidebars or global shells.
-
-Dashboard-specific actions must not become global actions.
-
-Use page-specific action slots.
-
-Example:
-
-AppHeader
-  + title
-  + subtitle
-  + actions
-
-Dashboard actions:
-- Start
-- Stop
-
-Accounts actions:
-- Add
-- Edit
-- Delete
-- Export
-
-Settings actions:
-- Reset
-- Save
-
-Logs actions:
-- Pause
-- Clear
-
----
-
-# 6. Renderer Security Boundary
-
-The Electron renderer must remain isolated.
-
-Required BrowserWindow security:
-
-- nodeIntegration: false
-- contextIsolation: true
-
-The React renderer must NOT:
-
-- import better-sqlite3
-- access fs directly
-- access Node.js APIs directly
-- access Electron main internals directly
-- access secrets directly
-- call external service SDKs requiring credentials directly
-
-Renderer communication must go through:
-
-Renderer
-    ↓
-Preload
-    ↓
-Typed IPC Contract
-    ↓
-Main Process
-
-Never expose unrestricted ipcRenderer through preload.
-
-Expose narrowly scoped typed methods only.
-
----
-
-# 7. Backend Layering
-
-Backend code must follow this dependency direction:
-
-IPC
- ↓
-Application Services
- ↓
-Repositories / Provider Interfaces
- ↓
-Infrastructure
-
-Allowed architecture:
-
-src/
-  main/
-    database/
-    repositories/
-    services/
-    providers/
-    security/
-    ipc/
-
-  preload/
-
-  shared/
-    types/
-    contracts/
-
-  renderer/
-
-Dependencies must flow inward.
-
-Avoid circular dependencies.
-
----
-
-# 8. SQLite Is the Persistent Storage
-
-Persistent application data must use SQLite.
-
-Use:
-
-better-sqlite3
-
-Database location must be derived from Electron:
-
-app.getPath("userData")
-
-Example concept:
-
-path.join(app.getPath("userData"), "automanager.db")
-
-Never hard-code:
-
-C:\Users\...
-%APPDATA%\...
-
-Do not use JSON files as the primary database.
-
-Do not use LowDB, NeDB, localStorage, or temporary JSON files for application persistence.
-
----
-
-# 9. SQLite Initialization
-
-Database initialization must enable:
-
+```sql
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
+```
+
+Schema changes use ordered migrations in `src/main/database/migrations/` and the
+`schema_migrations` table. Upgrade existing databases; never solve a migration by
+deleting user data.
+
+Raw SQL stays in repositories. External providers and application services must
+not issue SQL directly.
+
+Secrets are encrypted by `CredentialVault`/Electron `safeStorage` before SQLite.
+Keep API keys, passwords, OAuth tokens, refresh tokens, TOTP seeds, mailbox raw
+payloads, and session tokens in the main process. Return only masked or boolean
+secret state to the renderer. Redact secrets from logs, errors, tests, screenshots,
+and fixtures.
+
+## 6. Automation Ownership
+
+`AutomationRunService` owns run lifecycle, worker concurrency, cancellation,
+resource ordering, counters, and account outcome coordination.
+
+The CapCut engine owns only work inside an already-open Playwright session. It
+receives `{ page, context, sampleImage, log, signal }` plus account inputs and
+returns evidence-backed results. It does not acquire email, proxy, browser,
+SQLite, or application-global state.
+
+`threadCount` is retained for settings compatibility and means worker concurrency
+only. It must not also cap the total number of API/custom-domain accounts processed.
+
+Target workload semantics for the active spec:
+
+- Manual email input is finite and completes when its valid entries are exhausted.
+- API and custom-domain sources keep workers filled until Stop or a typed terminal
+  condition.
+- A worker acquires non-billable proxy capacity before a billable mailbox.
+- A worker acquires/reserves one mailbox just in time, not an entire batch at run
+  start.
+- A released worker slot requests the next email automatically.
+- Stop prevents new acquisition, cancels waits, closes owned profiles, releases
+  owned leases/reservations, and waits for teardown.
+
+Never silently reduce the requested initial concurrency. Either start the complete
+initial wave or report a precise typed reason why it cannot start.
+
+## 7. Email And Billable Operations
 
-All schema changes must use migrations.
+Billable provider operations require stronger controls than connectivity reads.
+
+- Reuse paid, unconsumed mailboxes before buying another one, but only when the
+  provider-specific service is compatible (`capcut` for Gmail94).
+- Reserve reusable mailboxes atomically so two workers or app instances cannot
+  select the same row.
+- Preflight Gmail94 with current balance plus the current `capcut` service price.
+- Report balance, unit price, reusable count, and affordable count with a timestamp;
+  never expose the API token or raw vendor payload.
+- Serialize or otherwise coordinate purchases so concurrent workers cannot spend
+  from the same stale balance observation.
+- Retry only transient network/rate-limit failures with bounded backoff.
+- Treat authentication, invalid service, and genuine insufficient balance as typed
+  terminal conditions, not generic "API Gmail" failures.
+- Partial purchase success must not silently turn `threadCount: N` into a smaller
+  initial run.
 
-Do NOT rely indefinitely on:
+Real tests may perform profile/balance/service-list reads when credentials exist.
+No live email purchase, order, or other charge is allowed without the user's
+explicit approval and a dedicated opt-in environment flag.
 
-CREATE TABLE IF NOT EXISTS
+## 8. State And Outcome Semantics
 
-as a schema upgrade mechanism.
+Run state and account state describe different things.
 
----
+Run states for the active spec:
 
-# 10. Database Migrations
+- `idle`: no run has started
+- `preparing`: validating and establishing initial capacity
+- `running`: workers may acquire and process work
+- `stopping`: cancellation and teardown are in progress
+- `completed`: a finite manual source was naturally exhausted
+- `stopped`: the user or application shutdown requested a stop
+- `blocked`: an expected external condition requires operator action
+- `failed`: an unexpected fatal application/run failure
 
-Maintain versioned migrations.
+Every terminal run reports a typed reason and sanitized message. UI active-state
+checks, IPC schemas, tests, and progress rendering must be updated together.
 
-Example:
+Account status must preserve the workload outcome:
 
-src/main/database/migrations/
+- Successful/verified work ends `done`.
+- Workload, signup, OTP, or launch failure ends `error` and increments failure
+  counters exactly once.
+- User-stopped work uses an explicit stopped outcome in `automationStep` without
+  overwriting an earlier `done` or `error` result.
+- Resource shutdown never rewrites a workload error to `status: "done"`.
 
-001_initial.sql
-002_add_account_provider.sql
-003_add_automation_step.sql
+Counters have one definition for the whole run: worker target, active worker,
+accepted account, completed account, failed account, and stopped account must not
+be derived from one another implicitly.
 
-Maintain a migration tracking table:
+## 9. Performance And Waiting
 
-schema_migrations
+Optimize measured waits, not human-behavior safeguards.
 
-Fields:
+- Record elapsed time for email acquisition, proxy acquisition, browser launch,
+  authentication/OTP, each mission group, proof reconciliation, and shutdown.
+- Use one bounded deadline for mission proof and the refreshed task snapshot. Do
+  not spend one full timeout proving an action and another full timeout waiting for
+  the same state.
+- Once matching `do_action` evidence succeeds during a run, retain it and never
+  rerun that task merely because a later snapshot is stale.
+- PWA install and notification tasks use the tighter deadline defined in the active
+  spec; Design Studio and Video Studio retain their evidence-based generation
+  budgets unless new measurements justify a change.
+- Cancellation must interrupt queue, retry, provider-backoff, OTP, and task waits
+  where the underlying API allows it.
+- Avoid blind sleeps in orchestration. Keep measured UI waits and human jitter in
+  the engine.
 
-- version
-- applied_at
+Performance claims require timestamped measurements from the affected stage. A
+faster build or passing unit test does not prove a faster real automation run.
 
-Existing user databases must be upgradeable.
+## 10. CapCut Engine Evidence Rules
 
-Never solve schema changes by deleting the database.
+These rules were paid for by real browser runs and are hard constraints.
 
-Never automatically destroy user data.
+### Infrastructure stays external
 
----
+Code under `src/main/services/capcut/` must not launch or stop browser profiles,
+acquire proxies, read SQLite, read `.env`, or write to the current working
+directory. Browser lifecycle belongs to `BrowserLauncher`/`IBrowserRuntimeApi`;
+proxy lifecycle belongs to `ProxyLeaseManager`.
 
-# 11. Repository Rule
+### Logs are injected
 
-External services must NEVER execute raw SQL directly.
+No `console.*` is allowed in the CapCut engine. Route every line through injected
+`log()` so `LogBus` can attach `accountId` and the canonical runtime shape.
 
-Incorrect:
+### Success is proven
 
-Gmail94Service -> db.prepare(...)
+A mission only performs UI actions. Only `runGroup` may conclude success, after a
+matching `do_action` with `err_no === 0` and a re-read of CapCut `task_status`.
+Neither UI state nor a mission function may mark a task complete by assumption.
 
-Incorrect:
+### Guards remain
 
-MultiloginService -> db.prepare(...)
+Preserve `assertHittable`, `assertNotInert`, `waitNotInert`, `waitNodeRendered`,
+and every `waitEnabled` return check. `page.mouse` does not verify the hit target;
+an unguarded click can report success while a covering element receives it.
 
-Correct:
+### Human behavior remains
 
-Gmail94Service
-     ↓
-CredentialRepository
+Preserve `human.ts` and the measured `waitForTimeout(rand(...))` jitter. CapCut's
+Shark Risk Control scores pointer trajectories and key timing; removing jitter has
+produced `err_no 8001003` on reward claims.
 
-Correct:
+### Selector changes start with evidence
 
-AccountService
-     ↓
-AccountRepository
+Before changing a selector:
 
-Database access must be isolated behind repositories.
+1. Add the failing DOM state to `tools/fixtures/`.
+2. Add a failing assertion to `tools/verify-selectors.ts`.
+3. Run `npm run selectors` and confirm the new assertion is red.
+4. Make the smallest selector change.
+5. Re-run the selector gate.
 
-Expected repositories:
+Fixtures do not load external CSS. They prove selector resolution and inert
+containment, not visibility or occlusion. Test occlusion with explicit geometry.
 
-- SettingsRepository
-- AccountRepository
-- CredentialRepository
-- LogRepository
+### Native dependencies stay external
 
-Add additional repositories only when justified.
+`playwright-core` and `better-sqlite3` remain excluded from the Vite main bundle.
+Bundling `playwright-core` reaches its optional native `kerberos` import and breaks
+the build. Account for the Node/Electron ABI when testing `better-sqlite3`.
 
----
+## 11. Browser And Application Lifecycle
 
-# 12. Settings Persistence
+Each worker owns exactly one browser session and one proxy lease. The same owner
+closes/releases them; teardown is idempotent and never stops another worker's
+profile.
 
-All application settings must persist in SQLite.
+The main CapCut page closing or crashing is a recoverable runtime event only when
+the recovery policy in the active spec still has budget. Recovery must select a
+valid remaining page or create one controlled replacement; logging alone is not a
+recovery strategy.
 
-Examples:
+Application shutdown must stop the active automation run before disposing logs and
+closing SQLite. Electron must hold the single-instance lock before creating the
+main window so two processes cannot race the same database, mailbox reservations,
+or Multilogin resources.
 
-- theme
-- language
-- browser selection
-- browser configuration
-- email provider configuration
-- export configuration
-- log retention configuration
+## 12. UI Contract
 
-Settings should be validated using TypeScript schemas/types before being persisted.
+The Stitch-exported AutoManager Dashboard remains the visual reference. Reuse one
+`AppShell`, sidebar, header, status bar, typography, spacing, controls, DataGrid,
+border, and radius system across Dashboard, Accounts, Settings, and Logs.
 
-Do not blindly store arbitrary unvalidated JSON.
+Global shell actions are page-specific slots:
 
----
+- Dashboard: Start, Stop
+- Accounts: Add, Edit, Delete, Export
+- Settings: Reset, Save
+- Logs: Pause, Clear
 
-# 13. Credentials and Secret Storage
+Use the existing generic DataGrid based on `@tanstack/react-table`. Do not add a
+second table framework or page-specific shell.
 
-Sensitive credentials must NEVER be stored as plaintext.
+Dashboard progress must render all run terminal states and the typed reason. Do
+not infer "success" from browser closure or from `threadsStopped ===
+threadsStarted`.
 
-Sensitive examples:
+## 13. Testing And Verification
 
-- API Keys
-- API Tokens
-- Multilogin password
-- Email passwords
-- refresh_token
-- TOTP / 2FA secrets
-- session tokens
-- account secrets
+Behavior changes follow red-green-refactor. A regression test must fail for the
+original reason before the fix and pass afterward.
 
-Use Electron safeStorage where supported.
+Minimum local gates where applicable:
 
-Encryption/decryption belongs in:
+```text
+npm run typecheck
+npm run lint
+npm run build
+npm run selectors
+npx vitest run <focused test files>
+```
 
-CredentialVault / security layer
+Database work additionally verifies clean initialization, migration from version
+4, reservation concurrency, restart persistence, WAL settings, and rollback/error
+paths.
 
-Concept:
+IPC work additionally verifies valid input, invalid input, envelope shape, preload
+exposure, and renderer isolation.
 
-Plain Secret
-    ↓
-safeStorage.encryptString()
-    ↓
-SQLite encrypted value
-
-Reading:
-
-SQLite encrypted value
-    ↓
-safeStorage.decryptString()
-    ↓
-Main Process Service
-
-Secrets must remain in Main Process whenever possible.
-
-Do NOT return decrypted secrets to React unless the feature explicitly requires it.
-
-Do NOT log secrets.
-
-Do NOT include secrets in error messages.
-
-Do NOT include secrets in screenshots or debugging output.
-
----
-
-# 14. service_credentials Data
-
-Credentials should conceptually contain:
-
-- service_name
-- encrypted_credentials
-- metadata
-- last_tested_at
-- last_test_result
-- updated_at
-
-Service status is cached diagnostic state only.
-
-Never assume:
-
-last status = Connected
-
-means the service is currently connected.
-
-Balance should also be timestamped if cached.
-
-Example:
-
-- last_balance
-- balance_fetched_at
-
----
-
-# 15. Accounts Data Model
-
-Account storage should support the existing UI and future automation.
-
-Conceptual fields:
-
-- id
-- email
-- email_provider
-- email_password_encrypted
-- password_capcut_encrypted
-- email_data_encrypted
-- credit
-- subscription
-- status
-- automation_step
-- proxy
-- browser_provider
-- browser_profile_id
-- notes
-- created_at
-- updated_at
-
-Do not combine runtime status and current automation step.
-
-Example:
-
-status:
-running
-
-automation_step:
-Waiting for OTP
-
-The UI may display:
-
-Running
-Waiting for OTP...
-
----
-
-# 16. Runtime Logging Contract
-
-The canonical runtime log shape is:
-
-RuntimeLog {
-  id
-  accountId?
-  email
-  step
-  status
-  message
-  createdAt
-}
-
-Supported status values:
-
-- INFO
-- SUCCESS
-- WARNING
-- WAITING
-- ERROR
-- DEBUG
-
-Logical human-readable format:
-
-Time - Email - Step - Status - Message
-
-Example:
-
-03:32:31 - worker@example.com - Proxy - ERROR - Proxy connection timeout
-
-Dashboard Live Logs and Logs Page must consume the same underlying log model.
-
-Do not create incompatible log formats.
-
----
-
-# 17. Logging Performance
-
-Do not synchronously INSERT every high-frequency log entry individually if it can block the Electron Main Process.
-
-Preferred flow:
-
-Workers
- ↓
-LogBus
- ↓
-In-memory queue
- ↓
-Batch
- ↓
-SQLite transaction
-
-Batch logs periodically or by batch size.
-
-Use transactions for grouped inserts.
-
-Keep the implementation simple initially.
-
-Move DB/log work to a Worker Thread or Utility Process only when measurement proves it is necessary.
-
-Do not prematurely over-engineer.
-
----
-
-# 18. Log Retention
-
-runtime_logs must not grow forever.
-
-Support a retention policy.
-
-Default recommendation:
-
-30 days
-
-Possible configuration:
-
-- 7 days
-- 30 days
-- 90 days
-- Never automatically delete
-
-Cleanup should be safe and non-blocking.
-
-Never delete logs outside configured retention rules.
-
----
-
-# 19. Database Indexes
-
-Indexes must support real UI queries.
-
-Accounts should be efficiently searchable/filterable by relevant fields such as:
-
-- email
-- status
-- created_at
-- email_provider
-- browser_provider
-
-Logs should support:
-
-- created_at
-- email
-- status
-- account_id where useful
-
-Do not add indexes blindly.
-
-Indexes must correspond to actual query patterns.
-
----
-
-# 20. DataGrid Architecture
-
-Use one generic reusable DataGrid implementation.
-
-Recommended headless engine:
-
-@tanstack/react-table
-
-Do not introduce AG Grid unless explicitly approved.
-
-Page-specific tables should provide:
-
-- data
-- column definitions
-- filtering configuration
-- selection configuration
-
-They must not duplicate the complete DataGrid implementation.
-
----
-
-# 21. Account Export Rules
-
-Supported formats:
-
-- XLSX
-- CSV
-- TXT
-
-Default export fields and order:
-
-1. Email
-2. Password CapCut
-3. Email Data
-4. Credit
-5. Subscription
-6. Create At
-
-Supported export scopes:
-
-- All accounts
-- Checked accounts
-- Filtered accounts
-
-TXT uses pipe-separated fields.
-
-Conceptual example:
-
-Email|Password CapCut|Email Data|Credit|Subscription|Create At
-
-CSV and XLSX use independent columns.
-
-Export field configuration is persisted in Settings.
-
-Do not change export ordering implicitly.
-
----
-
-# 22. External Provider Architecture
-
-External integrations must use provider abstractions.
-
-Browser providers:
-
-BrowserProvider
-├── GpmLoginProvider
-├── GoLoginProvider
-├── MultiloginProvider
-├── CamoufoxProvider
-└── PatchrightProvider
-
-Email providers:
-
-EmailProvider
-├── Gmail94Provider
-└── DongVanFBProvider
-
-Proxy providers:
-
-ProxyProvider
-├── DirectProxyProvider
-└── KiotProxyProvider
-
-Automation code should depend on interfaces, not vendor-specific implementations.
-
-Do not leak vendor-specific API structures across the application.
-
----
-
-# 23. Provider Responsibilities
-
-Providers are responsible for vendor API communication.
-
-Providers are NOT responsible for:
-
-- React UI state
-- direct SQLite queries
-- navigation
-- rendering
-- unrelated automation orchestration
-
-Provider responses should be normalized into shared domain types.
-
----
-
-# 24. Service Implementation Order
-
-Do not immediately implement every external service.
-
-Backend implementation order:
-
-PHASE A — Persistence Foundation
-
-1. SQLite database
-2. Migrations
-3. Repository layer
-4. CredentialVault
-5. Typed IPC contracts
-
-PHASE B — Local Application Data
-
-6. Settings persistence
-7. Accounts persistence
-8. Runtime Logs persistence
-
-At this point the UI should stop using mock persistence.
-
-PHASE C — External Integrations
-
-Implement and verify providers one at a time:
-
-1. Gmail94
-2. Multilogin
-3. KiotProxy
-4. DongVanFB
-5. GPM Login
-6. GoLogin
-
-Camoufox and Patchright module management can be implemented when browser execution work begins.
-
-Do not implement multiple provider integrations simultaneously unless explicitly requested.
-
----
-
-# 25. Real API Testing Rules
-
-Each provider integration must be independently verified before being considered complete.
-
-A provider is not complete because:
-
-- TypeScript compiles
-- mocks pass
-- API code looks correct
-
-It must be tested against the real service where credentials/environment are available.
-
-When testing:
-
-1. Test authentication / connectivity.
-2. Test one safe read operation.
-3. Validate response shape.
-4. Handle expected failures.
-5. Persist only required state.
-6. Verify secrets are not logged.
-
-Do not perform billable/order/purchase operations merely to test connectivity unless explicitly requested.
-
-For paid operations, separate connectivity tests from transactional operations.
-
----
-
-# 26. IPC Contracts
-
-All Renderer ↔ Main communication must have typed contracts.
-
-Prefer APIs such as:
-
-settings.get()
-settings.update()
-
-accounts.list()
-accounts.create()
-accounts.update()
-accounts.delete()
-
-logs.list()
-logs.clear()
-
-services.testConnection()
-
-Avoid generic APIs such as:
-
-invoke("execute-anything", ...)
-
-Do not expose raw SQL over IPC.
-
-Do not expose arbitrary filesystem access over IPC.
-
----
-
-# 27. Error Handling
-
-Do not swallow errors.
-
-Do not write:
-
-catch {}
-
-or return undefined for every failure.
-
-Use normalized application errors.
-
-User-facing messages should be concise.
-
-Detailed diagnostic information belongs in runtime logs.
-
-Secrets must be redacted.
-
----
-
-# 28. TypeScript Standards
-
-Use TypeScript strictly.
-
-Avoid:
-
-any
-
-unless there is a documented reason.
-
-Prefer:
-
-unknown
-
-at external boundaries, then validate/narrow.
-
-Provider/API response data must not be blindly trusted.
-
-Use explicit domain types.
-
-Keep naming consistent.
-
----
-
-# 29. No Hidden Global State
-
-Avoid mutable global singleton state unless the service lifecycle genuinely requires it.
-
-Prefer explicit dependencies.
-
-Database instance may be application-scoped.
-
-Repositories/services should receive their dependencies explicitly where practical.
-
----
-
-# 30. No Premature Core Automation
-
-Do NOT build the automation core until explicitly requested.
-
-Do not implement:
-
-- registration workflows
-- payment workflows
-- OTP workflows
-- browser automation flows
-- Playwright automation flows
-
-merely because related settings exist.
-
-Backend infrastructure and provider adapters are separate from automation workflow implementation.
-
----
-
-# 31. Browser Automation Boundary
-
-When browser automation work eventually begins:
-
-Automation Core
-    ↓
-BrowserProvider abstraction
-    ↓
-Provider implementation
-
-Do not hard-code Multilogin, GPM, GoLogin, Camoufox, or Patchright throughout workflow logic.
-
-The automation workflow must remain provider-agnostic whenever possible.
-
----
-
-# 32. Testing Requirements
-
-Every implementation phase requires verification.
-
-Minimum checks where applicable:
-
-- TypeScript typecheck
-- npm run build
-- npm run lint
-- relevant unit tests
-- Electron launch
-- manual UI verification
-
-Database work must additionally verify:
-
-- clean DB initialization
-- migration from previous schema version
-- read/write persistence after restart
-- WAL initialization
-- repository queries
-- error paths
-
-IPC work must verify:
-
-- valid request
-- invalid request
-- renderer cannot access Node APIs directly
-
----
-
-# 33. Verification Before Completion
-
-Never claim:
-
-"done"
-"fixed"
-"working"
-"complete"
-
-without verification evidence.
+Provider work additionally verifies sanitized errors, documented response shapes,
+safe read-only live calls when credentials are available, and explicit reporting
+when a real service was not tested.
 
 Before reporting completion:
 
-1. Run relevant checks.
-2. Inspect command output.
-3. Fix failures.
-4. Re-run verification.
-5. Report exactly what was verified.
+1. Run fresh relevant commands.
+2. Read full output and exit codes.
+3. Reconcile every spec acceptance criterion with evidence.
+4. State failed, blocked, skipped, and unverified checks exactly.
 
-If a real external API could not be tested, explicitly state:
+Do not commit, amend, push, delete data, perform billable live calls, or run
+destructive git commands without explicit authorization.
 
-"Implemented but not verified against the real service."
+## 14. Antigravity / Gemini 3.8 Execution
 
-Never pretend mock success proves a real integration works.
+For an implementation handoff in Antigravity:
 
----
+1. Create a task artifact containing every plan task and verification gate.
+2. Read this file, the approved spec, and only the assigned plan task before code.
+3. Keep the artifact current after each red/green/refactor/verification step.
+4. Use isolated subagents only where the approved plan identifies independent
+   work; use `invoke_subagent` with `self` for implementation or `research` for
+   read-only investigation.
+5. Implement one reviewable task at a time with focused commits when authorized.
+6. Never run a billable provider test without a separate explicit user approval.
+7. End with fresh verification evidence and unresolved-risk reporting.
 
-# 34. Preserve Existing Working Code
-
-Do not rewrite working subsystems unnecessarily.
-
-Prefer incremental changes.
-
-Do not replace libraries merely because another library is personally preferred.
-
-Do not mass-format unrelated files.
-
-Do not rename large directory trees without need.
-
-Do not delete Stitch references unless explicitly requested.
-
-Reference screenshots/design exports should remain available for visual comparison.
-
----
-
-# 35. Git Discipline
-
-Changes should be logically scoped.
-
-Before major implementation work:
-
-- inspect git status
-- avoid overwriting unrelated user changes
-
-Never discard user modifications without explicit permission.
-
-Do not run destructive git commands without explicit approval.
-
-Never use:
-
-git reset --hard
-git clean -fd
-
-unless explicitly authorized.
-
----
-
-# 36. Dependency Discipline
-
-Before installing a package:
-
-1. Confirm it is actually required.
-2. Prefer mature maintained packages.
-3. Avoid adding multiple packages solving the same problem.
-4. Explain major native dependencies.
-
-Native Electron dependencies such as better-sqlite3 must account for Electron ABI/rebuild requirements.
-
-Do not add dependencies unrelated to the requested task.
-
----
-
-# 37. Security Rules
-
-Never:
-
-- hard-code secrets
-- commit secrets
-- print API keys
-- print passwords
-- print refresh tokens
-- expose safeStorage decrypted values to debugging logs
-- expose unrestricted Node APIs to Renderer
-- disable Electron security protections for convenience
-
-Use least privilege.
-
----
-
-# 38. Current Architectural Source of Truth
-
-Current persistence architecture:
-
-Renderer
-   ↓
-Typed Preload API
-   ↓
-IPC Handler
-   ↓
-Application Service
-   ↓
-Repository / Provider
-   ↓
-SQLite / External Service
-
-Credentials:
-
-Renderer enters secret
-   ↓
-IPC
-   ↓
-Main Process
-   ↓
-CredentialVault
-   ↓
-safeStorage encryption
-   ↓
-CredentialRepository
-   ↓
-SQLite
-
-Secrets are decrypted only inside Main Process when required.
-
----
-
-# 39. Current Development Boundary
-
-Current target is:
-
-- real Electron shell
-- real local SQLite persistence
-- real settings persistence
-- real accounts persistence
-- real logs persistence
-- secure credential storage
-- provider adapters implemented incrementally
-
-Current target is NOT yet:
-
-- full automation workflow
-- registration engine
-- payment engine
-- browser orchestration engine
-
-Do not cross this boundary unless explicitly requested.
-
----
-
-# 40. Decision Rule
-
-When several implementations are possible:
-
-Prefer the option that is:
-
-1. simplest while correct
-2. testable
-3. typed
-4. maintainable
-5. secure
-6. compatible with Electron
-7. compatible with future automation workers
-
-Do not optimize for cleverness.
-
-Optimize for predictable behavior and maintainability.
-
-# 30. CapCut Automation Engine Boundary
-
-The engine in `src/main/services/capcut/` was ported from a standalone Playwright
-project that completed 13 real accounts on 2026-09-02. Its comments record
-measured browser evidence, not opinions. Treat the following as hard rules.
-
-**The engine never owns infrastructure.**
-It receives `{ page, context, sampleImage, log }` and returns results. It must not
-launch or stop a browser profile, acquire a proxy, read SQLite, read `.env`, or
-write to the current working directory. Profile lifecycle belongs to
-`BrowserLauncher` / `IBrowserRuntimeApi`; proxies to `ProxyLeaseManager`.
-
-**No `console.log` inside the engine.**
-Every line goes through an injected `log()` so `LogBus` can attach `accountId`
-(§16). `eslint` and review must reject new `console.*` calls under
-`src/main/services/capcut/`.
-
-**Success is proven, never assumed.**
-A mission group only performs UI actions. The only place allowed to conclude that
-a task is done is `runGroup`, which requires a `do_action` request with the
-matching `action_key` and `err_no === 0`, then re-reads CapCut's own
-`task_status`. Never add a path that lets the UI or a mission mark a task done.
-
-**Do not remove the guards.**
-`assertHittable`, `assertNotInert`, `waitNotInert`, `waitNodeRendered`, and the
-`waitEnabled` return checks each exist because a specific silent failure was
-measured. `page.mouse` does not verify hit targets, so an unguarded click on a
-covered element succeeds while doing nothing — that single class of bug cost 22
-consecutive task failures.
-
-**Do not "optimize" human behaviour.**
-`human.ts` and every `waitForTimeout(rand(...))` exist because CapCut runs Shark
-Risk Control, which scores pointer trajectory and keystroke timing. Removing the
-jitter reintroduces `err_no 8001003` on reward claims.
-
-**Selectors change under you.**
-Before editing any selector, add a fixture of the DOM state that broke it under
-`tools/fixtures/` and an assertion in `npm run selectors` (currently 87). CSS is
-not loaded in those fixtures, so they verify selector resolution and `inert`
-containment only — never visibility or occlusion.
-
-**Dependencies that must stay external.**
-`playwright-core` and `better-sqlite3` are excluded from the main bundle in
-`vite.config.ts`. Bundling `playwright-core` breaks the build on its optional
-native `kerberos` import.
+The exact implementation entry point is
+`docs/antigravity/2026-09-05-continuous-automation-performance-gemini-3.8.md`.

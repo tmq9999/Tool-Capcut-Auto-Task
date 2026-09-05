@@ -269,5 +269,23 @@ describe('Migration Engine & Schema Integrity (Task 5 RED)', () => {
       const tableNames = rows.map((r) => r.name);
       expect(tableNames).toContain('test_feature');
     });
+
+    it('migration 005 preserves rows and adds reservation columns', () => {
+      if (!db) throw new Error('DB is not initialized');
+      const before = MIGRATIONS.slice(0, 4);
+      runMigrations(db, before);
+      db.prepare(
+        "INSERT INTO purchased_emails (id, provider, email) VALUES ('old-1', 'gmail94', 'old@gmail.com')"
+      ).run();
+
+      runMigrations(db);
+
+      const columns = db.prepare('PRAGMA table_info(purchased_emails)').all() as Array<{ name: string }>;
+      expect(columns.map((column) => column.name)).toContain('reserved_by');
+      expect(columns.map((column) => column.name)).toContain('reserved_at');
+      expect(db.prepare("SELECT email FROM purchased_emails WHERE id = 'old-1'").get()).toEqual({
+        email: 'old@gmail.com'
+      });
+    });
   });
 });

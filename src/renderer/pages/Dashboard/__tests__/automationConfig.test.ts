@@ -62,14 +62,22 @@ describe('DEFAULT_AUTOMATION_CONFIG', () => {
 });
 
 describe('toRunConfig', () => {
-  it('maps a manual run and splits the pasted email list by line', () => {
-    const result = toRunConfig(state({ emailList: 'a@x.com|p1\n\nb@x.com|p2\n' }));
+  it('preserves manual textarea positions so validation reports original line numbers', () => {
+    const result = toRunConfig(state({
+      emailList: 'good@example.com|pw\n\nnot-an-email\nlast@example.com\n'
+    }));
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.config.emailSource).toEqual({
       mode: 'manual',
-      entries: ['a@x.com|p1', 'b@x.com|p2']
+      entries: [
+        'good@example.com|pw',
+        '',
+        'not-an-email',
+        'last@example.com',
+        ''
+      ]
     });
   });
 
@@ -230,6 +238,14 @@ describe('toRunConfig validation', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.message).toContain('email');
+  });
+
+  it('rejects a run when custom domain email mode is selected because it is locked', () => {
+    const result = toRunConfig(state({ emailSourceMode: 'custom' }));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain('khóa');
   });
 
   it('always requests the ten second connectivity window', () => {

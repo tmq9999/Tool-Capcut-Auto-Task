@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import { Gmail94Provider } from '../Gmail94Provider';
 import { ProviderError } from '../ProviderError';
@@ -82,6 +83,32 @@ describe('Gmail94Provider.createOtpOrder', () => {
     await expect(provider.createOtpOrder(TOKEN, 'facebook')).rejects.toMatchObject({
       code: 'CONFIG_ERROR'
     });
+  });
+
+  it('classifies the observed Gmail94 order balance failure', async () => {
+    const http = new FakeHttpClient();
+    const body = JSON.parse(
+      fs.readFileSync(
+        'src/main/providers/__tests__/fixtures/gmail94-insufficient-funds.json',
+        'utf8'
+      )
+    ) as unknown;
+    http.enqueue({ body });
+    const provider = new Gmail94Provider(http);
+
+    const error = await provider.createOtpOrder(TOKEN, 'capcut').then(
+      () => {
+        throw new Error('Expected createOtpOrder to throw');
+      },
+      (caught: unknown) => caught as ProviderError
+    );
+
+    expect(error).toMatchObject({
+      code: 'INSUFFICIENT_FUNDS',
+      serviceName: 'gmail94'
+    });
+    expect(error.message).not.toContain(TOKEN);
+    expect(error.message).not.toContain(JSON.stringify(body));
   });
 
   it('url-encodes the service slug', async () => {

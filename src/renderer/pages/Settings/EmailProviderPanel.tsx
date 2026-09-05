@@ -206,10 +206,15 @@ export const EmailProviderPanel: React.FC<EmailProviderPanelProps> = ({
         </div>
 
         {/* Custom Domain Mail: no API key, addresses are generated on your domain */}
-        <div className="space-y-1 pt-2 border-t border-panel-border">
-          <label className="block font-label-md text-label-md text-on-surface-variant">
-            Custom Domain Mail (domain của bạn - không cần API key)
-          </label>
+        <div className="space-y-1 pt-2 border-t border-panel-border opacity-70">
+          <div className="flex items-center gap-2">
+            <label className="block font-label-md text-label-md text-on-surface-variant">
+              Custom Domain Mail (domain của bạn - không cần API key)
+            </label>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-container-high text-on-surface-variant border border-panel-border">
+              Đã khóa
+            </span>
+          </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-sm">
             <div className="space-y-0.5">
@@ -219,6 +224,7 @@ export const EmailProviderPanel: React.FC<EmailProviderPanelProps> = ({
                 value={customEmail.domain}
                 onChange={(e) => onCustomEmailChange({ domain: e.target.value })}
                 placeholder="oldevlk.com"
+                disabled={true}
                 fontMono
               />
             </div>
@@ -230,6 +236,7 @@ export const EmailProviderPanel: React.FC<EmailProviderPanelProps> = ({
                 value={customEmail.apiBaseUrl}
                 onChange={(e) => onCustomEmailChange({ apiBaseUrl: e.target.value })}
                 placeholder="http://103.116.38.76:3000"
+                disabled={true}
                 fontMono
               />
             </div>
@@ -241,15 +248,14 @@ export const EmailProviderPanel: React.FC<EmailProviderPanelProps> = ({
                 value={customEmail.senderFilter}
                 onChange={(e) => onCustomEmailChange({ senderFilter: e.target.value })}
                 placeholder="capcut"
+                disabled={true}
                 fontMono
               />
             </div>
           </div>
 
           <p className="font-body-sm text-[11px] text-on-surface-variant">
-            Chọn <span className="text-on-surface">Custom</span> ở panel Nguồn Email trên Dashboard để dùng.
-            Mỗi luồng tự sinh một địa chỉ <span className="font-code text-primary">&lt;username&gt;@{customEmail.domain || 'domain'}</span>,
-            OTP đọc từ <span className="font-code">{(customEmail.apiBaseUrl || '') + '/api/emails/&lt;address&gt;'}</span>.
+            Chức năng Custom Domain Mail hiện đang tạm khóa. Vui lòng sử dụng nguồn Email API (Gmail94) hoặc Manual.
           </p>
         </div>
       </div>

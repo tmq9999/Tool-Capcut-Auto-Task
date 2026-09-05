@@ -26,7 +26,7 @@ import {
   type CapcutTaskRunner,
   type IAccountSink,
   type IBrowserRuntimeApi,
-  type IEmailSourceApi,
+  type IEmailOtpSource,
   type IProxyLeaseSource,
   type StartedProfile
 } from '../AutomationRunService';
@@ -37,42 +37,60 @@ import {
   type AutomationRunConfigDTO
 } from '../../../shared/schemas/automation.schema';
 import type { AcquiredProxyLease } from '../ProxyLeaseManager';
-import type { EmailPurchaseResult } from '../EmailPurchaseService';
-import type { PurchasedEmailDTO } from '../../../shared/schemas/provider.schema';
 import type { CanonicalRuntimeLog } from '../../../shared/schemas/log.schema';
+import type {
+  AutomationWorkItem,
+  AutomationWorkSourceFactory
+} from '../AutomationWorkSource';
 
 class CollectingSink implements ILogSink {
   public rows: unknown[] = [];
   insertBatch(logs: unknown[]): void { this.rows.push(...logs); }
 }
 
-function purchasedRow(index: number): PurchasedEmailDTO {
-  return {
-    id: 'pe-' + index,
-    provider: 'gmail94',
-    email: 'mail' + index + '@gmail.com',
-    hasPassword: false,
-    hasOauth: false,
-    orderId: 'order-' + index,
-    service: 'capcut',
-    purchasedAt: '2026-09-04T05:00:00.000Z',
-    consumedAt: null
-  };
-}
+const stubWorkSources: AutomationWorkSourceFactory = {
+  create: (config) => {
+    if (config.emailSource.mode === 'manual') {
+      const items: AutomationWorkItem[] = config.emailSource.entries.map((entry, i) => {
+        const [email, password] = entry.split('|');
+        return {
+          sourceId: 'man-' + (i + 1),
+          email,
+          emailPassword: password,
+          emailProvider: 'manual'
+        };
+      });
+      return {
+        kind: 'finite',
+        prepare: async (c) => ({ workerTarget: Math.min(c, items.length) }),
+        next: async () => items.shift() ?? null,
+        commit: () => {},
+        release: () => {}
+      };
+    }
+    const items: AutomationWorkItem[] = [
+      {
+        sourceId: 'src-1',
+        email: 'mail1@gmail.com',
+        emailProvider: 'gmail94',
+        purchasedEmailId: 'pe-1'
+      }
+    ];
+    return {
+      kind: 'finite',
+      prepare: async () => ({ workerTarget: 1 }),
+      next: async () => items.shift() ?? null,
+      commit: () => {},
+      release: () => {}
+    };
+  }
+};
 
-class StubEmailSource implements IEmailSourceApi {
+class StubEmailSource implements IEmailOtpSource {
   /** Số lượt `readOtp` đầu tiên trả null (mail chưa tới). */
   public silentReads = 0;
   public readCalls = 0;
   public readError: Error | null = null;
-
-  async purchase(_provider: string, count: number): Promise<EmailPurchaseResult> {
-    return {
-      purchased: Array.from({ length: count }, (_unused, i) => purchasedRow(i + 1)),
-      failures: []
-    };
-  }
-  markConsumed(): void {}
 
   async readOtp(): Promise<string | null> {
     this.readCalls += 1;
@@ -170,7 +188,8 @@ let logBus: LogBus;
 function createService(): AutomationRunService {
   return new AutomationRunService(
     {
-      emails,
+      workSources: stubWorkSources,
+      emailOtp: emails,
       proxies: new StubProxySource(),
       browser: new StubBrowserRuntime(),
       accounts: new StubAccounts(),

@@ -41,11 +41,17 @@ const noWait = { sleep: async (): Promise<void> => {}, portTimeoutMs: 3_000, por
 class RecordingRuntime {
   public started = 0;
   public stopped: string[] = [];
+  public receivedSignal?: AbortSignal;
+  public receivedStartCallback?: (profileId: string) => void;
   constructor(private readonly id: string) {}
 
-  async startProfile(): Promise<StartedProfile> {
+  async startProfile(params: { signal?: AbortSignal; onProfileStarted?: (profileId: string) => void } = {}): Promise<StartedProfile> {
     this.started += 1;
-    return { profileId: this.id + '-' + this.started, port: 1000, browserType: this.id };
+    const profileId = this.id + '-' + this.started;
+    this.receivedSignal = params.signal;
+    this.receivedStartCallback = params.onProfileStarted;
+    params.onProfileStarted?.(profileId);
+    return { profileId, port: 1000, browserType: this.id };
   }
 
   async stopProfile(profileId: string): Promise<void> {
@@ -166,6 +172,20 @@ describe('DispatchingBrowserRuntime', () => {
     await dispatcher.startProfile({ headless: false, browser: 'multilogin' });
 
     expect(multilogin.started).toBe(1);
+  });
+
+  it('forwards cancellation and early ownership callback to the selected runtime', async () => {
+    const multilogin = new RecordingRuntime('ml');
+    const dispatcher = new DispatchingBrowserRuntime(new Map([['multilogin', multilogin]]), 'multilogin');
+    const controller = new AbortController();
+    const owned: string[] = [];
+    const started = await dispatcher.startProfile({
+      headless: false, browser: 'multilogin', signal: controller.signal,
+      onProfileStarted: (profileId) => owned.push(profileId)
+    });
+    expect(multilogin.receivedSignal).toBe(controller.signal);
+    expect(multilogin.receivedStartCallback).toBeDefined();
+    expect(owned).toEqual([started.profileId]);
   });
 
   it('stops a profile through the runtime that started it', async () => {

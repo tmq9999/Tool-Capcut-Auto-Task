@@ -18,12 +18,9 @@ import { clickIfVisible, rand } from '../human';
 import { findTaskRow, withTaskPopover, type MissionGroup } from '../missionRunner';
 import type { CapcutMissionEnv } from '../types';
 import { URLS } from '../urls';
+import { abortable, abortableDelay } from '../cancellation';
 
 /** Bấm nút "Go" của đúng dòng nhiệm vụ rồi đóng popover lại. */
-async function clickGo(env: CapcutMissionEnv, title: string, reward: number): Promise<void> {
-  await clickGoOnPage(env.page, env, title, reward);
-}
-
 /**
  * Như `clickGo` nhưng trên MỘT TRANG CHỈ ĐỊNH — nhiệm vụ bật thông báo làm việc
  * trên tab mới của riêng nó, không phải `env.page`.
@@ -47,41 +44,47 @@ async function clickGoOnPage(
   page: Page,
   env: CapcutMissionEnv,
   title: string,
-  reward: number
+  reward: number,
+  afterClick?: () => Promise<void>
 ): Promise<void> {
   // `env.log` PHẢI truyền vào: chẩn đoán của `withTaskPopover` (bấm lối vào nào,
   // sau mỗi lần bấm popover có mấy dòng) mặc định là no-op. Lượt chạy thật
   // 2026-09-03 02:5x mất đúng những dòng đó nên không biết mắt xích nào đứt khi
   // `pwa_install` báo "tìm dòng ... ra 0 kết quả".
   await withTaskPopover(page, async () => {
+    env.signal.throwIfAborted();
     const row = await findTaskRow(page, title, reward, env.log);
     const btn = row.locator('button').first();
     const text = (await btn.innerText().catch(() => '')).trim();
 
     switch (decideRowAction(text)) {
       case 'go':
-        await btn.click({ timeout: 8000 }).catch(() => {});
-        await page.waitForTimeout(rand(1800, 2600));
+        await abortable(btn.click({ timeout: 8000 }), env.signal);
+        await abortableDelay(rand(1800, 2600), env.signal);
         env.log(`Đã bấm Go ở dòng "${title}"`);
         break;
       case 'claim':
         // Nút đã là Claim ⇒ do_action bắn từ trước, chờ nó lần nữa là chờ vô ích.
         // Bấm Claim chỉ là THAO TÁC UI; kết luận xong vẫn do snapshot của CapCut.
-        await btn.click({ timeout: 8000 }).catch(() => {});
-        await page.waitForTimeout(rand(1800, 2600));
+        await abortable(btn.click({ timeout: 8000 }), env.signal);
+        await abortableDelay(rand(1800, 2600), env.signal);
         env.log(`Đã bấm Claim ở dòng "${title}" (CapCut đã ghi nhận hành động từ trước)`);
         break;
       default:
         env.log(`Nút của "${title}" đang là "${text || 'N/A'}", không bấm gì`);
+        return;
     }
-  }, env.log);
+    env.signal.throwIfAborted();
+    await afterClick?.();
+  }, env.log, { signal: env.signal });
 }
 
 export const notificationsGroup: MissionGroup = {
   name: 'Bật thông báo trình duyệt',
   keys: ['capcut_web_push_authorize'],
-  proofTimeoutMs: 45000,
+  proofTimeoutMs: 20_000,
   async act(env: CapcutMissionEnv): Promise<void> {
+    env.signal.throwIfAborted();
     // Công thức này đo được bằng thí nghiệm sống 2026-09-02 04:25, sau khi hai
     // cách khác đều thất bại. Ba điều kiện phải đủ:
     //   1. quyền notifications được cấp (override CDP chỉ sống theo phiên kết nối)
@@ -93,8 +96,9 @@ export const notificationsGroup: MissionGroup = {
 
     const page = await env.context.newPage();
     try {
-      await page.goto(URLS.main, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      await page.waitForTimeout(rand(6000, 8000));
+      env.signal.throwIfAborted();
+      await abortable(page.goto(URLS.tasks, { waitUntil: 'domcontentloaded', timeout: 20_000 }), env.signal);
+      await abortableDelay(rand(6000, 8000), env.signal);
 
       const perm = await page
         .evaluate(() => (typeof Notification !== 'undefined' ? Notification.permission : 'n/a'))
@@ -116,7 +120,7 @@ export const notificationsGroup: MissionGroup = {
           const regs = await navigator.serviceWorker.getRegistrations().catch(() => []);
           for (const r of regs) {
             const s = await r.pushManager.getSubscription().catch(() => null);
-            if (s) return { sw: 'ok', regs: regs.length, sub: s.endpoint.slice(0, 60) };
+            if (s) return { sw: 'ok', regs: regs.length, sub: true };
           }
           return { sw: 'ok', regs: regs.length, sub: null };
         })
@@ -144,7 +148,7 @@ export const notificationsGroup: MissionGroup = {
         .first();
       if (await clickIfVisible(page, allow, 3000)) {
         env.log('Đã bấm Allow ở thanh "Allow notifications from CapCut?"');
-        await page.waitForTimeout(rand(2000, 3000));
+        await abortableDelay(rand(2000, 3000), env.signal);
       }
 
       /**
@@ -170,18 +174,19 @@ export const notificationsGroup: MissionGroup = {
       await clickGoOnPage(page, env, 'Enable browser notifications', 210);
 
       await withTaskPopover(page, async () => {
+        env.signal.throwIfAborted();
         const line = await mustSee(
           page,
           page.locator('[class*="taskLine"]').filter({ hasText: 'Enable browser notifications' }),
           'dong nhiem vu Enable browser notifications'
         );
         // force: element hiển thị nhưng Playwright coi là chưa actionable
-        await line.click({ timeout: 8000, force: true });
+        await abortable(line.click({ timeout: 8000, force: true }), env.signal);
         env.log('Đã click dòng nhiệm vụ thông báo');
-      }, env.log);
+      }, env.log, { signal: env.signal });
 
       // do_action bắn ~1 giây sau; chờ rồi mới đóng tab để không huỷ request.
-      await page.waitForTimeout(rand(8000, 10000));
+      await abortableDelay(rand(8000, 10000), env.signal);
     } finally {
       await page.close().catch(() => {});
       await env.page.bringToFront().catch(() => {});
@@ -192,25 +197,27 @@ export const notificationsGroup: MissionGroup = {
 export const pwaInstallGroup: MissionGroup = {
   name: 'Cài CapCut Web Desktop',
   keys: ['capcut_web_pwa_install'],
-  proofTimeoutMs: 45000,
+  proofTimeoutMs: 12_000,
   async act(env: CapcutMissionEnv): Promise<void> {
-    await clickGo(env, 'Install CapCut Web Desktop', 210);
+    env.signal.throwIfAborted();
+    await clickGoOnPage(env.page, env, 'Install CapCut Web Desktop', 210, async () => {
+      env.signal.throwIfAborted();
 
-    // Dialog cài PWA của Chrome không click được qua CDP; cách đáng tin cậy là
-    // gọi `deferredPrompt` mà CapCut đã lưu rồi phát sự kiện `appinstalled`.
-    await env.page.evaluate(() => {
-      const dp = (window as unknown as { deferredPrompt?: { prompt?: () => void } }).deferredPrompt;
-      if (dp && typeof dp.prompt === 'function') {
-        try {
-          dp.prompt();
-        } catch {
-          // prompt đã dùng rồi -> bỏ qua, sự kiện dưới vẫn được phát.
+      // Keep the measured PWA action in the same document as the Go click.
+      await env.page.evaluate(() => {
+        const dp = (window as unknown as { deferredPrompt?: { prompt?: () => void } }).deferredPrompt;
+        if (dp && typeof dp.prompt === 'function') {
+          try {
+            dp.prompt();
+          } catch {
+            // The one-shot prompt may already have been used.
+          }
         }
-      }
-      window.dispatchEvent(new Event('appinstalled'));
-      document.dispatchEvent(new Event('appinstalled'));
+        window.dispatchEvent(new Event('appinstalled'));
+        document.dispatchEvent(new Event('appinstalled'));
+      });
+      env.log('Đã gọi deferredPrompt + phát sự kiện appinstalled');
+      await abortableDelay(rand(2500, 3500), env.signal);
     });
-    env.log('Đã gọi deferredPrompt + phát sự kiện appinstalled');
-    await env.page.waitForTimeout(rand(2500, 3500));
   },
 };

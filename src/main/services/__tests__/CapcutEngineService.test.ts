@@ -53,6 +53,7 @@ function runInput(overrides: Record<string, unknown> = {}) {
     password: 'Str0ngPass',
     accountId: 'acc-1',
     isNewAccount: false,
+    signal: new AbortController().signal,
     log: () => {},
     ...overrides
   } as Parameters<InstanceType<typeof CapcutEngineService>['runAccount']>[0];
@@ -62,6 +63,7 @@ function runInput(overrides: Record<string, unknown> = {}) {
 function listeningPage(): { page: Page; events: string[] } {
   const events: string[] = [];
   const page = {
+    isClosed: () => false,
     on: (event: string) => {
       events.push(event);
       return page;
@@ -88,6 +90,25 @@ beforeEach(() => {
 });
 
 describe('CapcutEngineService.runAccount', () => {
+  it('does not recover another page or start trial after Stop during authentication', async () => {
+    const controller = new AbortController();
+    ensureInApp.mockImplementationOnce(async () => {
+      controller.abort(new Error('stop'));
+      return { mode: 'login', created: false };
+    });
+    const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
+    await expect(engine.runAccount(runInput({ signal: controller.signal }))).rejects.toThrow('stop');
+    expect(checkProTrial).not.toHaveBeenCalled();
+    expect(runAllTasks).not.toHaveBeenCalled();
+  });
+
+  it('never starts authentication when Stop was already requested', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('stop'));
+    const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
+    await expect(engine.runAccount(runInput({ signal: controller.signal }))).rejects.toThrow('stop');
+    expect(ensureInApp).not.toHaveBeenCalled();
+  });
   it('bắt buộc đường ĐĂNG KÝ khi account là mới', async () => {
     const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
 
@@ -155,5 +176,25 @@ describe('CapcutEngineService.runAccount', () => {
     const result = await engine.runAccount(runInput());
 
     expect(result.subscription).toBe('Không có ưu đãi');
+  });
+
+  it('logs authentication and trial-check stage timings', async () => {
+    const messages: string[] = [];
+    const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
+
+    await engine.runAccount(runInput({
+      log: (_status: string, _step: string, message: string) => {
+        messages.push(message);
+      }
+    }));
+
+    expect(messages).toEqual(expect.arrayContaining([
+      expect.stringMatching(
+        /^stage=authentication-otp elapsedMs=\d+ outcome=success$/
+      ),
+      expect.stringMatching(
+        /^stage=trial-check elapsedMs=\d+ outcome=success$/
+      )
+    ]));
   });
 });

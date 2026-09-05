@@ -27,6 +27,8 @@ import {
 } from './runtime/providerStack';
 import { runLogRetentionCleanup } from './runtime/logRetention';
 import { createShutdownManager, type SafeDiagnosticLogger, type ShutdownManager } from './lifecycle';
+import { startPrimaryInstance } from './singleInstance';
+import { recoverStaleEmailReservations } from './startupRecovery';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -108,7 +110,7 @@ function createWindow(): void {
   });
 }
 
-app.whenReady().then(() => {
+function initializePrimaryInstance(): void {
   let dbInstance: Database.Database | null = null;
   let currentStage: MainInitStage = 'DB_CONNECT';
   try {
@@ -128,6 +130,10 @@ app.whenReady().then(() => {
     const transactionRunner = new DatabaseTransactionRunner(dbInstance);
 
     const stackRepositories = createProviderStackRepositories(dbInstance);
+    recoverStaleEmailReservations(stackRepositories.purchasedEmailRepo, (msg) => {
+      process.stderr.write(msg + '\n');
+    });
+
     const providerStack = createProviderStack(stackRepositories, credentialVault, undefined, {
       userDataDir: app.getPath('userData')
     });
@@ -175,7 +181,6 @@ app.whenReady().then(() => {
     cleanupSubscriptions = () => {
       unsubscribeLogs();
       unsubscribeProgress();
-      providerStack.logBus.dispose();
     };
 
     /**
@@ -244,10 +249,17 @@ app.whenReady().then(() => {
     // 5. Instantiate and attach Shutdown Lifecycle Manager
     currentStage = 'LIFECYCLE_REGISTRATION';
     shutdownManager = createShutdownManager({
+      automation: providerStack.automationRunService,
       db: dbInstance,
+      logBus: {
+        flush: async () => {
+          providerStack.logBus.dispose();
+        }
+      },
       app,
       logger: staticLogger,
-      timeoutMs: 2000,
+      automationTimeoutMs: 15_000,
+      logFlushTimeoutMs: 2_000,
     });
 
     app.on('before-quit', (event) => {
@@ -260,7 +272,7 @@ app.whenReady().then(() => {
         cleanupSubscriptions = null;
       }
       if (shutdownManager) {
-        shutdownManager.handleBeforeQuit(event);
+        void shutdownManager.handleBeforeQuit(event);
       }
     });
 
@@ -297,6 +309,12 @@ app.whenReady().then(() => {
     }
     app.exit(1);
   }
+}
+
+startPrimaryInstance(app, () => mainWindow, () => {
+  void app.whenReady().then(() => {
+    initializePrimaryInstance();
+  });
 });
 
 app.on('window-all-closed', () => {

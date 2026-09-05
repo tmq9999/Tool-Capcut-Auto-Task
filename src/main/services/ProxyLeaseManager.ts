@@ -185,7 +185,7 @@ export class ProxyLeaseManager {
    * cooling-down keys, and waits when nothing is free. Rejects once the deadline
    * passes so a run reports the stall instead of hanging forever.
    */
-  async acquire(): Promise<AcquiredProxyLease> {
+  async acquire(signal?: AbortSignal): Promise<AcquiredProxyLease> {
     const keys = await this.loadKeys();
     if (keys.length === 0) {
       throw new ProviderError(
@@ -199,6 +199,7 @@ export class ProxyLeaseManager {
     const waitInterval = this.options.waitIntervalMs ?? DEFAULT_WAIT_INTERVAL_MS;
 
     for (;;) {
+      signal?.throwIfAborted();
       for (const keyValue of keys) {
         if (this.busyKeys.has(keyValue) || this.isCoolingDown(keyValue)) continue;
         const lease = await this.tryKey(keyValue);
@@ -214,8 +215,37 @@ export class ProxyLeaseManager {
       }
 
       // Every key is busy or cooling down: pause this caller and try again.
-      await this.sleep(waitInterval);
+      await this.wait(waitInterval, signal);
     }
+  }
+
+  private wait(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) return this.sleep(ms);
+    if (signal.aborted) return Promise.reject(signal.reason ?? new Error('Aborted'));
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const cleanup = (): void => {
+        signal.removeEventListener('abort', onAbort);
+      };
+      const onAbort = (): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(signal.reason ?? new Error('Aborted'));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      void this.sleep(ms).then(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      }, (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      });
+    });
   }
 
   async release(lease: AcquiredProxyLease): Promise<void> {

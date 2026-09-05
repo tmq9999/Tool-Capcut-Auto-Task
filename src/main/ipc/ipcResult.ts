@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import type { IpcEnvelope } from '../../shared/schemas/ipc-envelope.schema';
 import { ProviderError } from '../providers/ProviderError';
+import { AutomationTerminalError } from '../services/AutomationTerminalError';
 
 export const VALIDATION_ERROR: IpcEnvelope<never> = {
   success: false,
@@ -39,11 +40,25 @@ export function ok<T>(data: T): IpcEnvelope<T> {
 }
 
 /**
- * Normalizes a thrown error for the renderer. A ProviderError keeps its
- * diagnostic code and user-facing message; anything else collapses to a generic
+ * Normalizes a thrown error for the renderer. An AutomationTerminalError or ProviderError keeps its
+ * diagnostic code, message, and safe details; anything else collapses to a generic
  * persistence failure so internal details never cross the boundary.
  */
 export function toErrorEnvelope(err: unknown): IpcEnvelope<never> {
+  if (err instanceof AutomationTerminalError) {
+    const details = {
+      ...(err.reason.provider ? { provider: err.reason.provider } : {}),
+      ...(err.reason.details ?? {})
+    };
+    return {
+      success: false,
+      error: {
+        code: err.reason.code,
+        message: err.message,
+        ...(Object.keys(details).length > 0 ? { details } : {})
+      }
+    };
+  }
   if (err instanceof ProviderError) {
     return { success: false, error: { code: err.code, message: err.message } };
   }

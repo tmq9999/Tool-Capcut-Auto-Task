@@ -56,7 +56,11 @@ describe('createProviderStack', () => {
     expect(typeof stack.accountService.list).toBe('function');
     expect(typeof stack.automationRunService.start).toBe('function');
     expect(typeof stack.emailPurchaseService.getProviderConfigs).toBe('function');
-    expect(typeof stack.logBus.emit).toBe('function');
+    const runtimeService = stack.automationRunService as unknown as {
+      deps: { workSources: unknown; emailOtp: unknown };
+    };
+    expect(runtimeService.deps.workSources).toBeDefined();
+    expect(runtimeService.deps.emailOtp).toBe(stack.emailPurchaseService);
   });
 
   it('reports both email providers as unconfigured on a fresh database', () => {
@@ -104,14 +108,17 @@ describe('createProviderStack', () => {
         stepDelayMaxMs: 0,
         typeDelayMinMs: 0,
         typeDelayMaxMs: 0,
-        module: 'trial',
+        module: 'credit',
         skipWithoutTrial: false,
         emailSource: { mode: 'manual', entries: ['a@b.com|p'] },
         proxy: { mode: 'direct', entries: [] },
         password: { mode: 'random', length: 12, uppercase: true, numbers: true, special: false },
         testDurationMs: 0
       })
-    ).rejects.toMatchObject({ code: 'CONFIG_ERROR' });
+    ).rejects.toMatchObject({
+      state: 'blocked',
+      reason: { code: 'PROVIDER_CONFIG_ERROR' }
+    });
 
     expect(stack.automationRunService.isRunning()).toBe(false);
   });

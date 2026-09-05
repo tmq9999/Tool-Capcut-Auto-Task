@@ -90,6 +90,74 @@ describe('PurchasedEmailRepository', () => {
       repo.insert({ id: 'pe-6', provider: 'gmail94', email: 'dupe@gmail.com', orderId: 'o-2' })
     ).toThrow();
   });
+
+  it('reserves distinct oldest rows and enforces reservation ownership', () => {
+    const repo = new PurchasedEmailRepository(db);
+    repo.insert({ id: 'pe-1', provider: 'gmail94', email: 'one@gmail.com' });
+    repo.insert({ id: 'pe-2', provider: 'gmail94', email: 'two@gmail.com' });
+
+    const first = repo.reserveOldestAvailable('gmail94', 'run-1:worker-1');
+    const second = repo.reserveOldestAvailable('gmail94', 'run-1:worker-2');
+
+    expect(first?.id).toBe('pe-1');
+    expect(second?.id).toBe('pe-2');
+    expect(repo.releaseReservation('pe-1', 'wrong-owner')).toBe(false);
+    expect(repo.consumeReserved('pe-1', 'wrong-owner', null)).toBe(false);
+    expect(repo.consumeReserved('pe-1', 'run-1:worker-1', null)).toBe(true);
+    expect(repo.reserveOldestAvailable('gmail94', 'run-1:worker-3')).toBeNull();
+  });
+
+  it('excludes a Gmail94 row purchased for a different service', () => {
+    const repo = new PurchasedEmailRepository(db);
+    repo.insert({
+      id: 'legacy-facebook',
+      provider: 'gmail94',
+      email: 'legacy@gmail.com',
+      service: 'facebook'
+    });
+    repo.insert({
+      id: 'capcut-ready',
+      provider: 'gmail94',
+      email: 'capcut@gmail.com',
+      service: 'capcut'
+    });
+
+    expect(repo.countAvailable('gmail94', 'capcut')).toBe(1);
+    expect(repo.reserveOldestAvailable(
+      'gmail94',
+      'run-1:worker-1',
+      'capcut'
+    )?.id).toBe('capcut-ready');
+  });
+
+  it('clears only stale unconsumed reservations at startup', () => {
+    const repo = new PurchasedEmailRepository(db);
+    repo.insertReserved(
+      { id: 'free-after-restart', provider: 'gmail94', email: 'free@gmail.com' },
+      'old-process'
+    );
+    repo.insertReserved(
+      { id: 'consumed', provider: 'gmail94', email: 'used@gmail.com' },
+      'old-process'
+    );
+    repo.consumeReserved('consumed', 'old-process', null);
+
+    expect(repo.clearStaleReservations()).toBe(1);
+    expect(repo.reserveOldestAvailable('gmail94', 'new-process')?.id).toBe('free-after-restart');
+  });
+
+  it('uses the availability index for the reservation candidate query', () => {
+    const plan = db.prepare(
+      'EXPLAIN QUERY PLAN SELECT id FROM purchased_emails' +
+      ' WHERE provider = ? AND service = ?' +
+      ' AND consumed_at IS NULL AND reserved_by IS NULL' +
+      ' ORDER BY purchased_at ASC, id ASC LIMIT 1'
+    ).all('gmail94', 'capcut') as Array<{ detail: string }>;
+
+    expect(plan.some((row) =>
+      row.detail.includes('idx_purchased_emails_available')
+    )).toBe(true);
+  });
 });
 
 describe('ProxyLeaseRepository', () => {

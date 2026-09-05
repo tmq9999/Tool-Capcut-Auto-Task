@@ -36,7 +36,7 @@ export type AutomationModule = z.infer<typeof AutomationModuleEnum>;
 export const EmailSourceConfigSchema = z.discriminatedUnion('mode', [
   z.object({
     mode: z.literal('manual'),
-    entries: z.array(z.string().min(1)).default([])
+    entries: z.array(z.string()).default([])
   }).strict(),
   z.object({
     mode: z.literal('api'),
@@ -134,9 +134,49 @@ export const AutomationRunConfigSchema = z.object({
 export type AutomationRunConfigDTO = z.infer<typeof AutomationRunConfigSchema>;
 
 export const AutomationRunStateEnum = z.enum([
-  'idle', 'preparing', 'running', 'stopping', 'stopped', 'failed'
+  'idle',
+  'preparing',
+  'running',
+  'stopping',
+  'completed',
+  'stopped',
+  'blocked',
+  'failed'
 ]);
 export type AutomationRunState = z.infer<typeof AutomationRunStateEnum>;
+
+export const AutomationTerminalCodeEnum = z.enum([
+  'MANUAL_EXHAUSTED',
+  'USER_STOP',
+  'APP_SHUTDOWN',
+  'INSUFFICIENT_FUNDS',
+  'PROVIDER_AUTH_REQUIRED',
+  'PROVIDER_CONFIG_ERROR',
+  'PROVIDER_RETRY_EXHAUSTED',
+  'PROXY_CAPACITY_UNAVAILABLE',
+  'INTERNAL_ERROR'
+]);
+export type AutomationTerminalCode = z.infer<typeof AutomationTerminalCodeEnum>;
+
+export const AutomationTerminalReasonSchema = z.object({
+  code: AutomationTerminalCodeEnum,
+  provider: z.string().min(1).optional(),
+  details: z.record(
+    z.string(),
+    z.union([z.string(), z.number(), z.boolean()])
+  ).optional()
+}).strict();
+export type AutomationTerminalReasonDTO = z.infer<typeof AutomationTerminalReasonSchema>;
+
+export const AutomationRunCountersSchema = z.object({
+  workerTarget: z.number().int().min(0),
+  workersActive: z.number().int().min(0),
+  accountsAccepted: z.number().int().min(0),
+  accountsCompleted: z.number().int().min(0),
+  accountsFailed: z.number().int().min(0),
+  accountsStopped: z.number().int().min(0)
+}).strict();
+export type AutomationRunCountersDTO = z.infer<typeof AutomationRunCountersSchema>;
 
 export const RunningThreadInfoSchema = z.object({
   accountId: z.string().min(1),
@@ -148,10 +188,8 @@ export type RunningThreadInfoDTO = z.infer<typeof RunningThreadInfoSchema>;
 export const AutomationRunProgressSchema = z.object({
   runId: z.string().min(1),
   state: AutomationRunStateEnum,
-  threadTotal: z.number().int().min(0),
-  threadsStarted: z.number().int().min(0),
-  threadsStopped: z.number().int().min(0),
-  threadsFailed: z.number().int().min(0),
-  message: z.string()
+  ...AutomationRunCountersSchema.shape,
+  message: z.string(),
+  terminalReason: AutomationTerminalReasonSchema.optional()
 }).strict();
 export type AutomationRunProgressDTO = z.infer<typeof AutomationRunProgressSchema>;

@@ -8,10 +8,10 @@ import { runMigrations } from '../../database/migrator';
 import { ProxyLeaseRepository } from '../../repositories/ProxyLeaseRepository';
 import { ProxyLeaseManager, type IKiotProxyLeaseApi } from '../ProxyLeaseManager';
 import { ProxyKeyUnavailableError, type KiotProxyKeySummary, type KiotProxyLease } from '../../providers/KiotProxyProvider';
-import { AutomationRunService, type IAccountSink, type IBrowserRuntimeApi, type IEmailSourceApi, type StartedProfile } from '../AutomationRunService';
+import { AutomationRunService, type IAccountSink, type IBrowserRuntimeApi, type StartedProfile } from '../AutomationRunService';
 import { LogBus, type ILogSink } from '../LogBus';
 import { AutomationRunConfigSchema } from '../../../shared/schemas/automation.schema';
-import type { EmailPurchaseResult } from '../EmailPurchaseService';
+import type { AutomationWorkItem, AutomationWorkSourceFactory } from '../AutomationWorkSource';
 
 /**
  * Queueing verified through the REAL ProxyLeaseManager and a real SQLite lease
@@ -56,12 +56,28 @@ class StubKiotApi implements IKiotProxyLeaseApi {
   }
 }
 
-class StubEmails implements IEmailSourceApi {
-  async purchase(): Promise<EmailPurchaseResult> {
-    return { purchased: [], failures: [] };
+const stubWorkSources: AutomationWorkSourceFactory = {
+  create: (config) => {
+    const items: AutomationWorkItem[] = config.emailSource.mode === 'manual'
+      ? config.emailSource.entries.map((entry, i) => {
+          const [email, password] = entry.split('|');
+          return {
+            sourceId: 'man-' + (i + 1),
+            email,
+            emailPassword: password,
+            emailProvider: 'manual'
+          };
+        })
+      : [];
+    return {
+      kind: 'finite',
+      prepare: async (c) => ({ workerTarget: Math.min(c, items.length) }),
+      next: async () => items.shift() ?? null,
+      commit: () => {},
+      release: () => {}
+    };
   }
-  markConsumed(): void {}
-}
+};
 
 class StubAccounts implements IAccountSink {
   public created = 0;
@@ -95,6 +111,7 @@ class PeakTrackingBrowser implements IBrowserRuntimeApi {
   async startProfile(): Promise<StartedProfile> {
     this.startCalls += 1;
     this.peakActiveLeases = Math.max(this.peakActiveLeases, leaseRepo.listActive().length);
+    await new Promise((resolve) => setTimeout(resolve, 5));
     return { profileId: 'profile-' + this.startCalls, port: 50000 + this.startCalls, browserType: 'mimic' };
   }
 
@@ -103,7 +120,7 @@ class PeakTrackingBrowser implements IBrowserRuntimeApi {
   }
 }
 
-function manualConfig(threadCount: number) {
+function manualConfig(threadCount: number, emailCount: number = threadCount) {
   return AutomationRunConfigSchema.parse({
     threadCount,
     browser: 'multilogin',
@@ -113,11 +130,11 @@ function manualConfig(threadCount: number) {
     stepDelayMaxMs: 0,
     typeDelayMinMs: 0,
     typeDelayMaxMs: 0,
-    module: 'trial',
+    module: 'credit',
     skipWithoutTrial: false,
     emailSource: {
       mode: 'manual',
-      entries: Array.from({ length: threadCount }, (_unused, i) => 'w' + (i + 1) + '@x.com|p')
+      entries: Array.from({ length: emailCount }, (_unused, i) => 'w' + (i + 1) + '@x.com|p')
     },
     proxy: { mode: 'proxykey' },
     password: { mode: 'random', length: 12, uppercase: true, numbers: true, special: false },
@@ -154,7 +171,14 @@ function buildStack(keys: string[]) {
   const browser = new PeakTrackingBrowser();
   const accounts = new StubAccounts();
   const service = new AutomationRunService(
-    { emails: new StubEmails(), proxies, browser, accounts, logBus: new LogBus(new CollectingSink()) },
+    {
+      workSources: stubWorkSources,
+      emailOtp: { readOtp: async () => null },
+      proxies,
+      browser,
+      accounts,
+      logBus: new LogBus(new CollectingSink())
+    },
     { sleep: async () => {}, nextId: () => 'run-1' }
   );
   return { api, proxies, browser, accounts, service };
@@ -164,20 +188,20 @@ describe('xếp hàng chờ khi số luồng vượt số proxy key', () => {
   it('chạy hết 5 luồng với 2 key, không luồng nào bị bỏ rơi', async () => {
     const { service, browser } = buildStack(['K1', 'K2']);
 
-    await service.start(manualConfig(5));
+    await service.start(manualConfig(2, 5));
     const summary = await service.waitForCompletion();
 
     expect(browser.startCalls).toBe(5);
-    expect(summary.threadTotal).toBe(5);
-    expect(summary.threadsStarted).toBe(5);
-    expect(summary.threadsFailed).toBe(0);
-    expect(summary.state).toBe('stopped');
+    expect(summary.workerTarget).toBe(2);
+    expect(summary.accountsAccepted).toBe(5);
+    expect(summary.accountsFailed).toBe(0);
+    expect(summary.state).toBe('completed');
   });
 
   it('không bao giờ giữ nhiều lease hơn số key', async () => {
     const { service, browser } = buildStack(['K1', 'K2']);
 
-    await service.start(manualConfig(6));
+    await service.start(manualConfig(2, 6));
     await service.waitForCompletion();
 
     expect(browser.peakActiveLeases).toBeLessThanOrEqual(2);
@@ -186,7 +210,7 @@ describe('xếp hàng chờ khi số luồng vượt số proxy key', () => {
   it('với đúng 1 key thì các luồng chạy lần lượt', async () => {
     const { service, browser } = buildStack(['K1']);
 
-    await service.start(manualConfig(4));
+    await service.start(manualConfig(1, 4));
     await service.waitForCompletion();
 
     expect(browser.startCalls).toBe(4);
@@ -196,7 +220,7 @@ describe('xếp hàng chờ khi số luồng vượt số proxy key', () => {
   it('mỗi luồng nhận một IP riêng và mọi lease đều được nhả', async () => {
     const { service, api } = buildStack(['K1', 'K2']);
 
-    await service.start(manualConfig(5));
+    await service.start(manualConfig(2, 5));
     await service.waitForCompletion();
 
     const ips = leaseRepo.activeIps();
@@ -209,7 +233,7 @@ describe('xếp hàng chờ khi số luồng vượt số proxy key', () => {
   it('không có hai luồng nào dùng trùng IP', async () => {
     const { service } = buildStack(['K1', 'K2', 'K3']);
 
-    await service.start(manualConfig(6));
+    await service.start(manualConfig(3, 6));
     await service.waitForCompletion();
 
     const rows = db.prepare('SELECT ip FROM proxy_leases').all() as Array<{ ip: string }>;
@@ -220,7 +244,7 @@ describe('xếp hàng chờ khi số luồng vượt số proxy key', () => {
   it('đánh dấu xong cho đủ 5 tài khoản', async () => {
     const { service, accounts } = buildStack(['K1', 'K2']);
 
-    await service.start(manualConfig(5));
+    await service.start(manualConfig(2, 5));
     await service.waitForCompletion();
 
     expect(accounts.created).toBe(5);
@@ -230,7 +254,7 @@ describe('xếp hàng chờ khi số luồng vượt số proxy key', () => {
   it('dừng phiên thì các luồng còn trong hàng đợi không khởi chạy', async () => {
     const { service, browser } = buildStack(['K1']);
 
-    await service.start(manualConfig(5));
+    await service.start(manualConfig(1, 5));
     await service.waitUntilRunning();
     await service.stop();
     const summary = await service.waitForCompletion();

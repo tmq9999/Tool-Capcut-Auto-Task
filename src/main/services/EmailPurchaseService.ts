@@ -4,6 +4,8 @@ import type { PurchasedEmailRepository } from '../repositories/PurchasedEmailRep
 import type { ICredentialVault } from '../security/CredentialVault';
 import { ProviderError } from '../providers/ProviderError';
 import { SecretReader } from './SecretReader';
+import type { Gmail94Profile, Gmail94Service } from '../providers/Gmail94Provider';
+import { AutomationTerminalError } from './AutomationTerminalError';
 import type { DongVanCodeResult, DongVanPurchasedMail } from '../providers/DongVanFBProvider';
 import { buildCustomDomainAddress, generateMailUsernames } from './mailUsername';
 import type { CustomEmailSettingsDTO } from '../../shared/schemas/settings.schema';
@@ -24,8 +26,33 @@ export const DEFAULT_OTP_SERVICE = CAPCUT_OTP_SERVICE;
 const DEFAULT_DONGVAN_ACCOUNT_TYPE = 1;
 const DEFAULT_DONGVAN_QUALITY = 3;
 
+export interface EmailCapacitySnapshot {
+  provider: 'gmail94';
+  service: 'capcut';
+  balance: number;
+  unitPrice: number;
+  reusableCount: number;
+  affordablePurchaseCount: number;
+  totalAvailableCount: number;
+  checkedAt: string;
+}
+
+export interface ReservedEmail {
+  purchasedEmail: PurchasedEmailDTO;
+  reservationId: string;
+}
+
+export interface EmailAcquisitionSession {
+  readonly capacity?: EmailCapacitySnapshot;
+  acquireOne(workerId: string, signal: AbortSignal): Promise<ReservedEmail>;
+  commit(reservation: ReservedEmail, accountId: string): void;
+  release(reservation: ReservedEmail): void;
+}
+
 /** The slice of Gmail94Provider used to rent mailboxes and read codes. */
 export interface IGmail94EmailApi {
+  getProfile(token: string): Promise<Gmail94Profile>;
+  listServices(): Promise<Gmail94Service[]>;
   createOtpOrder(token: string, service: string): Promise<{ email: string; orderId: string }>;
   readOtp(token: string, orderId: string, service: string): Promise<string | null>;
 }
@@ -64,11 +91,6 @@ export interface PurchaseOptions {
   quality?: number | string;
 }
 
-export interface EmailPurchaseResult {
-  purchased: PurchasedEmailDTO[];
-  failures: string[];
-}
-
 export interface EmailPurchaseServiceDeps {
   nextId?: () => string;
   /** Current catch-all domain settings, read fresh so a Settings change applies. */
@@ -91,6 +113,7 @@ export class EmailPurchaseService {
   private readonly nextId: () => string;
   private readonly secrets: SecretReader;
   private readonly customEmail: () => CustomEmailSettingsDTO;
+  private readonly acquisitionTails = new Map<EmailSourceProvider, Promise<void>>();
 
   constructor(
     private readonly credRepo: CredentialRepository,
@@ -102,6 +125,378 @@ export class EmailPurchaseService {
     this.nextId = deps.nextId ?? (() => crypto.randomUUID());
     this.secrets = new SecretReader(credRepo, vault);
     this.customEmail = deps.customEmail ?? (() => FALLBACK_CUSTOM_EMAIL);
+  }
+
+  private async exclusive<T>(
+    provider: EmailSourceProvider,
+    signal: AbortSignal,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    const previous = this.acquisitionTails.get(provider) ?? Promise.resolve();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const current = previous.catch(() => undefined).then(() => gate);
+    this.acquisitionTails.set(provider, current);
+    void current.then(() => {
+      if (this.acquisitionTails.get(provider) === current) {
+        this.acquisitionTails.delete(provider);
+      }
+    });
+    try {
+      await this.awaitTurn(previous.catch(() => undefined), signal);
+      signal.throwIfAborted();
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private async awaitTurn(turn: Promise<void>, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    let onAbort: (() => void) | null = null;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(signal.reason ?? new Error('Aborted'));
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      await Promise.race([turn, aborted]);
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  private wait(ms: number, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return Promise.reject(signal.reason ?? new Error('Aborted'));
+    return new Promise<void>((resolve, reject) => {
+      let timer: NodeJS.Timeout | null = null;
+      function cleanup(): void {
+        if (timer) clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+      }
+      function onAbort(): void {
+        cleanup();
+        reject(signal.reason ?? new Error('Aborted'));
+      }
+      timer = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, ms);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  private async createGmail94OrderWithRetry(
+    token: string,
+    service: string,
+    signal: AbortSignal
+  ): Promise<{ email: string; orderId: string }> {
+    const delays = [0, 500, 1500];
+
+    for (let attempt = 0; attempt < delays.length; attempt += 1) {
+      signal.throwIfAborted();
+      const delay = delays[attempt];
+      if (delay > 0) {
+        await this.wait(delay, signal);
+      }
+      signal.throwIfAborted();
+
+      try {
+        return await this.apis.gmail94.createOtpOrder(token, service);
+      } catch (err: unknown) {
+        const isTransient =
+          err instanceof ProviderError &&
+          (err.code === 'NETWORK_ERROR' || err.code === 'RATE_LIMITED');
+
+        if (!isTransient) {
+          throw err;
+        }
+      }
+    }
+
+    throw new AutomationTerminalError(
+      'blocked',
+      {
+        code: 'PROVIDER_RETRY_EXHAUSTED',
+        provider: 'gmail94',
+        details: { attempts: delays.length }
+      },
+      'Gmail94 mua email vượt quá số lần thử lại.'
+    );
+  }
+
+  private async preflightGmail94(
+    initialConcurrency: number,
+    signal: AbortSignal
+  ): Promise<EmailCapacitySnapshot> {
+    signal.throwIfAborted();
+    const serviceSlug = CAPCUT_OTP_SERVICE;
+    const token = this.readApiKey('gmail94');
+    const [profile, services] = await Promise.all([
+      this.apis.gmail94.getProfile(token),
+      this.apis.gmail94.listServices()
+    ]);
+    signal.throwIfAborted();
+    const service = services.find((entry) => entry.slug === serviceSlug);
+    const balance = profile.balance;
+    const unitPrice = service?.price;
+
+    if (balance === null || !Number.isFinite(balance) || balance < 0) {
+      throw new ProviderError('CONFIG_ERROR', 'Gmail94 không trả về số dư hợp lệ.', 'gmail94');
+    }
+    if (
+      !service ||
+      typeof unitPrice !== 'number' ||
+      !Number.isFinite(unitPrice) ||
+      unitPrice <= 0
+    ) {
+      throw new ProviderError('CONFIG_ERROR', 'Không đọc được giá dịch vụ capcut từ Gmail94.', 'gmail94');
+    }
+
+    const reusableCount = this.purchasedRepo.countAvailable(
+      'gmail94',
+      CAPCUT_OTP_SERVICE
+    );
+    const affordablePurchaseCount = Math.floor(balance / unitPrice);
+    const snapshot: EmailCapacitySnapshot = {
+      provider: 'gmail94',
+      service: 'capcut',
+      balance,
+      unitPrice,
+      reusableCount,
+      affordablePurchaseCount,
+      totalAvailableCount: reusableCount + affordablePurchaseCount,
+      checkedAt: new Date().toISOString()
+    };
+
+    if (snapshot.totalAvailableCount < initialConcurrency) {
+      throw new AutomationTerminalError(
+        'blocked',
+        {
+          code: 'INSUFFICIENT_FUNDS',
+          provider: 'gmail94',
+          details: {
+            requestedWorkers: initialConcurrency,
+            reusableCount,
+            balance,
+            unitPrice,
+            affordablePurchaseCount,
+            checkedAt: snapshot.checkedAt
+          }
+        },
+        'Số dư Gmail94 không đủ cho toàn bộ số luồng ban đầu.'
+      );
+    }
+    return snapshot;
+  }
+
+  async openAcquisitionSession(
+    provider: EmailSourceProvider,
+    initialConcurrency: number,
+    options: PurchaseOptions = {},
+    signal: AbortSignal
+  ): Promise<EmailAcquisitionSession> {
+    const capacity = provider === 'gmail94'
+      ? await this.preflightGmail94(initialConcurrency, signal)
+      : undefined;
+    const gmailToken = provider === 'gmail94'
+      ? this.readApiKey('gmail94')
+      : null;
+    const gmailServiceSlug = CAPCUT_OTP_SERVICE;
+    const unitPrice = capacity?.unitPrice ?? 0;
+    let remainingAffordablePurchases = capacity?.affordablePurchaseCount ?? 0;
+
+    const acquireOne = async (workerId: string, workerSignal: AbortSignal): Promise<ReservedEmail> => {
+      return this.exclusive(provider, workerSignal, async () => {
+        const reservationId = workerId + ':' + this.nextId();
+
+        if (provider === 'gmail94') {
+          const reusable = this.purchasedRepo.reserveOldestAvailable(
+            'gmail94',
+            reservationId,
+            gmailServiceSlug
+          );
+          if (reusable) return { purchasedEmail: reusable, reservationId };
+
+          if (gmailToken === null) {
+            throw new Error('Gmail94 acquisition session lost its credential.');
+          }
+
+          if (remainingAffordablePurchases <= 0) {
+            workerSignal.throwIfAborted();
+            const refreshedProfile = await this.apis.gmail94.getProfile(gmailToken);
+            const refreshedBalance = refreshedProfile.balance;
+            if (refreshedBalance === null || !Number.isFinite(refreshedBalance) || refreshedBalance < 0) {
+              throw new ProviderError('CONFIG_ERROR', 'Gmail94 không trả về số dư hợp lệ.', 'gmail94');
+            }
+            const affordable = Math.floor(refreshedBalance / unitPrice);
+            if (affordable <= 0) {
+              throw new AutomationTerminalError(
+                'blocked',
+                {
+                  code: 'INSUFFICIENT_FUNDS',
+                  provider: 'gmail94',
+                  details: {
+                    balance: refreshedBalance,
+                    unitPrice,
+                    affordablePurchaseCount: 0,
+                    checkedAt: new Date().toISOString()
+                  }
+                },
+                'Số dư Gmail94 không đủ.'
+              );
+            }
+            remainingAffordablePurchases = affordable;
+          }
+
+          workerSignal.throwIfAborted();
+          let order: { email: string; orderId: string };
+          try {
+            order = await this.createGmail94OrderWithRetry(
+              gmailToken,
+              gmailServiceSlug,
+              workerSignal
+            );
+          } catch (err: unknown) {
+            if (err instanceof ProviderError && err.code === 'INSUFFICIENT_FUNDS') {
+              const refreshedProfile = await this.apis.gmail94.getProfile(gmailToken).catch(() => null);
+              const refreshedBalance = refreshedProfile?.balance ?? 0;
+              const affordable = Math.floor(refreshedBalance / unitPrice);
+              throw new AutomationTerminalError(
+                'blocked',
+                {
+                  code: 'INSUFFICIENT_FUNDS',
+                  provider: 'gmail94',
+                  details: {
+                    balance: refreshedBalance,
+                    unitPrice,
+                    affordablePurchaseCount: affordable
+                  }
+                },
+                'Số dư Gmail94 không đủ.'
+              );
+            }
+            throw err;
+          }
+
+          const purchasedEmail = this.purchasedRepo.insertReserved({
+            id: this.nextId(),
+            provider: 'gmail94',
+            email: order.email,
+            orderId: order.orderId,
+            service: gmailServiceSlug
+          }, reservationId);
+          remainingAffordablePurchases -= 1;
+          return { purchasedEmail, reservationId };
+        }
+
+        if (provider === 'dongvanfb') {
+          const reusable = this.purchasedRepo.reserveOldestAvailable(
+            'dongvanfb',
+            reservationId
+          );
+          if (reusable) return { purchasedEmail: reusable, reservationId };
+
+          workerSignal.throwIfAborted();
+          const apiKey = this.readApiKey('dongvanfb');
+          const accountType = options.accountType ?? DEFAULT_DONGVAN_ACCOUNT_TYPE;
+          const quality = options.quality ?? DEFAULT_DONGVAN_QUALITY;
+
+          const mails = await this.apis.dongvanfb.buyMail(apiKey, {
+            accountType,
+            quality,
+            type: 'full'
+          });
+          const mail = mails[0];
+          if (!mail) {
+            throw new ProviderError('NETWORK_ERROR', 'DongVanFB không trả về tài khoản nào.', 'dongvanfb');
+          }
+
+          let refreshToken = mail.refreshToken;
+          let clientId = mail.clientId;
+          if ((!refreshToken || !clientId) && mail.password) {
+            workerSignal.throwIfAborted();
+            const pair = await this.apis.dongvanfb.getOauth2(apiKey, mail.email, mail.password);
+            refreshToken = pair.refreshToken;
+            clientId = pair.clientId;
+          }
+
+          const id = this.nextId();
+          const purchasedEmail = this.purchasedRepo.insertReserved({
+            id,
+            provider: 'dongvanfb',
+            email: mail.email,
+            passwordEncrypted: mail.password ? this.vault.encrypt(mail.password) : null,
+            refreshTokenEncrypted: refreshToken ? this.vault.encrypt(refreshToken) : null,
+            clientId: clientId ?? null,
+            rawPayloadEncrypted: this.vault.encrypt(
+              [mail.email, mail.password ?? '', refreshToken ?? '', clientId ?? ''].join('|')
+            )
+          }, reservationId);
+
+          return { purchasedEmail, reservationId };
+        }
+
+        if (provider === 'customdomain') {
+          const reusable = this.purchasedRepo.reserveOldestAvailable(
+            'customdomain',
+            reservationId
+          );
+          if (reusable) return { purchasedEmail: reusable, reservationId };
+
+          workerSignal.throwIfAborted();
+          const settings = this.customEmail();
+          const existing = new Set(
+            this.purchasedRepo
+              .listRecent(500)
+              .filter((row) => row.provider === 'customdomain')
+              .map((row) => row.email.split('@')[0])
+          );
+
+          const usernames = generateMailUsernames(1, existing);
+          const username = usernames[0];
+          if (!username) {
+            throw new Error('Failed to generate username for custom domain email');
+          }
+          const email = buildCustomDomainAddress(username, settings.domain);
+          const id = this.nextId();
+          const purchasedEmail = this.purchasedRepo.insertReserved({
+            id,
+            provider: 'customdomain',
+            email
+          }, reservationId);
+
+          return { purchasedEmail, reservationId };
+        }
+
+        throw new ProviderError('CONFIG_ERROR', `Unsupported email provider: ${provider}`);
+      });
+    };
+
+    const commit = (reservation: ReservedEmail, accountId: string): void => {
+      const consumed = this.purchasedRepo.consumeReserved(
+        reservation.purchasedEmail.id,
+        reservation.reservationId,
+        accountId
+      );
+      if (!consumed) {
+        throw new AutomationTerminalError(
+          'failed',
+          { code: 'INTERNAL_ERROR' },
+          'Quyền sở hữu email đã mua không còn hợp lệ.'
+        );
+      }
+    };
+
+    const release = (reservation: ReservedEmail): void => {
+      this.purchasedRepo.releaseReservation(
+        reservation.purchasedEmail.id,
+        reservation.reservationId
+      );
+    };
+
+    return { capacity, acquireOne, commit, release };
   }
 
   private readApiKey(provider: EmailApiProvider): string {
@@ -117,168 +512,6 @@ export class EmailPurchaseService {
         maskedHint: record?.metadata.maskedHint ?? '••••••••'
       };
     });
-  }
-
-  private async purchaseGmail94(
-    apiKey: string,
-    count: number,
-    options: PurchaseOptions
-  ): Promise<EmailPurchaseResult> {
-    const serviceSlug = options.service ?? DEFAULT_OTP_SERVICE;
-    const ids: string[] = [];
-    const failures: string[] = [];
-
-    for (let index = 0; index < count; index += 1) {
-      try {
-        const order = await this.apis.gmail94.createOtpOrder(apiKey, serviceSlug);
-        const id = this.nextId();
-        this.purchasedRepo.insert({
-          id,
-          provider: 'gmail94',
-          email: order.email,
-          orderId: order.orderId,
-          service: serviceSlug
-        });
-        ids.push(id);
-      } catch (err: unknown) {
-        failures.push(err instanceof Error ? err.message : 'Mua email thất bại.');
-      }
-    }
-
-    return { purchased: this.loadDtos(ids), failures };
-  }
-
-  private async purchaseDongVanFB(
-    apiKey: string,
-    count: number,
-    options: PurchaseOptions
-  ): Promise<EmailPurchaseResult> {
-    const accountType = options.accountType ?? DEFAULT_DONGVAN_ACCOUNT_TYPE;
-    const quality = options.quality ?? DEFAULT_DONGVAN_QUALITY;
-    const ids: string[] = [];
-    const failures: string[] = [];
-
-    for (let index = 0; index < count; index += 1) {
-      try {
-        const mails = await this.apis.dongvanfb.buyMail(apiKey, {
-          accountType,
-          quality,
-          type: 'full'
-        });
-        const mail = mails[0];
-        if (!mail) {
-          failures.push('DongVanFB không trả về tài khoản nào.');
-          continue;
-        }
-
-        let refreshToken = mail.refreshToken;
-        let clientId = mail.clientId;
-        if ((!refreshToken || !clientId) && mail.password) {
-          const pair = await this.apis.dongvanfb.getOauth2(apiKey, mail.email, mail.password);
-          refreshToken = pair.refreshToken;
-          clientId = pair.clientId;
-        }
-
-        const id = this.nextId();
-        this.purchasedRepo.insert({
-          id,
-          provider: 'dongvanfb',
-          email: mail.email,
-          passwordEncrypted: mail.password ? this.vault.encrypt(mail.password) : null,
-          refreshTokenEncrypted: refreshToken ? this.vault.encrypt(refreshToken) : null,
-          clientId: clientId ?? null,
-          rawPayloadEncrypted: this.vault.encrypt(
-            [mail.email, mail.password ?? '', refreshToken ?? '', clientId ?? ''].join('|')
-          )
-        });
-        ids.push(id);
-      } catch (err: unknown) {
-        failures.push(err instanceof Error ? err.message : 'Mua email thất bại.');
-      }
-    }
-
-    return { purchased: this.loadDtos(ids), failures };
-  }
-
-  /**
-   * Generates mailboxes on the operator's catch-all domain. Nothing is bought and
-   * nothing is charged; the addresses simply have to be unique.
-   */
-  private purchaseCustomDomain(count: number): EmailPurchaseResult {
-    const settings = this.customEmail();
-    const existing = new Set(
-      this.purchasedRepo
-        .listRecent(500)
-        .filter((row) => row.provider === 'customdomain')
-        .map((row) => row.email.split('@')[0])
-    );
-
-    const ids: string[] = [];
-    const failures: string[] = [];
-
-    for (const username of generateMailUsernames(count, existing)) {
-      const email = buildCustomDomainAddress(username, settings.domain);
-      const id = this.nextId();
-      try {
-        this.purchasedRepo.insert({ id, provider: 'customdomain', email });
-        ids.push(id);
-      } catch (err: unknown) {
-        failures.push(err instanceof Error ? err.message : 'Không tạo được địa chỉ mail.');
-      }
-    }
-
-    return { purchased: this.loadDtos(ids), failures };
-  }
-
-  private loadDtos(ids: string[]): PurchasedEmailDTO[] {
-    if (ids.length === 0) return [];
-    const wanted = new Set(ids);
-    const rows = this.purchasedRepo.listRecent(Math.max(ids.length * 4, 20));
-    const byId = new Map(rows.map((row) => [row.id, row]));
-    return ids.flatMap((id) => {
-      const row = byId.get(id);
-      return row && wanted.has(id) ? [row] : [];
-    });
-  }
-
-  /** Buys exactly `count` mailboxes, one API call per mailbox. */
-  async purchase(
-    provider: EmailSourceProvider,
-    count: number,
-    options: PurchaseOptions = {}
-  ): Promise<EmailPurchaseResult> {
-    if (count <= 0) {
-      return { purchased: [], failures: [] };
-    }
-
-    // The catch-all domain needs no API key: addresses are generated locally.
-    if (provider === 'customdomain') {
-      return this.purchaseCustomDomain(count);
-    }
-
-    /**
-     * Hộp thư đã thuê mà chưa tiêu là TIỀN ĐÃ TRẢ, và `order_id` của nó vẫn còn
-     * trong `purchased_emails` nên vẫn đọc được OTP. Lượt 04/09/2026 thuê
-     * `songhajun652@gmail.com` rồi `xcli profile-quick` lỗi vì launcher
-     * Multilogin đã tắt — không dùng lại thì mỗi lỗi hạ tầng là một lần mất tiền.
-     */
-    const reuse = this.purchasedRepo.listUnconsumed(provider, count);
-    if (reuse.length >= count) {
-      return { purchased: reuse.slice(0, count), failures: [] };
-    }
-
-    const apiKey = this.readApiKey(provider);
-    const missing = count - reuse.length;
-    const bought = provider === 'gmail94'
-      ? await this.purchaseGmail94(apiKey, missing, options)
-      : await this.purchaseDongVanFB(apiKey, missing, options);
-
-    return { purchased: [...reuse, ...bought.purchased], failures: bought.failures };
-  }
-
-  /** Đưa hộp thư chưa dùng tới trở lại hàng chờ (xem `PurchasedEmailRepository.release`). */
-  release(purchasedEmailId: string): void {
-    this.purchasedRepo.release(purchasedEmailId);
   }
 
   /**
@@ -327,9 +560,5 @@ export class EmailPurchaseService {
 
     const viaGraph = await this.apis.dongvanfb.readCode('graph', params);
     return viaGraph ? viaGraph.code : null;
-  }
-
-  markConsumed(purchasedEmailId: string, accountId: string | null): void {
-    this.purchasedRepo.markConsumed(purchasedEmailId, accountId);
   }
 }

@@ -29,8 +29,6 @@ import { attachNetDiag, dump, StepError } from './diag';
 import { rand, sleep } from './human';
 import {
   claimIfPending,
-  closeTaskPopover,
-  findTaskEntry,
   runGroup,
   selectGroups,
   withTaskPopover,
@@ -41,6 +39,8 @@ import { videoStudioGroup } from './missions/videoStudio';
 import { attachTaskMonitor, TaskStore, type TaskSnapshot } from './taskApi';
 import type { CapcutMissionEnv, CapcutPace, MissionGroup, TaskOutcome } from './types';
 import { URLS } from './urls';
+import { abortable } from './cancellation';
+import { measureStage } from '../stageTiming';
 
 /**
  * Thứ tự theo đúng lượt làm tay: hai nhiệm vụ "miễn phí" trước để có credits,
@@ -56,12 +56,17 @@ const GROUPS: MissionGroup[] = [
 /** Lần 2 giờ thật sự chạy lại, vì không còn cờ chặn nào. */
 const MAX_ATTEMPTS = 2;
 
+export const INTER_ROUND_WAIT_MS = 8_000;
+export const FINAL_SNAPSHOT_WAIT_MS = 10_000;
+export const BOOTSTRAP_DEADLINE_MS = 30_000;
+
 export interface RunTasksInput {
   page: Page;
   context: BrowserContext;
   /** Đường dẫn ảnh PNG thật để upload; người gọi truyền, KHÔNG tự đoán cwd. */
   sampleImage: string;
   log: (msg: string) => void;
+  signal: AbortSignal;
   /** Số lượt thử lại cả vòng nhiệm vụ. Engine dùng 2. */
   maxRounds?: number;
   /**
@@ -70,6 +75,25 @@ export interface RunTasksInput {
    * nghỉ THÊM giữa các bước lớn — xem `paceGapMs`.
    */
   pace?: CapcutPace;
+  groups?: MissionGroup[];
+  resolvePage?: (stage: string) => Promise<Page>;
+}
+
+async function waitForDelay(
+  ms: number,
+  signal: AbortSignal
+): Promise<void> {
+  signal.throwIfAborted();
+  let onAbort: (() => void) | null = null;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason ?? new Error('Aborted'));
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    await Promise.race([sleep(ms), aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
 }
 
 /**
@@ -135,11 +159,8 @@ function summarize(snap: TaskSnapshot): TaskSnapshotSummary {
 /**
  * Chuẩn bị môi trường: monitor + chẩn đoán mạng + snapshot đầu tiên.
  *
- * Lấy được snapshot là điều kiện tiên quyết của mọi thứ sau đó, nên bước này
- * leo thang thay vì tin vào một cú reload:
- *   1. mở thẳng `/ai-design` — trang đã đo được là có gọi `task_list`
- *   2. chưa thấy thì MỞ POPOVER "Free credits" — chính nó kích hoạt lần gọi
- *   3. vẫn chưa thì reload
+ * Route nhiệm vụ → chờ ngắn response tự phát → chủ động mở popover.
+ * Toàn bộ dùng một deadline; không reload hoặc điều hướng sau khi hết hạn.
  *
  * Bản trước chỉ `reload()` nếu URL đã ở capcut.com. Sau khi ĐĂNG NHẬP (khác với
  * sau khi đăng ký), trang đích không gọi `task_list`, nên `waitForSnapshot`
@@ -154,7 +175,10 @@ function summarize(snap: TaskSnapshot): TaskSnapshotSummary {
 async function bootstrap(
   input: RunTasksInput
 ): Promise<{ store: TaskStore; env: CapcutMissionEnv; snap: TaskSnapshot }> {
-  const { page, context, sampleImage, log } = input;
+  const page = input.resolvePage
+    ? await input.resolvePage('bootstrap')
+    : input.page;
+  const { context, sampleImage, log } = input;
 
   const store = new TaskStore();
   attachTaskMonitor(context, store);
@@ -164,76 +188,55 @@ async function bootstrap(
     page,
     context,
     sampleImage,
-    log: (m: string) => log(`      · ${m}`),
+    log: (message: string) =>
+      log(message.startsWith('stage=') ? message : '      · ' + message),
+    signal: input.signal,
     // Nhịp gõ đi kèm env để từng mission truyền xuống `fillEditor`; sàn nằm ở
     // `humanType` nên cấu hình nhanh hơn khoảng đã đo không lọt qua được.
     pace: input.pace,
   };
 
-  const tryGet = async (timeoutMs: number): Promise<TaskSnapshot | null> =>
-    store.waitForSnapshot(0, timeoutMs).catch(() => null);
+  const deadlineAt = Date.now() + BOOTSTRAP_DEADLINE_MS;
+  const remaining = (): number => Math.max(0, deadlineAt - Date.now());
+  const tryGet = async (budgetMs: number): Promise<TaskSnapshot | null> => {
+    input.signal.throwIfAborted();
+    if (store.snapshot()) return store.snapshot();
+    if (remaining() === 0) return null;
+    return store.waitForSnapshot(0, Math.min(budgetMs, remaining()), input.signal).catch(() => {
+      input.signal.throwIfAborted();
+      return null;
+    });
+  };
 
-  await page.goto(URLS.aiDesign, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-  let snap = await tryGet(30000);
+  log('Mở route nhiệm vụ; deadline bootstrap 30s.');
+  input.signal.throwIfAborted();
+  await abortable(
+    page.goto(URLS.tasks, { waitUntil: 'domcontentloaded', timeout: 12_000 }),
+    input.signal
+  ).catch(() => { input.signal.throwIfAborted(); });
+  let snap = await tryGet(2000);
 
-  if (!snap) {
-    /**
-     * Dùng lại BẬC LEO THANG ĐÃ CÓ của `withTaskPopover` thay vì tự thử một lần.
-     *
-     * Bản cũ ở đây chỉ `findTaskEntry` (một ứng viên) + một cú click; không mở
-     * được là đi thẳng tới nhánh ném lỗi ⇒ account chết ngay từ bước đầu, không
-     * làm được nhiệm vụ nào. Trong khi `withTaskPopover` đã có sẵn bậc mạnh hơn
-     * nhiều: `findTaskEntries` trả 6 selector theo thứ tự ưu tiên, mỗi cái thử 2
-     * lần click, 2 vòng, rồi còn bậc cuối là điều hướng sang `URLS.tasks` với
-     * `enter_source=web_task_earn_credit`.
-     *
-     * Triệu chứng đã ghi trong CHANGELOG ("Không bắt được task_list" trên
-     * `jksqtiqa24961`, `yrqfvwwk67499`) chính là bậc yếu này, không phải selector
-     * sai — nên chỗ sửa đúng là dùng chung, không phải viết logic mới.
-     */
+  if (!snap && remaining() > 0) {
     log('   ℹ️  Chưa thấy task_list — mở popover nhiệm vụ để kích hoạt');
-    await withTaskPopover(page, async () => {
-      snap = await tryGet(20000);
-    }, log).catch(() => {});
+    await withTaskPopover(page, async () => { snap = await tryGet(remaining()); }, log, {
+      signal: input.signal,
+      deadlineAt
+    }).catch(() => { input.signal.throwIfAborted(); });
+    snap = store.snapshot();
   }
 
-  if (!snap) {
+  if (!snap && remaining() > 1000) {
     log('   ℹ️  Vẫn chưa có — reload trang');
-    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-    snap = await tryGet(25000);
-  }
-
-  if (!snap) {
-    /**
-     * Header của `/ai-design` có BIẾN THỂ không hề có lối vào nhiệm vụ.
-     *
-     * Dump `.debug/001_no_task_list.html` (2026-09-02, ehzqrntq03637): trang đã
-     * đăng nhập, editor dựng xong, credits hiện `<div class="credit-balance">
-     * 1546</div>` — nhưng KHÔNG có "Free credits", không `TitleBarFreeCredits`,
-     * không `button.credit-section`; `data-id` duy nhất trên trang là của emoji
-     * picker. Bấm popover ở đó là không thể, nên reload bao nhiêu lần cũng vô ích.
-     *
-     * `/my-edit` thì popover nhiệm vụ luôn có (dump `001_task_row_ambiguous`:
-     * taskRow=19), nên đổi trang là bậc leo thang cuối cùng.
-     */
-    log('   ℹ️  Trang này không có lối vào nhiệm vụ — thử /my-edit');
-    await page.goto(URLS.main, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-    await page.waitForTimeout(rand(5000, 7000));
-    snap = await tryGet(20000);
-
-    if (!snap) {
-      const entry = await findTaskEntry(page);
-      if (entry) {
-        await entry.click({ timeout: 8000, force: true }).catch(() => {});
-        snap = await tryGet(20000);
-        await closeTaskPopover(page, false);
-      }
-    }
+    await abortable(
+      page.reload({ waitUntil: 'domcontentloaded', timeout: Math.min(10_000, remaining()) }),
+      input.signal
+    ).catch(() => { input.signal.throwIfAborted(); });
+    snap = await tryGet(remaining());
   }
 
   if (!snap) {
     throw new StepError(
-      'Không bắt được task_list sau khi mở /ai-design, mở popover, reload và /my-edit — profile còn đăng nhập không?',
+      'Không nhận được task_list trong deadline bootstrap 30s; kiểm tra phiên đăng nhập và kết nối CapCut.',
       await dump(page, 'no_task_list')
     );
   }
@@ -259,14 +262,17 @@ async function claimPending(
   snap: TaskSnapshot,
   store: TaskStore,
   outcomes: Map<string, TaskOutcome>,
-  log: (msg: string) => void
+  log: (msg: string) => void,
+  signal: AbortSignal
 ): Promise<number> {
   let claimed = 0;
   for (const t of snap.byKey.values()) {
+    signal.throwIfAborted();
     if (t.status !== 2) continue;
     const o = outcomes.get(t.taskKey);
     log(`   🟡 ${t.title} (+${t.reward}) đang chờ nhận — bấm Claim`);
-    const ok = await claimIfPending(page, t, store, log).catch((e: unknown) => {
+    const ok = await claimIfPending(page, t, store, log, signal).catch((e: unknown) => {
+      signal.throwIfAborted();
       if (o) o.error = (e as Error).message;
       log(`      ❌ ${(e as Error).message}`);
       return false;
@@ -286,7 +292,7 @@ async function claimPending(
  * `runGroup`, và `runGroup` chỉ chấp nhận `do_action` với `err_no === 0`.
  */
 export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult> {
-  const { page, log } = input;
+  const { log } = input;
   const rounds = input.maxRounds ?? MAX_ATTEMPTS;
 
   /** Nghỉ thêm theo cấu hình Dashboard; không có `pace` thì không chờ gì cả. */
@@ -294,14 +300,14 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
     const gap = paceGapMs(input.pace);
     if (gap <= 0) return;
     log(`   ⏸️  Nghỉ thêm ${(gap / 1000).toFixed(1)}s ${where} (Delay thao tác)`);
-    await sleep(gap);
+    await waitForDelay(gap, input.signal);
   };
 
   log('\n============================================================');
   log('🚀 LÀM NHIỆM VỤ FREE CREDITS');
   log('============================================================');
 
-  const { store, env, snap: first } = await bootstrap(input);
+  const { store, env, snap: first } = await measureStage('task-bootstrap', () => bootstrap(input), log);
   let snap = first;
   log(
     `📋 CapCut có ${snap.byKey.size} nhiệm vụ | đã nhận ${snap.earnedReward}/${snap.totalReward} credits\n`
@@ -318,59 +324,61 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
     });
   }
 
+  const groups = input.groups ?? GROUPS;
+  const proofBacked = new Set<string>();
+
   for (let attempt = 1; attempt <= rounds; attempt++) {
+    input.signal.throwIfAborted();
     // Nhận trước những nhiệm vụ đã đủ điều kiện, để chúng rụng khỏi danh sách
     // thay vì bắt cả nhóm chờ vô ích một do_action đã bắn từ trước.
-    if (await claimPending(page, snap, store, outcomes, log)) {
-      snap = await store.waitForSnapshot(Date.now() - 5000, 30000).catch(() => snap);
+    if (await claimPending(env.page, snap, store, outcomes, log, input.signal)) {
+      snap = await store.waitForSnapshot(Date.now() - 5000, 30_000, input.signal).catch(() => {
+        input.signal.throwIfAborted();
+        return snap;
+      });
     }
 
-    const picked = selectGroups(snap, GROUPS);
+    const picked = selectGroups(snap, groups, proofBacked);
     if (picked.length === 0) break;
     log(`🔄 Lần ${attempt}/${rounds} — ${picked.length} nhóm còn việc`);
 
     for (const { group, need } of picked) {
-      if (page.isClosed()) {
+      input.signal.throwIfAborted();
+      if (input.resolvePage) {
+        env.page = await input.resolvePage('mission:' + group.name);
+      }
+      if (env.page.isClosed()) {
         log('   ❌ Tab chính đã bị đóng — dừng ở đây');
         return { outcomes: [...outcomes.values()], snapshot: summarize(snap) };
       }
 
       log(`\n📌 ${group.name}`);
       log(`   cần: ${[...need].join(', ')}`);
-      const mark = Date.now();
-      const res = await runGroup(group, env, store, need);
+      const result = await runGroup(group, env, store, need);
+      if (result.snapshot) snap = result.snapshot;
 
-      for (const [key, val] of res) {
-        const o = outcomes.get(key);
-        if (!o) continue;
-        o.attempts++;
-        if (val instanceof Error) {
-          o.error = val.message;
-          o.dumpName = val instanceof StepError ? val.dumpName : null;
-          log(`   ❌ ${o.title} (+${o.reward}) — ${val.message}`);
+      for (const [key, evidence] of result.evidence) {
+        const outcome = outcomes.get(key);
+        if (!outcome) continue;
+        outcome.attempts++;
+
+        if (evidence.proof?.errNo === 0) {
+          proofBacked.add(key);
+          outcome.proof = evidence.proof;
+        }
+        if (evidence.state === 'verified') {
+          outcome.done = true;
+          outcome.error = undefined;
+          log(`   ✅ ${outcome.title} (+${outcome.reward}) — do_action err_no=0`);
+        } else if (evidence.state === 'proved-awaiting-snapshot') {
+          outcome.done = false;
+          outcome.error = 'Đã có do_action nhưng chưa nhận được task_status=4 mới.';
+          log(`   🟡 ${outcome.title} (+${outcome.reward}) — đã có do_action, chờ snapshot`);
         } else {
-          o.done = true;
-          o.proof = val;
-          log(`   ✅ ${o.title} (+${o.reward}) — do_action err_no=0`);
-        }
-      }
-
-      // Đối chiếu lại với CapCut, không tin bộ đếm nội bộ.
-      snap = await store.waitForSnapshot(mark, 45000).catch(() => snap);
-      for (const [key, t] of snap.byKey) {
-        const o = outcomes.get(key);
-        if (!o) continue;
-        if (t.status === 4) {
-          o.done = true;
-          continue;
-        }
-        // Nhánh dự phòng: kẹt ở trạng thái 2 thì thử bấm Claim.
-        if (t.status === 2 && need.has(key)) {
-          const ok = await claimIfPending(page, t, store, log).catch((e: unknown) => {
-            o.error = (e as Error).message;
-            return false;
-          });
-          if (ok) o.done = true;
+          outcome.done = false;
+          outcome.error = evidence.error?.message ?? 'Không xác minh được nhiệm vụ.';
+          outcome.dumpName = evidence.error instanceof StepError ? evidence.error.dumpName : null;
+          log(`   ❌ ${outcome.title} (+${outcome.reward}) — ${outcome.error}`);
         }
       }
 
@@ -379,11 +387,17 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
       await paceGap('sau nhóm nhiệm vụ');
     }
 
-    if (attempt < rounds && selectGroups(snap, GROUPS).length > 0) {
-      log('\n   ⏳ Còn nhiệm vụ chưa xong — chờ 20s cho backend cập nhật rồi thử lại');
-      await sleep(rand(18000, 22000));
+    if (attempt < rounds && selectGroups(snap, groups, proofBacked).length > 0) {
+      log('Còn nhiệm vụ chưa xác minh — chờ tối đa 8s cho task_list mới');
       await paceGap('trước lượt quét sau');
-      snap = await store.waitForSnapshot(Date.now() - 60000, 45000).catch(() => snap);
+      snap = await store.waitForSnapshot(
+        snap.at,
+        INTER_ROUND_WAIT_MS,
+        input.signal
+      ).catch(() => {
+        input.signal.throwIfAborted();
+        return snap;
+      });
     }
   }
 
@@ -394,8 +408,9 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
   // CapCut đã tính xong — đúng chuyện xảy ra lượt 2026-09-02 05:48.
   let stale = false;
   const final = await store
-    .waitForSnapshot(Date.now() - 3000, 25000)
+    .waitForSnapshot(snap.at, FINAL_SNAPSHOT_WAIT_MS, input.signal)
     .catch(() => {
+      input.signal.throwIfAborted();
       // Không đọc lại được `task_list`: tab chính chết là nguyên nhân đã đo.
       // Nói ra thay vì im lặng trả về snapshot cũ như thể nó còn đúng.
       stale = true;

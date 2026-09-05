@@ -43,6 +43,7 @@ export interface CapcutMissionEnv {
   /** Đường dẫn ảnh PNG thật để upload */
   sampleImage: string;
   log: (msg: string) => void;
+  signal: AbortSignal;
   /** Không có thì engine giữ đúng nhịp đã đo (xem `CapcutPace`). */
   pace?: CapcutPace;
 }

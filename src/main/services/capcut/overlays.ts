@@ -43,7 +43,7 @@
 
 import type { Page } from 'playwright-core';
 
-import { dump } from './diag';
+import { dump, StepError } from './diag';
 import { clickIfVisible } from './human';
 import type { LogFn } from './login';
 
@@ -225,8 +225,8 @@ async function closePageErrorModal(page: Page, log: LogFn): Promise<boolean> {
  *   bảng giá Pro        → "canvas_send_no_effect"
  *   trang lỗi           → "Không thấy nút Send message"
  *
- * Modal lạ thì KHÔNG đoán: ghi lại tiêu đề của nó + dump và trả `false`, để lần
- * sau có địa chỉ thật thay vì lại đi tìm một cái nút vẫn đang ở đó.
+ * A remaining blocker throws so every caller, including nested missions,
+ * stops before clicking covered controls. The boolean return is success-only.
  */
 export async function ensurePageUsable(page: Page, log: LogFn): Promise<boolean> {
   if ((await page.locator(BLOCKING_MASK).count().catch(() => 0)) === 0) return true;
@@ -248,5 +248,5 @@ export async function ensurePageUsable(page: Page, log: LogFn): Promise<boolean>
     `   ⚠️  Còn một modal chưa nhận diện được đang phủ trang: "${title}" — ` +
       'mọi click sau sẽ trượt' + (shot ? ` (hiện trường: ${shot})` : '')
   );
-  return false;
+  throw new StepError('Modal vẫn phủ trang; đã dừng thao tác để tránh click nhầm.', shot);
 }

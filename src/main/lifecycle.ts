@@ -16,7 +16,9 @@ export interface BeforeQuitEvent {
 }
 
 export type ShutdownDiagnosticCode =
-  | 'ERR_SHUTDOWN_TIMEOUT'
+  | 'ERR_SHUTDOWN_AUTOMATION_TIMEOUT'
+  | 'ERR_SHUTDOWN_AUTOMATION_STOP'
+  | 'ERR_SHUTDOWN_LOG_TIMEOUT'
   | 'ERR_SHUTDOWN_FLUSH'
   | 'ERR_SHUTDOWN_DB_CLOSE';
 
@@ -24,22 +26,53 @@ export interface SafeDiagnosticLogger {
   error(code: ShutdownDiagnosticCode, message: string): void;
 }
 
+export interface StoppableAutomation {
+  stop(code: 'APP_SHUTDOWN'): Promise<void>;
+}
+
 export interface ShutdownDependencies {
+  automation?: StoppableAutomation;
   db: CloseableDatabase;
   logBus?: FlushableLogBus;
   app: QuitApplication;
   logger?: SafeDiagnosticLogger;
-  timeoutMs?: number;
+  automationTimeoutMs?: number;
+  logFlushTimeoutMs?: number;
 }
 
 export interface ShutdownManager {
   handleBeforeQuit(event: BeforeQuitEvent): Promise<void>;
 }
 
+async function runBounded(
+  operation: () => Promise<void>,
+  timeoutMs: number,
+  logger: SafeDiagnosticLogger | undefined,
+  timeoutCode: ShutdownDiagnosticCode,
+  timeoutMessage: string,
+  failureCode: ShutdownDiagnosticCode,
+  failureMessage: string
+): Promise<void> {
+  let timer: NodeJS.Timeout | null = null;
+  const timeout = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), timeoutMs);
+  });
+  try {
+    const result = await Promise.race([
+      operation().then(() => 'done' as const),
+      timeout
+    ]);
+    if (result === 'timeout') logger?.error(timeoutCode, timeoutMessage);
+  } catch {
+    logger?.error(failureCode, failureMessage);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export function createShutdownManager(deps: ShutdownDependencies): ShutdownManager {
   let isShuttingDown = false;
   let isShutdownFinished = false;
-  const timeoutDuration = deps.timeoutMs ?? 2000;
 
   return {
     async handleBeforeQuit(event: BeforeQuitEvent): Promise<void> {
@@ -50,29 +83,28 @@ export function createShutdownManager(deps: ShutdownDependencies): ShutdownManag
       event.preventDefault();
 
       try {
+        if (deps.automation) {
+          await runBounded(
+            () => deps.automation!.stop('APP_SHUTDOWN'),
+            deps.automationTimeoutMs ?? 15_000,
+            deps.logger,
+            'ERR_SHUTDOWN_AUTOMATION_TIMEOUT',
+            'Automation stop timed out during shutdown.',
+            'ERR_SHUTDOWN_AUTOMATION_STOP',
+            'Automation stop failed during shutdown.'
+          );
+        }
+
         if (deps.logBus) {
-          let timeoutHandle: NodeJS.Timeout | null = null;
-
-          const timeoutPromise = new Promise<'timeout'>((resolve) => {
-            timeoutHandle = setTimeout(() => {
-              resolve('timeout');
-            }, timeoutDuration);
-          });
-
-          try {
-            const flushPromise = deps.logBus.flush().then(() => 'flushed' as const);
-            const raceResult = await Promise.race([flushPromise, timeoutPromise]);
-
-            if (raceResult === 'timeout') {
-              deps.logger?.error('ERR_SHUTDOWN_TIMEOUT', 'LogBus flush timed out during shutdown.');
-            }
-          } catch {
-            deps.logger?.error('ERR_SHUTDOWN_FLUSH', 'LogBus flush failed during shutdown.');
-          } finally {
-            if (timeoutHandle !== null) {
-              clearTimeout(timeoutHandle);
-            }
-          }
+          await runBounded(
+            () => deps.logBus!.flush(),
+            deps.logFlushTimeoutMs ?? 2_000,
+            deps.logger,
+            'ERR_SHUTDOWN_LOG_TIMEOUT',
+            'LogBus flush timed out during shutdown.',
+            'ERR_SHUTDOWN_FLUSH',
+            'LogBus flush failed during shutdown.'
+          );
         }
       } finally {
         try {

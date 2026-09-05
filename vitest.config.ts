@@ -9,8 +9,8 @@ export default defineConfig({
   test: {
     globals: false,
     environment: 'node',
-    include: ['src/**/__tests__/**/*.test.ts'],
-    exclude: ['node_modules', 'dist', 'dist-electron', 'scripts'],
+    include: ['src/**/__tests__/**/*.test.{ts,tsx}', 'scripts/**/__tests__/**/*.test.{js,mjs,ts}'],
+    exclude: ['node_modules', 'dist', 'dist-electron'],
     restoreMocks: true,
     clearMocks: true,
   },

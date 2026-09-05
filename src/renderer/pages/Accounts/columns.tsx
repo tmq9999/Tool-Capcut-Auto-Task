@@ -122,6 +122,8 @@ export const createAccountsColumns = (
           ? 'disabled'
           : status === 'waiting'
           ? 'waiting'
+          : status === 'stopped'
+          ? 'stopped'
           : 'done';
 
       return <Badge variant={badgeVariant} />;

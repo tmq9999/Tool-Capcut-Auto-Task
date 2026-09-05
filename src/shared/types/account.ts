@@ -1,4 +1,4 @@
-export type AccountStatus = 'active' | 'processing' | 'error' | 'disabled' | 'waiting' | 'done';
+export type AccountStatus = 'active' | 'processing' | 'error' | 'disabled' | 'waiting' | 'done' | 'stopped';
 
 export interface Account {
   id: string;

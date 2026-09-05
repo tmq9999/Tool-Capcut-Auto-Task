@@ -1,14 +1,36 @@
-import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { selectGroups } from '../missionRunner';
-import { parseTaskList } from '../taskApi';
-import type { MissionGroup } from '../types';
+import {
+  reconcileMissionEvidence,
+  selectGroups,
+} from '../missionRunner';
+import { parseTaskList, TaskStore } from '../taskApi';
+import type {
+  CapcutMissionEnv,
+  MissionGroup,
+} from '../types';
 
 // Snapshot DAU luot: chi capcut_web_newbie_register da xong.
 const SNAP = parseTaskList(fs.readFileSync('tools/fixtures/task-list-initial.json', 'utf8'))!;
 const SNAP_DONE = parseTaskList(fs.readFileSync('tools/fixtures/task-list-done.json', 'utf8'))!;
 const noop = async (): Promise<void> => {};
+
+const PWA_DONE_JSON = fs.readFileSync(
+  'tools/fixtures/task-list-done.json',
+  'utf8'
+);
+const ENV = {
+  page: {} as CapcutMissionEnv['page'],
+  context: {} as CapcutMissionEnv['context'],
+  sampleImage: 'C:/tmp/sample.png',
+  log: () => {},
+  signal: new AbortController().signal,
+} satisfies CapcutMissionEnv;
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const design: MissionGroup = {
   name: 'Design Studio',
@@ -94,5 +116,136 @@ describe('selectGroups — biến thể account', () => {
       'capcut_web_design_studio_ai_chat',
       'capcut_web_design_studio_canvas_edit',
     ]);
+  });
+});
+
+describe('reconcileMissionEvidence', () => {
+  it('uses a confirming snapshot received after proof but before the action settled', async () => {
+    vi.useFakeTimers();
+    const store = new TaskStore();
+    const group: MissionGroup = {
+      name: 'PWA', keys: ['capcut_web_pwa_install'], proofTimeoutMs: 12_000,
+      act: async () => {
+        store.pushAction({ actionKey: 'capcut_web_pwa_install', opId: 'proof-during-act', errNo: 0, errTips: '', at: Date.now() });
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        store.pushTaskList(PWA_DONE_JSON);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    };
+    const start = Date.now();
+    const result = reconcileMissionEvidence(group, ENV, store, new Set(group.keys));
+    await vi.runAllTimersAsync();
+    expect((await result).evidence.get('capcut_web_pwa_install')?.state).toBe('verified');
+    expect(Date.now() - start).toBe(1001);
+  });
+  it('consumes a PWA proof captured during act without a second 45 second wait', async () => {
+    vi.useFakeTimers();
+    const store = new TaskStore();
+    const group: MissionGroup = {
+      name: 'PWA',
+      keys: ['capcut_web_pwa_install'],
+      proofTimeoutMs: 12_000,
+      act: async () => {
+        store.pushAction({
+          actionKey: 'capcut_web_pwa_install',
+          opId: 'op-1',
+          errNo: 0,
+          errTips: '',
+          at: Date.now(),
+        });
+      },
+    };
+
+    const resultPromise = reconcileMissionEvidence(
+      group,
+      ENV,
+      store,
+      new Set(group.keys)
+    );
+    store.pushTaskList(PWA_DONE_JSON, Date.now() + 1);
+    const result = await resultPromise;
+
+    expect(result.evidence.get('capcut_web_pwa_install')).toMatchObject({
+      state: 'verified',
+      snapshotStatus: 4,
+      proof: { opId: 'op-1', errNo: 0 },
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('shares one 12 second budget when the confirming snapshot never arrives', async () => {
+    vi.useFakeTimers();
+    const store = new TaskStore();
+    const group: MissionGroup = {
+      name: 'PWA',
+      keys: ['capcut_web_pwa_install'],
+      proofTimeoutMs: 12_000,
+      act: async () => {},
+    };
+    const startedAt = Date.now();
+    const resultPromise = reconcileMissionEvidence(
+      group,
+      ENV,
+      store,
+      new Set(group.keys)
+    );
+    store.pushAction({
+      actionKey: 'capcut_web_pwa_install',
+      opId: 'op-2',
+      errNo: 0,
+      errTips: '',
+      at: Date.now(),
+    });
+
+    await vi.advanceTimersByTimeAsync(12_000);
+    const result = await resultPromise;
+
+    expect(result.evidence.get('capcut_web_pwa_install')).toMatchObject({
+      state: 'proved-awaiting-snapshot',
+      proof: { opId: 'op-2', errNo: 0 },
+    });
+    expect(Date.now() - startedAt).toBe(12_000);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('excludes a proof-backed task from later group selection despite a stale snapshot', () => {
+    const proofBacked = new Set(['capcut_web_pwa_install']);
+    expect(selectGroups(SNAP, [install], proofBacked)).toEqual([]);
+  });
+
+  it('logs mission action and reconciliation as separate stages', async () => {
+    const messages: string[] = [];
+    const store = new TaskStore();
+    const group: MissionGroup = {
+      name: 'PWA',
+      keys: ['capcut_web_pwa_install'],
+      proofTimeoutMs: 12_000,
+      act: async () => {
+        store.pushAction({
+          actionKey: 'capcut_web_pwa_install',
+          opId: 'op-timing',
+          errNo: 0,
+          errTips: '',
+          at: Date.now()
+        });
+        store.pushTaskList(PWA_DONE_JSON, Date.now() + 50_000);
+      }
+    };
+
+    await reconcileMissionEvidence(
+      group,
+      { ...ENV, log: (message) => messages.push(message) },
+      store,
+      new Set(group.keys)
+    );
+
+    expect(messages).toEqual(expect.arrayContaining([
+      expect.stringMatching(
+        /^stage=mission-action:pwa elapsedMs=\d+ outcome=success$/
+      ),
+      expect.stringMatching(
+        /^stage=mission-reconciliation:pwa elapsedMs=\d+ outcome=success$/
+      )
+    ]));
   });
 });

@@ -116,12 +116,24 @@ function splitLines(value: string): string[] {
  * instead of throwing, so the Dashboard can show it inline.
  */
 export function toRunConfig(state: AutomationConfigState): RunConfigResult {
-  const emailEntries = splitLines(state.emailList);
+  const manualEntries = state.emailList.split(/\r?\n/);
+  const hasManualEntry = manualEntries.some(
+    (line) => line.trim().length > 0
+  );
 
-  if (state.emailSourceMode === 'manual' && emailEntries.length === 0) {
+  if (state.emailSourceMode === 'manual' && !hasManualEntry) {
     return {
       ok: false,
-      message: 'Hãy nhập danh sách email theo định dạng email|password, hoặc chuyển sang chế độ API.'
+      message:
+        'Hãy nhập danh sách email theo định dạng email|password, ' +
+        'hoặc chuyển sang chế độ API.'
+    };
+  }
+
+  if (state.emailSourceMode === 'custom') {
+    return {
+      ok: false,
+      message: 'Chức năng Mail Domain (Custom) hiện đang tạm khóa. Vui lòng chọn API hoặc Danh sách thủ công.'
     };
   }
 
@@ -144,9 +156,7 @@ export function toRunConfig(state: AutomationConfigState): RunConfigResult {
       // Không gửi `service`: slug OTP là hằng của site (`CAPCUT_OTP_SERVICE`) và
       // do main process quyết, nên giá trị cũ trong app_settings không theo vào.
       ? { mode: 'api' as const, provider: state.emailApiProvider }
-      : state.emailSourceMode === 'custom'
-        ? { mode: 'custom' as const }
-        : { mode: 'manual' as const, entries: emailEntries },
+      : { mode: 'manual' as const, entries: manualEntries },
     /**
      * Vùng CHỈ đi kèm chế độ proxy key, và `random` thì không sinh khoá `region`
      * (để KiotProxy tự chọn — đúng đường đang chạy được). Proxy dán tay
@@ -241,9 +251,15 @@ export function fromPersistedConfig(
   // trị đọc từ đĩa bị bỏ ở đây thay vì lọt vào state của Dashboard.
   const { otpService: _legacyOtpService, ...knobs } = stored;
 
+  const emailSourceMode =
+    knobs.emailSourceMode === 'custom'
+      ? 'api'
+      : (knobs.emailSourceMode ?? DEFAULT_AUTOMATION_CONFIG.emailSourceMode);
+
   return {
     ...DEFAULT_AUTOMATION_CONFIG,
     ...knobs,
+    emailSourceMode,
     emailList: keep?.emailList ?? '',
     proxyList: keep?.proxyList ?? '',
     proxyKeyList: keep?.proxyKeyList ?? '',

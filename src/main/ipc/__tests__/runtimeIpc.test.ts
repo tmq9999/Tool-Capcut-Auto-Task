@@ -5,6 +5,7 @@ import { registerAutomationIpc } from '../automationIpc';
 import type { IpcRegistrar } from '../registerIpc';
 import { IPC_CHANNELS } from '../../../shared/contracts/ipc-channels';
 import { ProviderError } from '../../providers/ProviderError';
+import { AutomationTerminalError } from '../../services/AutomationTerminalError';
 import type { IpcEnvelope } from '../../../shared/schemas/ipc-envelope.schema';
 import type { AutomationRunProgressDTO } from '../../../shared/schemas/automation.schema';
 
@@ -34,10 +35,12 @@ class FakeIpcRegistrar implements IpcRegistrar {
 const IDLE_PROGRESS: AutomationRunProgressDTO = {
   runId: 'none',
   state: 'idle',
-  threadTotal: 0,
-  threadsStarted: 0,
-  threadsStopped: 0,
-  threadsFailed: 0,
+  workerTarget: 0,
+  workersActive: 0,
+  accountsAccepted: 0,
+  accountsCompleted: 0,
+  accountsFailed: 0,
+  accountsStopped: 0,
   message: 'Chưa chạy'
 };
 
@@ -376,6 +379,53 @@ describe('registerAutomationIpc', () => {
     expect(envelope).toEqual({
       success: false,
       error: { code: 'CONFIG_ERROR', message: 'Chưa cấu hình API key.' }
+    });
+  });
+
+  it('returns safe typed details when run preparation is blocked', async () => {
+    registerAutomationIpc(
+      registrar,
+      runService({
+        start: async () => {
+          throw new AutomationTerminalError(
+            'blocked',
+            {
+              code: 'INSUFFICIENT_FUNDS',
+              provider: 'gmail94',
+              details: {
+                requestedWorkers: 3,
+                reusableCount: 1,
+                balance: 1000,
+                unitPrice: 1000,
+                affordablePurchaseCount: 1
+              }
+            },
+            'Số dư Gmail94 không đủ cho toàn bộ số luồng ban đầu.'
+          );
+        }
+      }) as never,
+      emailService() as never
+    );
+
+    const envelope = await registrar.invoke(IPC_CHANNELS.RUN_START, {
+      ...validConfig,
+      threadCount: 3
+    });
+
+    expect(envelope).toEqual({
+      success: false,
+      error: {
+        code: 'INSUFFICIENT_FUNDS',
+        message: 'Số dư Gmail94 không đủ cho toàn bộ số luồng ban đầu.',
+        details: {
+          provider: 'gmail94',
+          requestedWorkers: 3,
+          reusableCount: 1,
+          balance: 1000,
+          unitPrice: 1000,
+          affordablePurchaseCount: 1
+        }
+      }
     });
   });
 

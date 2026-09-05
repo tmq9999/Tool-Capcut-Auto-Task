@@ -49,10 +49,12 @@ function log(id: string): CanonicalRuntimeLog {
 const IDLE: AutomationRunProgressDTO = {
   runId: 'none',
   state: 'idle',
-  threadTotal: 0,
-  threadsStarted: 0,
-  threadsStopped: 0,
-  threadsFailed: 0,
+  workerTarget: 0,
+  workersActive: 0,
+  accountsAccepted: 0,
+  accountsCompleted: 0,
+  accountsFailed: 0,
+  accountsStopped: 0,
   message: 'Chưa chạy'
 };
 
@@ -254,6 +256,37 @@ describe('DashboardController.stop', () => {
 
     expect(bridge.stopCalls).toBe(1);
   });
+
+  it('coalesces repeated Stop requests and refreshes actual state after teardown', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    bridge.run.stop = async () => {
+      bridge.stopCalls += 1;
+      await gate;
+      bridge.accountRows = [{ ...account('acc-1'), status: 'stopped' }];
+      bridge.runningThreads = [];
+      return { success: true, data: { success: true } };
+    };
+    bridge.run.progress = async () => ({ success: true, data: { ...IDLE, state: 'stopped', terminalReason: { code: 'USER_STOP' } } });
+    const controller = new DashboardController(bridge);
+    const first = controller.stop();
+    const second = controller.stop();
+    const countBeforeRelease = bridge.stopCalls;
+    release();
+    await Promise.all([first, second]);
+    expect(countBeforeRelease).toBe(1);
+    expect(controller.getState().accounts[0].status).toBe('stopped');
+    expect(controller.getState().progress.terminalReason?.code).toBe('USER_STOP');
+  });
+
+  it('reports transport failure and unlocks Stop so the user can retry', async () => {
+    bridge.run.stop = async () => { throw new Error('IPC connection lost'); };
+    const controller = new DashboardController(bridge);
+    await expect(controller.stop()).resolves.toBe(false);
+    expect(controller.getState().error).toContain('dừng');
+    bridge.run.stop = async () => ({ success: true, data: { success: true } });
+    await expect(controller.stop()).resolves.toBe(true);
+  });
 });
 
 describe('DashboardController live updates', () => {
@@ -283,10 +316,10 @@ describe('DashboardController live updates', () => {
     const controller = new DashboardController(bridge);
     controller.attach();
 
-    bridge.pushProgress({ ...IDLE, runId: 'run-1', state: 'running', threadTotal: 2, threadsStarted: 2 });
+    bridge.pushProgress({ ...IDLE, runId: 'run-1', state: 'running', workerTarget: 2, accountsAccepted: 2 });
 
     expect(controller.isRunning()).toBe(true);
-    expect(controller.getState().progress.threadsStarted).toBe(2);
+    expect(controller.getState().progress.accountsAccepted).toBe(2);
   });
 
   it('is not running once the run reports stopped', () => {
@@ -299,12 +332,46 @@ describe('DashboardController live updates', () => {
     expect(controller.isRunning()).toBe(false);
   });
 
+  it.each(['completed', 'stopped', 'blocked', 'failed'] as const)(
+    'treats %s as terminal',
+    (state) => {
+      const controller = new DashboardController(bridge);
+      controller.attach();
+      bridge.pushProgress({ ...IDLE, state, message: state });
+      expect(controller.isRunning()).toBe(false);
+    }
+  );
+
+  it('surfaces a blocked reason and keeps safe capacity details', () => {
+    const controller = new DashboardController(bridge);
+    controller.attach();
+    bridge.pushProgress({
+      ...IDLE,
+      state: 'blocked',
+      message: 'Số dư Gmail94 không đủ cho 3 luồng.',
+      terminalReason: {
+        code: 'INSUFFICIENT_FUNDS',
+        provider: 'gmail94',
+        details: {
+          requestedWorkers: 3,
+          reusableCount: 1,
+          balance: 1000,
+          unitPrice: 1000,
+          affordablePurchaseCount: 1
+        }
+      }
+    });
+
+    expect(controller.getState().error).toContain('Số dư Gmail94');
+    expect(controller.getState().progress.terminalReason?.details?.balance).toBe(1000);
+  });
+
   it('reloads the account grid while the run is still running', async () => {
     const controller = new DashboardController(bridge);
     controller.attach();
     const before = bridge.accountsListCalls;
 
-    bridge.pushProgress({ ...IDLE, state: 'running', threadTotal: 2, threadsStarted: 2 });
+    bridge.pushProgress({ ...IDLE, state: 'running', workerTarget: 2, accountsAccepted: 2 });
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
@@ -384,6 +451,12 @@ describe('DashboardController.removeAccounts', () => {
 });
 
 describe('DashboardController.stopThread', () => {
+  it('shows an actionable error when a retained profile could not be stopped', async () => {
+    bridge.run.stopThread = async () => ({ success: true, data: { stopped: false } });
+    const controller = new DashboardController(bridge);
+    await expect(controller.stopThread('acc-1')).resolves.toBe(false);
+    expect(controller.getState().error).toContain('dừng');
+  });
   it('stops one thread and refreshes the running list', async () => {
     bridge.runningThreads = [
       { accountId: 'acc-1', email: 'a@x.com', profileId: 'profile-1' },
@@ -415,7 +488,7 @@ describe('DashboardController.stopThread', () => {
     const controller = new DashboardController(bridge);
     controller.attach();
 
-    bridge.pushProgress({ ...IDLE, state: 'running', threadTotal: 1, threadsStarted: 1 });
+    bridge.pushProgress({ ...IDLE, state: 'running', workerTarget: 1, accountsAccepted: 1 });
 
     return Promise.resolve().then(() => Promise.resolve()).then(() => {
       expect(controller.getState().runningThreads.map((t) => t.accountId)).toEqual(['acc-5']);
@@ -546,24 +619,25 @@ describe('DashboardController với nguồn email domain tự sở hữu', () =>
     });
   });
 
-  it('gửi chế độ custom xuống Main khi chọn nguồn email domain', async () => {
+  it('chặn khởi chạy và báo lỗi khi chọn nguồn email domain vì chức năng đã bị khóa', async () => {
     const controller = new DashboardController(bridge);
     await controller.load();
     controller.updateConfig({ emailSourceMode: 'custom', threadCount: 4 });
 
     const started = await controller.start();
 
-    expect(started).toBe(true);
-    expect(bridge.startedConfigs[0].emailSource).toEqual({ mode: 'custom' });
-    expect(bridge.startedConfigs[0].threadCount).toBe(4);
+    expect(started).toBe(false);
+    expect(bridge.startedConfigs).toHaveLength(0);
+    expect(controller.getState().error).toContain('khóa');
   });
 
-  it('không đòi danh sách email khi dùng domain tự sở hữu', async () => {
+  it('không gửi cấu hình xuống Main khi dùng domain vì chức năng đã khóa', async () => {
     const controller = new DashboardController(bridge);
     await controller.load();
     controller.updateConfig({ emailSourceMode: 'custom', emailList: '' });
 
-    expect(await controller.start()).toBe(true);
-    expect(controller.getState().error).toBeNull();
+    expect(await controller.start()).toBe(false);
+    expect(bridge.startedConfigs).toHaveLength(0);
+    expect(controller.getState().error).toContain('khóa');
   });
 });

@@ -18,7 +18,6 @@ import {
   type CapcutTaskRunner,
   type IAccountSink,
   type IBrowserRuntimeApi,
-  type IEmailSourceApi,
   type ICapcutTaskProgressSink,
   type IProxyLeaseSource,
   type StartedProfile
@@ -33,19 +32,37 @@ import {
   type AutomationRunConfigDTO
 } from '../../../shared/schemas/automation.schema';
 import type { AcquiredProxyLease } from '../ProxyLeaseManager';
-import type { EmailPurchaseResult } from '../EmailPurchaseService';
+import type {
+  AutomationWorkItem,
+  AutomationWorkSourceFactory
+} from '../AutomationWorkSource';
 
 class CollectingSink implements ILogSink {
   public rows: unknown[] = [];
   insertBatch(logs: unknown[]): void { this.rows.push(...logs); }
 }
 
-class StubEmailSource implements IEmailSourceApi {
-  async purchase(): Promise<EmailPurchaseResult> {
-    return { purchased: [], failures: [] };
+const stubWorkSources: AutomationWorkSourceFactory = {
+  create: (config) => {
+    const entries = config.emailSource.mode === 'manual' ? config.emailSource.entries : ['worker@example.com|mail-pass'];
+    const items: AutomationWorkItem[] = entries.map((entry, i) => {
+      const [email, password] = entry.split('|');
+      return {
+        sourceId: 'man-' + (i + 1),
+        email,
+        emailPassword: password,
+        emailProvider: 'manual'
+      };
+    });
+    return {
+      kind: 'finite',
+      prepare: async (c) => ({ workerTarget: Math.min(c, items.length) }),
+      next: async () => items.shift() ?? null,
+      commit: () => {},
+      release: () => {}
+    };
   }
-  markConsumed(): void {}
-}
+};
 
 class StubProxySource implements IProxyLeaseSource {
   async acquire(): Promise<AcquiredProxyLease> {
@@ -188,7 +205,8 @@ function createService(
 ): AutomationRunService {
   return new AutomationRunService(
     {
-      emails: new StubEmailSource(),
+      workSources: stubWorkSources,
+      emailOtp: { readOtp: async () => '123456' },
       proxies: new StubProxySource(),
       browser: new StubBrowserRuntime(),
       accounts,
@@ -528,18 +546,18 @@ describe('AutomationRunService truyền nhịp Dashboard xuống engine', () => 
 
 describe('AutomationRunService khi ghi tiến độ thất bại', () => {
   it('vẫn kết thúc luồng và tắt profile', async () => {
-    const service = createService(new StubCapcutRunner(fullResult()), new ThrowingProgressSink());
+    const service = createService(new StubCapcutRunner(fullResult({ missing: [] })), new ThrowingProgressSink());
 
     await service.start(baseConfig());
     const summary = await service.waitForCompletion();
 
-    expect(summary.state).toBe('stopped');
-    expect(summary.threadsStarted).toBe(1);
+    expect(summary.state).toBe('completed');
+    expect(summary.accountsAccepted).toBe(1);
     expect(launcher.stopped).toEqual(['profile-1']);
   });
 
   it('vẫn cập nhật kết quả nhiệm vụ lên account', async () => {
-    const service = createService(new StubCapcutRunner(fullResult()), new ThrowingProgressSink());
+    const service = createService(new StubCapcutRunner(fullResult({ missing: [] })), new ThrowingProgressSink());
 
     await service.start(baseConfig());
     await service.waitForCompletion();
@@ -581,19 +599,14 @@ describe('AutomationRunService từ chối module chưa implement', () => {
       const progress = new RecordingProgressSink();
       const service = createService(runner, progress);
 
-      await service.start(baseConfig({ module }));
-      await service.waitForCompletion();
-      logBus.flush();
-
-      const rows = sink.rows as Array<{ status: string; message: string }>;
-      const refusal = rows.find((row) => row.message.includes('chưa được implement'));
+      await expect(service.start(baseConfig({ module }))).rejects.toMatchObject({
+        state: 'blocked',
+        reason: { code: 'PROVIDER_CONFIG_ERROR' }
+      });
 
       expect(runner.calls).toBe(0);
       expect(progress.calls).toHaveLength(0);
-      expect(refusal?.status).toBe('WARNING');
-      expect(refusal?.message).toContain(module);
-      // Browser vẫn được mở rồi tắt: phần proxy/profile/mailbox vẫn được chứng minh.
-      expect(launcher.stopped).toHaveLength(1);
+      expect(launcher.stopped).toHaveLength(0);
     });
   }
 
@@ -605,5 +618,42 @@ describe('AutomationRunService từ chối module chưa implement', () => {
     await service.waitForCompletion();
 
     expect(runner.calls).toBe(1);
+  });
+});
+
+class RejectingCapcutRunner implements CapcutTaskRunner {
+  async runAccount(): Promise<CapcutAccountResult> {
+    throw new Error('signup failed');
+  }
+}
+
+describe('AutomationRunService task progress workload failures and incomplete results', () => {
+  it('preserves a CapCut workload error after launcher cleanup', async () => {
+    const service = createService(new RejectingCapcutRunner());
+    await service.start(baseConfig());
+    const summary = await service.waitForCompletion();
+
+    expect(accounts.updates.at(-1)?.data).toMatchObject({
+      status: 'error',
+      automationStep: 'Lỗi khi làm nhiệm vụ'
+    });
+    expect(summary.accountsFailed).toBe(1);
+    expect(summary.accountsCompleted).toBe(0);
+    expect(launcher.stopped).toEqual(['profile-1']);
+  });
+
+  it('treats a fresh incomplete CapCut result as one failed account', async () => {
+    const progress = new RecordingProgressSink();
+    const service = createService(new StubCapcutRunner(fullResult()), progress);
+    await service.start(baseConfig());
+    const summary = await service.waitForCompletion();
+
+    expect(accounts.updates.at(-1)?.data).toMatchObject({
+      status: 'error',
+      automationStep: 'Còn thiếu 1 nhiệm vụ'
+    });
+    expect(summary.accountsFailed).toBe(1);
+    expect(summary.accountsCompleted).toBe(0);
+    expect(progress.calls[0].rows.some((row) => row.status === 4)).toBe(true);
   });
 });

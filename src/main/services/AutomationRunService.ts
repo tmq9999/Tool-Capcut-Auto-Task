@@ -1,16 +1,25 @@
 import crypto from 'node:crypto';
 import type { BrowserContext as CapcutContext, Page as CapcutPage } from 'playwright-core';
 import { ProviderError } from '../providers/ProviderError';
+import { AutomationTerminalError } from './AutomationTerminalError';
 import { generateCapcutPassword } from './passwordGenerator';
+import { measureStage } from './stageTiming';
 import type { BrowserLauncher, LauncherProxy } from './capcut/launcher';
 import type { LogBus } from './LogBus';
 import type { AcquiredProxyLease } from './ProxyLeaseManager';
-import type { EmailPurchaseResult } from './EmailPurchaseService';
-import type { EmailSourceProvider } from '../../shared/schemas/provider.schema';
+import type {
+  AutomationWorkItem,
+  AutomationWorkSource,
+  AutomationWorkSourceFactory,
+  SourceReadiness
+} from './AutomationWorkSource';
 import type {
   AutomationRunConfigDTO,
+  AutomationRunCountersDTO,
   AutomationRunProgressDTO,
   AutomationRunState,
+  AutomationTerminalCode,
+  AutomationTerminalReasonDTO,
   BrowserRuntime
 } from '../../shared/schemas/automation.schema';
 import {
@@ -50,32 +59,18 @@ export interface IBrowserRuntimeApi {
     headless: boolean;
     proxy?: BrowserProxySettings;
     browser?: BrowserRuntime;
+    signal?: AbortSignal;
+    onProfileStarted?: (profileId: string) => void;
   }): Promise<StartedProfile>;
   stopProfile(profileId: string): Promise<void>;
 }
 
-export interface IEmailSourceApi {
-  purchase(
-    provider: EmailSourceProvider,
-    count: number,
-    options?: { service?: string }
-  ): Promise<EmailPurchaseResult>;
-  markConsumed(purchasedEmailId: string, accountId: string | null): void;
-  /**
-   * Nhả hộp thư đã thuê về hàng chờ khi luồng chết trước khi dùng tới nó.
-   * Không có nó thì mỗi lỗi hạ tầng (launcher Multilogin tắt, proxy chết) là một
-   * lần mất tiền — đo 04/09/2026 với `songhajun652@gmail.com`.
-   */
-  release?(purchasedEmailId: string): void;
-  /**
-   * Đọc OTP của mailbox đã mua. Tuỳ chọn để test cũ không phải khai thêm; thiếu
-   * nó thì đường ĐĂNG KÝ không chạy được và engine sẽ báo lỗi rõ thay vì treo.
-   */
-  readOtp?(purchasedEmailId: string, type?: string): Promise<string | null>;
+export interface IEmailOtpSource {
+  readOtp(purchasedEmailId: string, type?: string): Promise<string | null>;
 }
 
 export interface IProxyLeaseSource {
-  acquire(): Promise<AcquiredProxyLease>;
+  acquire(signal?: AbortSignal): Promise<AcquiredProxyLease>;
   release(lease: AcquiredProxyLease): Promise<void>;
   releaseAll(): Promise<void>;
   /**
@@ -105,23 +100,12 @@ export interface CapcutAccountResult {
   /**
    * Ưu đãi Pro đọc được từ DOM, dạng câu để hiển thị — ví dụ `Pro trial 7 ngày`
    * hoặc `Không có ưu đãi`. `undefined` khi cổng trial không đọc được gì.
-   *
-   * Đây là nguồn của cột `subscription` trong bảng `accounts` và của cột
-   * Subscription khi xuất account (AGENTS.md §21); trước 04/09/2026 cổng trial chỉ
-   * LOG con số rồi bỏ, nên cột đó luôn rỗng.
    */
   subscription?: string;
   /** Account bị bỏ qua có chủ ý (ví dụ không có ưu đãi trial), không phải lỗi. */
   skipped?: boolean;
   /**
    * Tiến độ TỪNG nhiệm vụ, để lưu xuống SQLite (`docs/MERGE-PLAN.md` §4 Pha 5).
-   *
-   * `status` là `task_status` của CHÍNH CapCut (1 chưa xong · 2 chờ nhận · 4 xong)
-   * chứ không phải cờ nội bộ: bộ đếm nội bộ của bản CLI đã đo được là báo THỪA,
-   * nên chỉ con số của CapCut mới so sánh được với lượt sau.
-   *
-   * `opId` là `op_id` của `do_action` (`<task_key>_<userId>_<YYYY-MM-DD>`) — giữ
-   * nguyên khái niệm chống ghi trùng của `ledger.ts` bên engine CLI.
    */
   tasks: Array<{
     key: string;
@@ -148,26 +132,14 @@ export interface CapcutTaskRunner {
     /**
      * true khi email của luồng vừa được thuê/mua trong lượt chạy này, nên account
      * CHƯA tồn tại trên CapCut và phải đi thẳng đường ĐĂNG KÝ.
-     *
-     * Bắt buộc (không optional) có chủ ý: lỗi đã xảy ra chính là không ai truyền
-     * cờ tương ứng, nên để TypeScript ép mọi call site phải nói rõ.
      */
     isNewAccount: boolean;
+    signal: AbortSignal;
     /** Nguồn OTP của riêng luồng này; chỉ đường ĐĂNG KÝ cần. */
     getOtp?: () => Promise<string>;
     /** `retryCount` của Dashboard, đã đổi sang số lượt quét lại nhiệm vụ. */
     maxRounds?: number;
-    /**
-     * Hai ô delay của Dashboard, đã đổi tên sang thuật ngữ của engine. Engine chỉ
-     * dùng chúng để CHẬM HƠN nhịp đã đo (có sàn ở `humanType`), nên đặt 0 không
-     * làm bot gõ nhanh hơn khoảng an toàn.
-     */
     pace?: { stepMinMs: number; stepMaxMs: number; typeMinMs: number; typeMaxMs: number };
-    /**
-     * Ô "Bỏ qua account không có trial" của Dashboard. Bắt buộc truyền (không
-     * optional) vì lỗi cũ đúng là KHÔNG ai truyền: engine đọc `options
-     * .skipWithoutTrial` nên cờ luôn `false` bất kể người dùng chọn gì.
-     */
     skipWithoutTrial: boolean;
     log: (status: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR', step: string, message: string) => void;
   }): Promise<CapcutAccountResult>;
@@ -175,38 +147,20 @@ export interface CapcutTaskRunner {
 
 /**
  * Nơi lưu tiến độ từng nhiệm vụ xuống SQLite.
- *
- * Khai như một collaborator (không import repository) vì AGENTS.md §11 buộc mọi
- * SQL nằm sau tầng repository, và §7 buộc phụ thuộc chảy vào trong: service chỉ
- * biết "đưa rows vào", chỗ wiring mới biết bảng nào.
  */
 export interface ICapcutTaskProgressSink {
   record(accountId: string, rows: CapcutAccountResult['tasks']): void;
 }
 
 export interface AutomationRunCollaborators {
-  emails: IEmailSourceApi;
+  workSources: AutomationWorkSourceFactory;
+  emailOtp: IEmailOtpSource;
   proxies: IProxyLeaseSource;
   browser: IBrowserRuntimeApi;
   accounts: IAccountSink;
   logBus: Pick<LogBus, 'emit'>;
-  /**
-   * Mở profile KÈM phiên Playwright. Có thì Multilogin đi đường này (xcli hoặc
-   * api-v3 tuỳ `app_settings.browser.multilogin.launcher`); không có thì rơi về
-   * `browser.startProfile` như trước — nhờ vậy các browser chưa hỗ trợ vẫn báo
-   * `PROVIDER_NOT_IMPLEMENTED` y như cũ.
-   */
   launcher?: () => BrowserLauncher | null;
-  /** Không có thì luồng chỉ giữ browser `testDurationMs` như trước khi gộp. */
   capcut?: CapcutTaskRunner;
-  /**
-   * Nơi lưu tiến độ từng nhiệm vụ. Tuỳ chọn để mọi test/script cũ không phải khai
-   * thêm; không có thì luồng chạy y như trước, chỉ là lượt sau không biết nhiệm vụ
-   * nào đã xong.
-   *
-   * Service này KHÔNG tự viết SQL (AGENTS.md §11): chỗ wiring cắm vào
-   * `AccountTaskRepository`.
-   */
   taskProgress?: ICapcutTaskProgressSink;
 }
 
@@ -215,9 +169,14 @@ export interface AutomationRunDeps {
   nextId?: () => string;
 }
 
-export interface AutomationRunSummary extends AutomationRunProgressDTO {
+type ThreadOutcome =
+  | { kind: 'completed'; status: 'done'; step: string }
+  | { kind: 'failed'; status: 'error'; step: string }
+  | { kind: 'stopped'; status: 'stopped'; step: string };
+
+export type AutomationRunSummary = AutomationRunProgressDTO & {
   startedProfiles: string[];
-}
+};
 
 /** One live thread, addressable so the UI can stop just this one. */
 export interface RunningThreadInfo {
@@ -226,69 +185,73 @@ export interface RunningThreadInfo {
   profileId: string;
 }
 
-interface ThreadPlan {
-  email: string;
-  emailProvider: string;
-  emailPassword?: string;
-  purchasedEmailId?: string;
-  directProxy?: BrowserProxySettings;
-}
-
 interface ThreadRuntime {
   accountId: string;
   email: string;
-  /** Mật khẩu CapCut đã sinh cho account này; bước làm nhiệm vụ cần để đăng nhập. */
   capcutPassword: string;
-  /** Mailbox đã mua cho luồng này; cần để đọc OTP ở đường đăng ký. */
   purchasedEmailId?: string;
   profileId?: string;
-  /**
-   * Cổng remote-debugging của profile. Launcher chỉ publish cổng này khi profile
-   * được start kèm automation type, nên giữ lại đây để bước làm nhiệm vụ
-   * `connectOverCDP` vào đúng browser của luồng này.
-   */
   port?: number | null;
   lease?: AcquiredProxyLease;
-  /**
-   * Bước cuối mà phần nhiệm vụ đã kết luận. `shutdownThread` phải TÔN TRỌNG nó:
-   * ghi đè bằng "Đã dừng sau khi kiểm tra kết nối" là xoá kết quả thật khỏi UI —
-   * câu đó là của thời engine chưa được cắm vào, khi luồng chỉ giữ browser rồi tắt.
-   */
+  directProxy?: BrowserProxySettings;
   outcomeStep?: string;
-  /** Phiên Playwright của luồng này, chỉ có khi profile mở qua `BrowserLauncher`. */
+  outcome?: ThreadOutcome;
   page?: CapcutPage;
   context?: CapcutContext;
-  /** Ai đã mở thì người đó đóng — không để hai đường tranh nhau tắt một profile. */
   launcher?: BrowserLauncher;
+  completionPromise?: Promise<void>;
+  notifyDone?: () => void;
+  profileStopPromise?: Promise<boolean>;
+  profileStopFailed?: boolean;
 }
 
-function parseManualEntry(entry: string): { email: string; password?: string } | null {
-  const parts = entry.split('|').map((part) => part.trim());
-  const email = parts[0];
-  if (!email || !email.includes('@')) return null;
-  return { email, password: parts[1] || undefined };
+class InitialWaveBarrier {
+  private arrived = 0;
+  private open = false;
+  private release: () => void = () => {};
+  private readonly ready = new Promise<void>((resolve) => {
+    this.release = resolve;
+  });
+
+  constructor(private readonly target: number) {
+    if (target === 0) this.openBarrier();
+  }
+
+  arrive(): void {
+    if (this.open) return;
+    this.arrived += 1;
+    if (this.arrived >= this.target) this.openBarrier();
+  }
+
+  private openBarrier(): void {
+    if (this.open) return;
+    this.open = true;
+    this.release();
+  }
+
+  async wait(signal: AbortSignal): Promise<void> {
+    if (this.open) return;
+    signal.throwIfAborted();
+    let onAbort: (() => void) | null = null;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(signal.reason ?? new Error('Aborted'));
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      await Promise.race([this.ready, aborted]);
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
+    }
+  }
 }
 
-/** Accepts host:port, host:port:user:pass. */
 /**
- * Các scheme proxy đọc được. `xcli` nhận `--proxy-type` là một trong số này,
- * `api-v3` nhận qua `MultiloginProxyConnection.type`.
+ * Các scheme proxy đọc được.
  */
 const PROXY_SCHEMES = ['http', 'https', 'socks4', 'socks5'] as const;
 
 /**
- * Đọc một dòng proxy trực tiếp. Hai định dạng, scheme là tuỳ chọn:
- *
- *   ip:port[:user[:pass]]                  → mặc định http
- *   scheme://ip:port[:user[:pass]]         → scheme quyết định `type`
- *
- * Bản cũ chỉ `split(':')` và GHIM `type: 'http'`, nên `socks5://1.2.3.4:1080` ra
- * `host='socks5'`, `port=NaN` → `null`. Mà `buildThreadPlans` loại dòng `null`
- * KHÔNG LOG GÌ rồi gán proxy theo index ⇒ luồng thiếu proxy chạy bằng IP THẬT của
- * máy, im lặng. Đó là lý do hàm này phải đọc được đủ định dạng, và lý do người
- * gọi phải TỪ CHỐI cả lượt chạy khi có dòng trả `null` (xem `buildThreadPlans`).
- *
- * @returns `null` khi dòng không đọc được — người gọi KHÔNG được phép bỏ qua.
+ * Đọc một dòng proxy trực tiếp.
  */
 export function parseDirectProxy(entry: string): BrowserProxySettings | null {
   const raw = entry.trim();
@@ -316,12 +279,6 @@ export function parseDirectProxy(entry: string): BrowserProxySettings | null {
   return settings;
 }
 
-/**
- * Proxy của app (`{host, port: number, type}`) sang dạng launcher cần
- * (`{scheme, host, port: string}`). Giữ nguyên user/pass nếu có — `XcliLauncher`
- * sẽ tự từ chối bằng `CONFIG_ERROR` vì engine chưa từng đo cờ user/pass cho
- * `xcli`, thà báo rõ hơn là vỡ giữa phiên bằng ERR_PROXY_CONNECTION_FAILED.
- */
 function toLauncherProxy(proxy?: BrowserProxySettings): LauncherProxy | null {
   if (!proxy) return null;
   const mapped: LauncherProxy = {
@@ -345,13 +302,6 @@ function leaseToProxySettings(lease: AcquiredProxyLease): BrowserProxySettings {
   return settings;
 }
 
-/**
- * Executes one Dashboard run: obtain a mailbox per thread, give each thread its
- * own proxy, launch the configured number of browsers, hold them for the
- * connectivity window, then shut everything down. There is no automation script
- * yet, so the hold is deliberate: it proves the browser, proxy and mailbox
- * plumbing works end to end.
- */
 export class AutomationRunService {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly nextId: () => string;
@@ -360,24 +310,27 @@ export class AutomationRunService {
   private progress: AutomationRunProgressDTO = {
     runId: 'none',
     state: 'idle',
-    threadTotal: 0,
-    threadsStarted: 0,
-    threadsStopped: 0,
-    threadsFailed: 0,
+    workerTarget: 0,
+    workersActive: 0,
+    accountsAccepted: 0,
+    accountsCompleted: 0,
+    accountsFailed: 0,
+    accountsStopped: 0,
     message: 'Chưa chạy'
   };
 
   private activeRun: Promise<AutomationRunSummary> | null = null;
+  private starting: Promise<{ runId: string }> | null = null;
+  private stopping: Promise<void> | null = null;
   private lastSummary: AutomationRunSummary | null = null;
-  private stopRequested = false;
-  /** Resolved once when a stop is requested; every worker races its hold against it. */
-  private stopSignal: Promise<void> | null = null;
-  private fireStop: (() => void) | null = null;
+  private runAbort: AbortController | null = null;
+  private acquisitionAbort: AbortController | null = null;
+  private terminalIntent: AutomationTerminalReasonDTO | null = null;
+  private readonly iterationAbort = new Map<string, AbortController>();
+  private cleanupFailures = 0;
   private startedProfiles: string[] = [];
-  /** Live threads keyed by account id. A thread leaves the map as soon as it stops. */
   private readonly activeThreads = new Map<string, ThreadRuntime>();
   private runningResolvers: Array<() => void> = [];
-  /** True once the first wave of threads has finished launching. */
   private firstWaveDone = false;
 
   constructor(
@@ -400,119 +353,44 @@ export class AutomationRunService {
   }
 
   isRunning(): boolean {
-    return this.activeRun !== null;
+    return this.activeRun !== null || this.starting !== null || this.stopping !== null;
   }
 
-  private publish(state: AutomationRunState, message: string, patch: Partial<AutomationRunProgressDTO> = {}): void {
-    this.progress = { ...this.progress, ...patch, state, message };
-    for (const listener of this.listeners) {
-      listener(this.progress);
-    }
+  private publish(
+    state: AutomationRunState,
+    message: string,
+    patch: Partial<AutomationRunProgressDTO> = {}
+  ): void {
+    this.progress = {
+      ...this.progress,
+      ...patch,
+      state,
+      message
+    };
+    for (const listener of this.listeners) listener(this.progress);
   }
 
-  private log(status: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR', email: string, step: string, message: string, accountId?: string): void {
+  private increment(
+    key: keyof Pick<
+      AutomationRunCountersDTO,
+      'accountsAccepted' | 'accountsCompleted' | 'accountsFailed' | 'accountsStopped'
+    >
+  ): void {
+    this.publish(this.progress.state, this.progress.message, {
+      [key]: this.progress[key] + 1
+    });
+  }
+
+  private log(
+    status: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR',
+    email: string,
+    step: string,
+    message: string,
+    accountId?: string
+  ): void {
     this.deps.logBus.emit({ accountId, email, step, status, message });
   }
 
-  private async buildThreadPlans(config: AutomationRunConfigDTO): Promise<ThreadPlan[]> {
-    /**
-     * Chặn cấu hình chắc chắn hỏng TRƯỚC khi mua email. `start()` gọi hàm này rồi
-     * mới tới `launchThread`, nên nếu để browser fail ở dưới thì tiền hộp thư đã
-     * tiêu xong mới báo lỗi (audit 04/09/2026).
-     */
-    if (!isBrowserImplemented(config.browser)) {
-      throw new ProviderError(
-        'CONFIG_ERROR',
-        'Browser "' + config.browser + '" chưa được tích hợp nên không mở được profile nào. ' +
-          'Hiện chỉ dùng được: ' + IMPLEMENTED_BROWSER_RUNTIMES.join(', ') + '.'
-      );
-    }
-
-    const directProxies = config.proxy.mode === 'direct'
-      ? this.parseDirectProxyList(config.proxy.entries, config.threadCount)
-      : [];
-
-    this.assertLauncherSupportsConfig(config, directProxies);
-
-    let plans: ThreadPlan[];
-    const source = config.emailSource;
-
-    if (source.mode === 'api' || source.mode === 'custom') {
-      const isCustomDomain = source.mode === 'custom';
-      const provider: EmailSourceProvider = source.mode === 'custom'
-        ? 'customdomain'
-        : source.provider;
-
-      this.log(
-        'INFO',
-        'system',
-        'Email',
-        isCustomDomain
-          ? 'Đang tạo ' + config.threadCount + ' email trên domain tự sở hữu...'
-          : 'Đang mua ' + config.threadCount + ' email từ ' + provider + '...'
-      );
-
-      const result = await this.deps.emails.purchase(provider, config.threadCount, {
-        service: source.mode === 'custom' ? undefined : source.service
-      });
-
-      for (const failure of result.failures) {
-        this.log('WARNING', 'system', 'Email', 'Lấy email thất bại: ' + failure);
-      }
-
-      if (result.purchased.length === 0) {
-        throw new ProviderError(
-          'CONFIG_ERROR',
-          isCustomDomain
-            ? 'Không tạo được email nào trên domain tự sở hữu. Kiểm tra domain trong Settings.'
-            : 'Không mua được email nào từ ' + provider + '. Kiểm tra API key và số dư.',
-          provider
-        );
-      }
-
-      plans = result.purchased.map((row) => ({
-        email: row.email,
-        emailProvider: row.provider,
-        purchasedEmailId: row.id
-      }));
-    } else {
-      const parsed = source.entries.flatMap((entry) => {
-        const row = parseManualEntry(entry);
-        return row ? [row] : [];
-      });
-
-      if (parsed.length === 0) {
-        throw new ProviderError(
-          'CONFIG_ERROR',
-          'Danh sách email thủ công đang trống hoặc không đúng định dạng email|password.'
-        );
-      }
-
-      plans = parsed.slice(0, config.threadCount).map((row) => ({
-        email: row.email,
-        emailProvider: 'manual',
-        emailPassword: row.password
-      }));
-    }
-
-    return plans.slice(0, config.threadCount).map((plan, index) => ({
-      ...plan,
-      directProxy: config.proxy.mode === 'direct' ? directProxies[index] : undefined
-    }));
-  }
-
-  /**
-   * Đọc danh sách proxy dán tay. NÉM khi có dòng hỏng hoặc khi không đủ proxy cho
-   * số luồng — KHÔNG bao giờ lặng lẽ chạy tiếp với ít proxy hơn.
-   *
-   * Bản cũ dùng `flatMap` loại dòng không đọc được rồi gán proxy theo index, nên
-   * dán 5 dòng mà 2 dòng có `socks5://` thì 3 luồng có proxy còn **2 luồng chạy
-   * bằng IP thật của máy**, không một dòng cảnh báo. Với công việc này thì lộ IP
-   * còn tệ hơn là không chạy, nên đây là chỗ duy nhất đúng để dừng lại.
-   *
-   * Danh sách RỖNG vẫn hợp lệ: đó là lựa chọn có chủ ý "chạy không proxy" và cũng
-   * là mặc định của Dashboard.
-   */
   private parseDirectProxyList(entries: string[], threadCount: number): BrowserProxySettings[] {
     if (entries.length === 0) return [];
 
@@ -546,18 +424,6 @@ export class AutomationRunService {
     return parsed;
   }
 
-  /**
-   * Chặn hai tổ hợp mà launcher `xcli` không làm được, NGAY LÚC BẤM BẮT ĐẦU.
-   *
-   * `xcli` là mặc định (`settings.schema.ts`), và nó ném `CONFIG_ERROR` khi proxy
-   * có user/pass (`XcliLauncher.ts:139`) — trong khi placeholder Dashboard lại mời
-   * dán đúng `IP:PORT:USER:PASS`. Bản cũ để lỗi đó nổ ở giữa phiên, tức là SAU khi
-   * đã mua email; mỗi lần nổ là một hộp thư đã trả tiền.
-   *
-   * Headless thì KHÔNG chặn: nó là tuỳ chọn, không phải điều kiện chạy. Nhưng
-   * `xcli` bỏ qua nó im lặng (`XcliLauncher.ts:157`) nên phải nói ra, không thì
-   * người dùng bật Headless rồi thấy N cửa sổ Chrome bung lên mà không hiểu.
-   */
   private assertLauncherSupportsConfig(
     config: AutomationRunConfigDTO,
     directProxies: BrowserProxySettings[]
@@ -586,15 +452,145 @@ export class AutomationRunService {
     }
   }
 
-  private async launchThread(
-    plan: ThreadPlan,
-    config: AutomationRunConfigDTO
-  ): Promise<ThreadRuntime | null> {
+  private recordOutcome(thread: ThreadRuntime, outcome: ThreadOutcome): void {
+    if (thread.outcome) return;
+    thread.outcome = outcome;
+    this.deps.accounts.update(thread.accountId, {
+      status: outcome.status,
+      automationStep: outcome.step
+    });
+    if (outcome.kind === 'completed') this.increment('accountsCompleted');
+    if (outcome.kind === 'failed') this.increment('accountsFailed');
+    if (outcome.kind === 'stopped') this.increment('accountsStopped');
+  }
+
+  private acceptTerminalError(error: unknown): void {
+    if (this.terminalIntent) return;
+
+    if (error instanceof AutomationTerminalError) {
+      this.terminalIntent = error.reason;
+      this.acquisitionAbort?.abort(error);
+      if (error.state === 'failed') {
+        for (const controller of this.iterationAbort.values()) {
+          controller.abort(error);
+        }
+      }
+      this.publish(error.state, error.message, { terminalReason: error.reason });
+      return;
+    }
+
+    if (error instanceof ProviderError) {
+      let code: AutomationTerminalCode;
+      if (error.code === 'AUTH_ERROR') code = 'PROVIDER_AUTH_REQUIRED';
+      else if (error.code === 'CONFIG_ERROR') code = 'PROVIDER_CONFIG_ERROR';
+      else if (error.code === 'INSUFFICIENT_FUNDS') code = 'INSUFFICIENT_FUNDS';
+      else code = 'PROVIDER_RETRY_EXHAUSTED';
+      const reason: AutomationTerminalReasonDTO = {
+        code,
+        ...(error.serviceName ? { provider: error.serviceName } : {})
+      };
+      this.terminalIntent = reason;
+      this.acquisitionAbort?.abort(error);
+      this.publish('blocked', error.message, { terminalReason: reason });
+      return;
+    }
+
+    const message = error instanceof Error ? error.message : 'Lỗi không xác định.';
+    const reason: AutomationTerminalReasonDTO = { code: 'INTERNAL_ERROR' };
+    this.terminalIntent = reason;
+    this.acquisitionAbort?.abort(error);
+    for (const controller of this.iterationAbort.values()) {
+      controller.abort(error);
+    }
+    this.publish('failed', message, { terminalReason: reason });
+  }
+
+  private async closeOwnedProfile(thread: ThreadRuntime): Promise<boolean> {
+    if (thread.profileStopPromise) return thread.profileStopPromise;
+    const profileId = thread.profileId;
+    if (!profileId) return false;
+    const stop = (async (): Promise<boolean> => {
+      try {
+        if (thread.launcher) await thread.launcher.stop(profileId);
+        else await this.deps.browser.stopProfile(profileId);
+        thread.profileId = undefined;
+        thread.profileStopFailed = false;
+        this.activeThreads.delete(thread.accountId);
+        return true;
+      } catch {
+        thread.profileStopFailed = true;
+        this.log(
+          'WARNING',
+          thread.email,
+          'Browser',
+          'Không dừng được browser profile trong lúc thu hồi tài nguyên.',
+          thread.accountId
+        );
+        return false;
+      }
+    })();
+    thread.profileStopPromise = stop;
+    return stop;
+  }
+
+  private noteCleanupFailure(
+    thread: ThreadRuntime | undefined,
+    resource: 'browser-profile' | 'proxy-lease' | 'mailbox-reservation'
+  ): void {
+    this.cleanupFailures += 1;
+    this.log(
+      'WARNING',
+      thread?.email ?? 'system',
+      'Cleanup',
+      'Không thu hồi được tài nguyên: ' + resource + '.',
+      thread?.accountId
+    );
+  }
+
+  private async cleanupIteration(
+    source: AutomationWorkSource,
+    item: AutomationWorkItem | null,
+    committed: boolean,
+    thread: ThreadRuntime | undefined,
+    lease: AcquiredProxyLease | undefined
+  ): Promise<void> {
+    if (item && !committed) {
+      try {
+        source.release(item);
+      } catch {
+        this.noteCleanupFailure(thread, 'mailbox-reservation');
+      }
+    }
+
+    if (thread) {
+      const hadProfile = thread.profileId !== undefined;
+      const stopped = await this.closeOwnedProfile(thread);
+      if (hadProfile && !stopped) {
+        this.noteCleanupFailure(thread, 'browser-profile');
+      }
+      this.iterationAbort.delete(thread.accountId);
+    }
+
+    if (lease) {
+      try {
+        await this.deps.proxies.release(lease);
+      } catch {
+        this.noteCleanupFailure(thread, 'proxy-lease');
+      }
+    }
+  }
+
+  private createThreadRecord(
+    item: AutomationWorkItem,
+    config: AutomationRunConfigDTO,
+    slotProxy: BrowserProxySettings | undefined,
+    lease: AcquiredProxyLease | undefined
+  ): ThreadRuntime {
     const capcutPassword = generateCapcutPassword(config.password);
     const created = this.deps.accounts.create({
-      email: plan.email,
-      emailProvider: plan.emailProvider,
-      emailPassword: plan.emailPassword,
+      email: item.email,
+      emailProvider: item.emailProvider,
+      emailPassword: item.emailPassword,
       passwordCapcut: capcutPassword,
       credit: 0,
       status: 'processing',
@@ -602,234 +598,117 @@ export class AutomationRunService {
       browserProvider: config.browser
     });
 
-    if (plan.purchasedEmailId) {
-      this.deps.emails.markConsumed(plan.purchasedEmailId, created.id);
-    }
+    const threadController = new AbortController();
+    this.iterationAbort.set(created.id, threadController);
+
+    let notifyDone: () => void = () => {};
+    const completionPromise = new Promise<void>((resolve) => {
+      notifyDone = resolve;
+    });
 
     const runtime: ThreadRuntime = {
       accountId: created.id,
-      email: plan.email,
+      email: item.email,
       capcutPassword,
-      purchasedEmailId: plan.purchasedEmailId
+      purchasedEmailId: item.purchasedEmailId,
+      lease,
+      directProxy: slotProxy,
+      completionPromise,
+      notifyDone
     };
+    return runtime;
+  }
 
-    let proxy: BrowserProxySettings | undefined = plan.directProxy;
-    if (config.proxy.mode === 'proxykey') {
-      // Acquiring can block while every key is busy or still inside its rotation
-      // window, so say so before waiting — otherwise a queued thread looks hung.
-      this.log('INFO', plan.email, 'Proxy', 'Đang xin proxy key rảnh...', created.id);
-      try {
-        const lease = await this.deps.proxies.acquire();
-        runtime.lease = lease;
-        proxy = leaseToProxySettings(lease);
-        this.log('INFO', plan.email, 'Proxy', 'Đã nhận proxy ' + lease.host + ':' + lease.port, created.id);
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Không lấy được proxy.';
-        this.log('ERROR', plan.email, 'Proxy', message, created.id);
-        this.deps.accounts.update(created.id, { status: 'error', automationStep: 'Không lấy được proxy' });
-        if (plan.purchasedEmailId && this.deps.emails.release) {
-          this.deps.emails.release(plan.purchasedEmailId);
+  private async launchThread(
+    thread: ThreadRuntime,
+    config: AutomationRunConfigDTO,
+    signal: AbortSignal
+  ): Promise<void> {
+    const proxy = thread.lease ? leaseToProxySettings(thread.lease) : thread.directProxy;
+    const launcher = config.browser === 'multilogin' ? this.deps.launcher?.() ?? null : null;
+    let profileId: string;
+    let port: number | null;
+
+    if (launcher) {
+      thread.launcher = launcher;
+      const session = await launcher.launch({
+        proxy: toLauncherProxy(proxy),
+        headless: config.headless,
+        signal,
+        onProfileStarted: (profileId) => {
+          thread.profileId = profileId;
+          this.startedProfiles.push(profileId);
+          this.activeThreads.set(thread.accountId, thread);
         }
-        return null;
-      }
-    }
-
-    try {
-      /**
-       * Multilogin đi qua `BrowserLauncher` để có luôn phiên Playwright — đó là
-       * điều kiện để làm nhiệm vụ. Browser khác vẫn đi `deps.browser` nên
-       * GoLogin/GPM/Camoufox/Patchright tiếp tục báo `PROVIDER_NOT_IMPLEMENTED`
-       * rõ ràng thay vì fail âm thầm.
-       */
-      const launcher = config.browser === 'multilogin' ? this.deps.launcher?.() ?? null : null;
-      let profileId: string;
-      let port: number | null;
-
-      if (launcher) {
-        const session = await launcher.launch({
-          proxy: toLauncherProxy(proxy),
-          headless: config.headless
-        });
-        profileId = session.profileId;
-        port = session.port;
-        runtime.page = session.page;
-        runtime.context = session.context;
-        runtime.launcher = launcher;
-      } else {
-        const profile = await this.deps.browser.startProfile({
-          headless: config.headless,
-          proxy,
-          browser: config.browser
-        });
-        profileId = profile.profileId;
-        port = profile.port;
-      }
-
-      runtime.profileId = profileId;
-      runtime.port = port;
-      this.startedProfiles.push(profileId);
-      this.activeThreads.set(runtime.accountId, runtime);
-      this.deps.accounts.update(created.id, {
-        status: 'processing',
-        automationStep: 'Browser đang chạy',
-        browserProfileId: profileId,
-        proxy: proxy ? proxy.host + ':' + proxy.port : null
       });
-      this.log(
-        'SUCCESS',
-        plan.email,
-        'Browser',
-        'Đã mở ' + config.browser + ' profile ' + profileId +
-          (port !== null ? ' (port ' + port + ')' : ''),
-        created.id
-      );
-      return runtime;
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Không mở được browser.';
-      this.log('ERROR', plan.email, 'Browser', message, created.id);
-      this.deps.accounts.update(created.id, { status: 'error', automationStep: 'Không mở được browser' });
-      if (runtime.lease) {
-        await this.deps.proxies.release(runtime.lease);
-      }
-      // Hộp thư chưa dùng tới thì trả về hàng chờ: nó đã được trả tiền và
-      // `order_id` vẫn đọc được OTP, nên lượt sau dùng lại thay vì thuê hộp mới.
-      if (plan.purchasedEmailId && this.deps.emails.release) {
-        this.deps.emails.release(plan.purchasedEmailId);
-        this.log('INFO', plan.email, 'Email', 'Đã nhả hộp thư về hàng chờ để lượt sau dùng lại', created.id);
-      }
-      return null;
-    }
-  }
-
-  /**
-   * Shuts down exactly one thread: its own browser profile, its own proxy lease,
-   * its own account row. Never touches another thread.
-   */
-  private async shutdownThread(thread: ThreadRuntime, step: string): Promise<boolean> {
-    let stoppedProfile = false;
-
-    if (thread.profileId) {
-      try {
-        // Ai mở thì người đó đóng: profile mở qua launcher phải do launcher tắt
-        // vì handle CDP nằm trong launcher; trộn hai đường sẽ để lại profile mồ côi.
-        if (thread.launcher) {
-          await thread.launcher.stop(thread.profileId);
-        } else {
-          await this.deps.browser.stopProfile(thread.profileId);
+      profileId = session.profileId;
+      port = session.port;
+      thread.page = session.page;
+      thread.context = session.context;
+    } else {
+      const profile = await this.deps.browser.startProfile({
+        headless: config.headless,
+        proxy,
+        browser: config.browser,
+        signal,
+        onProfileStarted: (profileId) => {
+          thread.profileId = profileId;
+          this.startedProfiles.push(profileId);
+          this.activeThreads.set(thread.accountId, thread);
         }
-        stoppedProfile = true;
-        this.log('INFO', thread.email, 'Browser', 'Đã dừng profile ' + thread.profileId, thread.accountId);
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Không dừng được browser.';
-        this.log('WARNING', thread.email, 'Browser', message, thread.accountId);
-      }
+      });
+      profileId = profile.profileId;
+      port = profile.port;
     }
 
-    if (thread.lease) {
-      await this.deps.proxies.release(thread.lease);
+    // A late launch result must not resurrect ownership after Stop closed it.
+    if (!this.startedProfiles.includes(profileId)) {
+      thread.profileId = profileId;
+      this.startedProfiles.push(profileId);
+      this.activeThreads.set(thread.accountId, thread);
     }
-
+    signal.throwIfAborted();
+    thread.port = port;
     this.deps.accounts.update(thread.accountId, {
-      status: 'done',
-      automationStep: thread.outcomeStep ?? step
+      status: 'processing',
+      automationStep: 'Browser đang chạy',
+      browserProfileId: profileId,
+      proxy: proxy ? proxy.host + ':' + proxy.port : null
     });
-    return stoppedProfile;
-  }
-
-  /** Threads currently running, so the UI can stop one row at a time. */
-  getRunningThreads(): RunningThreadInfo[] {
-    return Array.from(this.activeThreads.values()).flatMap((thread) =>
-      thread.profileId
-        ? [{ accountId: thread.accountId, email: thread.email, profileId: thread.profileId }]
-        : []
+    this.log(
+      'SUCCESS',
+      thread.email,
+      'Browser',
+      'Đã mở ' + config.browser + ' profile ' + profileId +
+        (port !== null ? ' (port ' + port + ')' : ''),
+      thread.accountId
     );
   }
 
-  /**
-   * Stops a single thread by account id and leaves every other thread running.
-   * Returns false when that account is not currently running.
-   */
-  async stopThread(accountId: string): Promise<boolean> {
-    const thread = this.activeThreads.get(accountId);
-    if (!thread) return false;
-
-    this.activeThreads.delete(accountId);
-    const stoppedProfile = await this.shutdownThread(thread, 'Đã dừng riêng luồng này');
-
-    this.publish(this.progress.state, 'Đã dừng luồng ' + thread.email, {
-      threadsStopped: this.progress.threadsStopped + (stoppedProfile ? 1 : 0)
+  private async holdForThread(
+    durationMs: number,
+    signal: AbortSignal
+  ): Promise<void> {
+    if (durationMs <= 0) {
+      signal.throwIfAborted();
+      return;
+    }
+    signal.throwIfAborted();
+    let onAbort: (() => void) | null = null;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(signal.reason ?? new Error('Aborted'));
+      signal.addEventListener('abort', onAbort, { once: true });
     });
-    return true;
-  }
-
-  private async teardown(): Promise<number> {
-    let stopped = 0;
-
-    // Drain the live threads. Anything already stopped one-by-one has left the
-    // map, so it is never stopped twice.
-    for (const thread of Array.from(this.activeThreads.values())) {
-      this.activeThreads.delete(thread.accountId);
-      if (await this.shutdownThread(thread, 'Đã dừng sau khi kiểm tra kết nối')) {
-        stopped += 1;
-      }
-    }
-
-    await this.deps.proxies.releaseAll();
-    return stopped;
-  }
-
-  /**
-   * How many threads may hold a browser at the same time. In proxy-key mode the
-   * account's key count is the hard ceiling, because two profiles never share an
-   * IP; the remaining threads queue and start as keys are released.
-   */
-  private async resolveConcurrency(
-    config: AutomationRunConfigDTO,
-    planCount: number
-  ): Promise<number> {
-    if (config.proxy.mode !== 'proxykey' || !this.deps.proxies.availableSlots) {
-      return planCount;
-    }
-
-    let slots: number | null;
     try {
-      slots = await this.deps.proxies.availableSlots();
-    } catch {
-      return planCount;
+      await Promise.race([this.sleep(durationMs), aborted]);
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
     }
-
-    if (slots === null) return planCount;
-    return Math.max(1, Math.min(planCount, slots));
   }
 
-  /** Waits out this thread's connectivity window, cut short by a stop request. */
-  private async holdForThread(durationMs: number): Promise<void> {
-    if (durationMs <= 0 || this.stopRequested) return;
-    await Promise.race([this.sleep(durationMs), this.stopSignal ?? Promise.resolve()]);
-  }
-
-  /**
-   * Phần việc thật của một luồng.
-   *
-   * Có engine VÀ có phiên Playwright thì làm nhiệm vụ CapCut; thiếu một trong hai
-   * thì giữ browser `testDurationMs` như trước khi gộp — cách đó vẫn chứng minh
-   * được browser + proxy + mailbox nối đúng, và giữ nguyên hành vi cho những
-   * browser chưa hỗ trợ.
-   *
-   * Kết luận đủ/thiếu nhiệm vụ KHÔNG do đây quyết: nó đến từ snapshot `task_list`
-   * của chính CapCut (xem `docs/AUTOMATION-ENGINE.md` §3).
-   */
-  /**
-   * Nguồn OTP cho đường ĐĂNG KÝ, buộc vào đúng mailbox của luồng này.
-   *
-   * Mã không tới ngay: engine CLI phải poll. Ở đây poll 5 giây/lần trong 90 giây
-   * rồi bỏ cuộc bằng lỗi rõ ràng — thà báo "không lấy được OTP" còn hơn để bước
-   * đăng ký treo chờ một mã không bao giờ đến.
-   */
-  private buildOtpReader(thread: ThreadRuntime): (() => Promise<string>) | undefined {
-    const read = this.deps.emails.readOtp;
+  private buildOtpReader(thread: ThreadRuntime, signal: AbortSignal): (() => Promise<string>) | undefined {
     const purchasedEmailId = thread.purchasedEmailId;
-    if (!read || !purchasedEmailId) return undefined;
+    if (!purchasedEmailId) return undefined;
 
     return async () => {
       const startedAt = Date.now();
@@ -845,24 +724,22 @@ export class AutomationRunService {
 
       say('INFO', 'Đang chờ mã xác minh CapCut về hộp thư đã thuê...');
 
-      while (Date.now() < deadline && !this.stopRequested) {
+      while (Date.now() < deadline) {
+        signal.throwIfAborted();
         attempt += 1;
         try {
-          const code = await read.call(this.deps.emails, purchasedEmailId);
+          const code = await this.deps.emailOtp.readOtp(purchasedEmailId);
           if (code) {
-            // Mốc thời gian này là số ĐO duy nhất cho câu hỏi "90 giây có đủ
-            // không?". Chưa có nó thì mọi lần nới hạn chỉ là phỏng đoán.
             say('SUCCESS', 'Đã nhận mã xác minh sau ' + waited() + ' (' + attempt + ' lượt đọc)');
             return code;
           }
           say('INFO', 'Chưa có mã sau ' + waited() + ', đọc lại sau 5 giây');
         } catch (err: unknown) {
+          signal.throwIfAborted();
           lastError = err instanceof Error ? err.message : String(err);
-          // Lỗi API mail phải hiện ra NGAY lượt đó: nuốt tới khi hết hạn thì
-          // không phân biệt được "mail chưa tới" với "API mail đang chết".
           say('WARNING', 'Đọc mã thất bại ở lượt ' + attempt + ': ' + lastError);
         }
-        await this.sleep(5_000);
+        await this.holdForThread(5_000, signal);
       }
 
       throw new Error(
@@ -872,15 +749,6 @@ export class AutomationRunService {
     };
   }
 
-  /**
-   * Lưu tiến độ từng nhiệm vụ của luồng này.
-   *
-   * Bọc try/catch có chủ ý: đây là GHI CHÚ bên lề một phiên browser đang sống,
-   * không phải kết quả của lượt chạy. DB đang khoá (WAL busy), `account_id` vừa
-   * bị xoá khỏi `accounts`, hay đĩa đầy — không lý do nào trong số đó được phép
-   * làm mất cả phiên đang chạy nhiệm vụ. Nên lỗi ghi chỉ thành một dòng WARNING
-   * (AGENTS.md §27: không nuốt lỗi im lặng, nhưng cũng không leo thang quá mức).
-   */
   private recordTaskProgress(thread: ThreadRuntime, rows: CapcutAccountResult['tasks']): void {
     const sink = this.deps.taskProgress;
     if (!sink || rows.length === 0) return;
@@ -899,14 +767,11 @@ export class AutomationRunService {
     }
   }
 
-  private async runThreadWorkload(thread: ThreadRuntime, config: AutomationRunConfigDTO): Promise<void> {
-    /**
-     * Chỉ module `credit` có engine thật (đăng ký/đăng nhập + 12 nhiệm vụ free
-     * credits). `trial` và `team` chưa implement — KHÔNG được âm thầm chạy luồng
-     * credit thay thế, vì như thế người dùng tưởng đã làm đúng việc họ chọn.
-     * UI đã khoá hai lựa chọn đó; đây là chốt thứ hai cho cấu hình cũ trong DB
-     * hoặc cho ai gọi IPC trực tiếp.
-     */
+  private async runThreadWorkload(
+    thread: ThreadRuntime,
+    config: AutomationRunConfigDTO,
+    iterationSignal: AbortSignal
+  ): Promise<ThreadOutcome> {
     if (config.module !== 'credit') {
       this.log(
         'WARNING',
@@ -919,21 +784,27 @@ export class AutomationRunService {
       this.deps.accounts.update(thread.accountId, {
         automationStep: 'Module ' + config.module + ' chưa hỗ trợ'
       });
-      await this.holdForThread(config.testDurationMs);
-      return;
+      await this.holdForThread(config.testDurationMs, iterationSignal);
+      return { kind: 'completed', status: 'done', step: thread.outcomeStep ?? 'Hoàn tất' };
     }
 
     const runner = this.deps.capcut;
     if (!runner || !thread.page || !thread.context) {
-      await this.holdForThread(config.testDurationMs);
-      return;
+      await this.holdForThread(config.testDurationMs, iterationSignal);
+      return { kind: 'completed', status: 'done', step: thread.outcomeStep ?? 'Hoàn tất' };
     }
 
     const password = thread.capcutPassword;
     if (!password) {
-      this.log('WARNING', thread.email, 'Nhiệm vụ', 'Không đọc được mật khẩu CapCut của account — giữ browser thay vì làm nhiệm vụ.', thread.accountId);
-      await this.holdForThread(config.testDurationMs);
-      return;
+      this.log(
+        'WARNING',
+        thread.email,
+        'Nhiệm vụ',
+        'Không đọc được mật khẩu CapCut của account — giữ browser thay vì làm nhiệm vụ.',
+        thread.accountId
+      );
+      await this.holdForThread(config.testDurationMs, iterationSignal);
+      return { kind: 'completed', status: 'done', step: thread.outcomeStep ?? 'Hoàn tất' };
     }
 
     this.deps.accounts.update(thread.accountId, { automationStep: 'Đang làm nhiệm vụ' });
@@ -944,19 +815,10 @@ export class AutomationRunService {
         email: thread.email,
         password,
         accountId: thread.accountId,
-        /**
-         * Hộp thư vừa thuê từ vendor thì chưa từng có account CapCut nào dùng nó,
-         * nên phải đi thẳng đường ĐĂNG KÝ. Email dán tay ngược lại là tài khoản
-         * người dùng đã có, đi đường ĐĂNG NHẬP.
-         */
         isNewAccount: thread.purchasedEmailId !== undefined,
-        getOtp: this.buildOtpReader(thread),
-        // Dashboard `retryCount` → số LƯỢT quét lại nhiệm vụ còn thiếu. Chặn trên
-        // ở 4 để một account hỏng không giữ profile và proxy key cả tiếng.
+        signal: iterationSignal,
+        getOtp: this.buildOtpReader(thread, iterationSignal),
         maxRounds: Math.max(1, Math.min(1 + config.retryCount, 4)),
-        // Hai ô delay của Dashboard. Engine coi đây là mức TỐI THIỂU của người
-        // dùng và tự kẹp lên trên khoảng đã đo, nên giá trị nhỏ (kể cả 0) không
-        // làm bot gõ nhanh hơn ngưỡng an toàn của Shark Risk Control.
         pace: {
           stepMinMs: config.stepDelayMinMs,
           stepMaxMs: config.stepDelayMaxMs,
@@ -964,33 +826,36 @@ export class AutomationRunService {
           typeMaxMs: config.typeDelayMaxMs
         },
         skipWithoutTrial: config.skipWithoutTrial,
-        log: (status, step, message) => this.log(status, thread.email, step, message, thread.accountId)
+        log: (status, step, message) =>
+          this.log(status, thread.email, step, message, thread.accountId)
       });
 
-      // Lưu tiến độ NGAY khi engine trả kết quả, trước mọi nhánh kết luận: kể cả
-      // lượt còn thiếu nhiệm vụ thì phần đã xong vẫn phải được ghi, nhờ vậy lượt
-      // sau không làm lại nhiệm vụ mà CapCut đã ghi nhận.
       this.recordTaskProgress(thread, result.tasks);
 
       if (result.skipped) {
+        thread.outcomeStep = 'Bỏ qua — không đủ điều kiện';
         this.deps.accounts.update(thread.accountId, {
-          automationStep: 'Bỏ qua — không đủ điều kiện',
+          automationStep: thread.outcomeStep,
           ...(result.subscription ? { subscription: result.subscription } : {})
         });
-        return;
+        return {
+          kind: 'completed',
+          status: 'done',
+          step: thread.outcomeStep
+        };
       }
 
       const full = result.missing.length === 0;
-      // Giữ lại để `shutdownThread` không ghi đè kết quả thật bằng câu dừng máy.
       thread.outcomeStep = full
         ? 'Đủ ' + result.done + '/' + result.total + ' nhiệm vụ'
         : 'Còn thiếu ' + result.missing.length + ' nhiệm vụ';
+
       this.deps.accounts.update(thread.accountId, {
         credit: result.credits,
         automationStep: thread.outcomeStep,
-        // Chỉ ghi khi engine đọc được: ghi rỗng lên giá trị cũ là mất dữ liệu.
         ...(result.subscription ? { subscription: result.subscription } : {})
       });
+
       this.log(
         full ? 'SUCCESS' : 'WARNING',
         thread.email,
@@ -1000,151 +865,447 @@ export class AutomationRunService {
           (full ? '' : ' — còn thiếu: ' + result.missing.join(', ')),
         thread.accountId
       );
+
+      if (!full) {
+        return {
+          kind: 'failed',
+          status: 'error',
+          step: thread.outcomeStep
+        };
+      }
+
+      return {
+        kind: 'completed',
+        status: 'done',
+        step: thread.outcomeStep
+      };
     } catch (err: unknown) {
+      if (iterationSignal.aborted || this.runAbort?.signal.aborted) {
+        return {
+          kind: 'stopped',
+          status: 'stopped',
+          step: 'Đã dừng theo yêu cầu'
+        };
+      }
       const message = err instanceof Error ? err.message : 'Lỗi không xác định khi làm nhiệm vụ.';
       this.log('ERROR', thread.email, 'Nhiệm vụ', message, thread.accountId);
-      this.deps.accounts.update(thread.accountId, { status: 'error', automationStep: 'Lỗi khi làm nhiệm vụ' });
+      this.deps.accounts.update(thread.accountId, {
+        status: 'error',
+        automationStep: 'Lỗi khi làm nhiệm vụ'
+      });
+      return {
+        kind: 'failed',
+        status: 'error',
+        step: 'Lỗi khi làm nhiệm vụ'
+      };
+    }
+  }
+
+  private async workerLoop(
+    workerId: string,
+    source: AutomationWorkSource,
+    config: AutomationRunConfigDTO,
+    slotProxy: BrowserProxySettings | undefined,
+    acquisitionSignal: AbortSignal,
+    initialWave: InitialWaveBarrier | null
+  ): Promise<void> {
+    let firstIteration = true;
+    while (!acquisitionSignal.aborted && !this.terminalIntent) {
+      let item: AutomationWorkItem | null =
+        source.kind === 'finite'
+          ? await measureStage(
+              'email-acquisition',
+              () => source.next(workerId, acquisitionSignal),
+              (message) => this.log('INFO', workerId, 'Timing', message)
+            )
+          : null;
+      if (source.kind === 'finite' && item === null) {
+        if (firstIteration) this.releaseRunningWaiters();
+        return;
+      }
+
+      this.publish(this.progress.state, this.progress.message, {
+        workersActive: this.progress.workersActive + 1
+      });
+
+      let lease: AcquiredProxyLease | undefined;
+      let thread: ThreadRuntime | undefined;
+      let committed = false;
+      try {
+        if (config.proxy.mode === 'proxykey') {
+          this.log('INFO', item?.email ?? workerId, 'Proxy', 'Đang xin proxy key...');
+          lease = await measureStage(
+            'proxy-acquisition',
+            () => this.deps.proxies.acquire(acquisitionSignal),
+            (message) =>
+              this.log(
+                'INFO',
+                item?.email ?? workerId,
+                'Timing',
+                message,
+                thread?.accountId
+              )
+          );
+          this.log('SUCCESS', item?.email ?? workerId, 'Proxy', 'Đã nhận proxy ' + lease.ip + ':' + lease.port);
+        }
+        if (source.kind === 'continuous') {
+          item = await measureStage(
+            'email-acquisition',
+            () => source.next(workerId, acquisitionSignal),
+            (message) => this.log('INFO', workerId, 'Timing', message)
+          );
+        }
+        if (!item) {
+          if (firstIteration) this.releaseRunningWaiters();
+          return;
+        }
+        // A provider block aborts acquisition only and lets this acquired item
+        // continue; an explicit whole-run Stop must release it before account use.
+        this.runAbort?.signal.throwIfAborted();
+        if (source.kind === 'continuous' && firstIteration) {
+          initialWave?.arrive();
+        }
+
+        await measureStage(
+          'account-total',
+          async () => {
+            thread = this.createThreadRecord(item!, config, slotProxy, lease);
+            this.increment('accountsAccepted');
+            const iterationSignal = this.iterationAbort.get(thread.accountId)?.signal;
+            if (!iterationSignal) throw new Error('Iteration cancellation owner was lost.');
+            try {
+              await measureStage(
+                'browser-launch',
+                () => this.launchThread(thread!, config, iterationSignal),
+                (message) => this.log('INFO', thread!.email, 'Timing', message, thread!.accountId)
+              );
+              if (firstIteration) {
+                this.releaseRunningWaiters();
+              }
+              iterationSignal.throwIfAborted();
+              if (item!.purchasedEmailId) {
+                source.commit(item!, thread.accountId);
+                committed = true;
+              }
+              const outcome = await this.runThreadWorkload(thread!, config, iterationSignal);
+              this.recordOutcome(thread!, outcome);
+            } catch {
+              if (firstIteration) {
+                this.releaseRunningWaiters();
+              }
+              this.recordOutcome(
+                thread!,
+                this.runAbort?.signal.aborted === true ||
+                    this.iterationAbort.get(thread!.accountId)?.signal.aborted === true
+                  ? { kind: 'stopped', status: 'stopped', step: 'Đã dừng theo yêu cầu' }
+                  : { kind: 'failed', status: 'error', step: 'Lỗi khi khởi chạy hoặc xử lý' }
+              );
+            } finally {
+              const timingLog = (message: string): void => {
+                this.log(
+                  'INFO',
+                  thread?.email ?? item?.email ?? 'system',
+                  'Timing',
+                  message,
+                  thread?.accountId
+                );
+              };
+              const cleanupFailuresBefore = this.cleanupFailures;
+              await measureStage(
+                'cleanup',
+                async () => {
+                  await this.cleanupIteration(source, item, committed, thread, lease);
+                  if (this.cleanupFailures > cleanupFailuresBefore) {
+                    throw new Error('sanitized cleanup failure');
+                  }
+                },
+                timingLog
+              ).catch(() => undefined);
+              thread?.notifyDone?.();
+              this.publish(this.progress.state, this.progress.message, {
+                workersActive: Math.max(0, this.progress.workersActive - 1)
+              });
+            }
+          },
+          (message) =>
+            this.log(
+              'INFO',
+              thread?.email ?? item?.email ?? 'system',
+              'Timing',
+              message,
+              thread?.accountId
+            )
+        );
+      } catch (error: unknown) {
+        if (firstIteration) {
+          this.releaseRunningWaiters();
+        }
+        if (!acquisitionSignal.aborted) {
+          this.acceptTerminalError(error);
+        }
+        if (!thread) {
+          await this.cleanupIteration(source, item, committed, thread, lease);
+          this.publish(this.progress.state, this.progress.message, {
+            workersActive: Math.max(0, this.progress.workersActive - 1)
+          });
+        }
+      }
+
+      if (firstIteration) {
+        firstIteration = false;
+        try {
+          await initialWave?.wait(acquisitionSignal);
+        } catch {
+          if (acquisitionSignal.aborted) return;
+          throw new Error('Initial acquisition barrier failed.');
+        }
+      }
     }
   }
 
   private async runPrepared(
-    plans: ThreadPlan[],
+    source: AutomationWorkSource,
+    readiness: SourceReadiness,
     config: AutomationRunConfigDTO,
-    runId: string
+    directProxies: BrowserProxySettings[]
   ): Promise<AutomationRunSummary> {
-    this.publish('running', 'Đang khởi chạy ' + plans.length + ' browser...', {
-      runId,
-      threadTotal: plans.length,
-      threadsStarted: 0,
-      threadsStopped: 0,
-      threadsFailed: 0
+    const workerTarget = readiness.workerTarget;
+    const initialWave = source.kind === 'continuous' ? new InitialWaveBarrier(workerTarget) : null;
+    const acquisitionSignal = this.acquisitionAbort!.signal;
+
+    const workers = Array.from({ length: workerTarget }, (_, i) => {
+      const slotProxy = config.proxy.mode === 'direct' ? directProxies[i] : undefined;
+      return this.workerLoop(
+        'worker-' + (i + 1),
+        source,
+        config,
+        slotProxy,
+        acquisitionSignal,
+        initialWave
+      );
     });
 
-    // Narrow the proxy pool to the keys this run may use before asking how many
-    // slots exist, so the ceiling reflects the operator's selection.
-    //
-    // `region` cũng phải đi cùng: `ProxyLeaseManager` đọc nó khi xin proxy mới,
-    // nhưng trước đây không ai chuyển nên khoá đó luôn rỗng (audit 04/09/2026).
-    if (config.proxy.mode === 'proxykey' && this.deps.proxies.configure) {
-      this.deps.proxies.configure({ keys: config.proxy.keys, region: config.proxy.region });
-    }
-
-    const concurrency = await this.resolveConcurrency(config, plans.length);
-    const queued = plans.length - concurrency;
-    if (queued > 0) {
-      this.log(
-        'INFO',
-        'system',
-        'Proxy',
-        'Chỉ có ' + concurrency + ' proxy key khả dụng nên chạy ' + concurrency +
-          ' luồng song song, ' + queued + ' luồng còn lại xếp hàng chờ.'
-      );
-    }
-
-    const queue = [...plans];
-    const firstWaveTarget = Math.max(1, Math.min(concurrency, plans.length));
-    let launchedOrFailed = 0;
-    let started = 0;
-    let failed = 0;
-
-    const worker = async (): Promise<void> => {
-      for (;;) {
-        if (this.stopRequested) return;
-
-        const plan = queue.shift();
-        if (!plan) return;
-
-        const thread = await this.launchThread(plan, config);
-        launchedOrFailed += 1;
-
-        if (!thread) {
-          failed += 1;
-          this.publish('running', 'Đang chạy ' + started + '/' + plans.length + ' browser', {
-            threadsFailed: failed
-          });
-          if (launchedOrFailed >= firstWaveTarget) this.releaseRunningWaiters();
-          continue;
-        }
-
-        started += 1;
-        this.publish('running', 'Đang chạy ' + started + '/' + plans.length + ' browser', {
-          threadsStarted: started
-        });
-        if (launchedOrFailed >= firstWaveTarget) this.releaseRunningWaiters();
-
-        await this.runThreadWorkload(thread, config);
-
-        // stopThread may have taken this thread already; only the owner shuts it down.
-        if (this.activeThreads.delete(thread.accountId)) {
-          const didStop = await this.shutdownThread(thread, 'Đã dừng sau khi kiểm tra kết nối');
-          this.publish(this.progress.state, 'Đã dừng luồng ' + thread.email, {
-            threadsStopped: this.progress.threadsStopped + (didStop ? 1 : 0)
-          });
-        }
-      }
-    };
-
-    await Promise.all(Array.from({ length: firstWaveTarget }, () => worker()));
+    const results = await Promise.allSettled(workers);
     this.releaseRunningWaiters();
 
-    this.publish('stopping', 'Đang dừng các browser của phiên chạy...');
-    const stoppedInTeardown = await this.teardown();
-    const totalStopped = this.progress.threadsStopped + stoppedInTeardown;
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        this.acceptTerminalError(result.reason);
+      }
+    }
 
-    this.publish('stopped', 'Đã dừng ' + totalStopped + '/' + started + ' browser.', {
-      threadsStopped: totalStopped
-    });
+    try {
+      await this.deps.proxies.releaseAll();
+    } catch {
+      this.noteCleanupFailure(undefined, 'proxy-lease');
+    }
+
+    let finalReason: AutomationTerminalReasonDTO | undefined = this.terminalIntent ?? undefined;
+    if (!finalReason) {
+      if (source.kind === 'finite') {
+        finalReason = { code: 'MANUAL_EXHAUSTED' };
+      } else {
+        finalReason = { code: 'INTERNAL_ERROR' };
+      }
+    }
+
+    if (this.cleanupFailures > 0) {
+      finalReason = {
+        ...finalReason,
+        details: {
+          ...(finalReason.details ?? {}),
+          cleanupFailures: this.cleanupFailures
+        }
+      };
+    }
+
+    if (this.terminalIntent?.code === 'USER_STOP' || this.terminalIntent?.code === 'APP_SHUTDOWN') {
+      this.publish('stopped', 'Phiên chạy đã dừng.', { terminalReason: finalReason });
+    } else if (this.terminalIntent?.code === 'INTERNAL_ERROR') {
+      this.publish('failed', this.progress.message, { terminalReason: finalReason });
+    } else if (this.terminalIntent) {
+      this.publish('blocked', this.progress.message, { terminalReason: finalReason });
+    } else if (source.kind === 'finite') {
+      this.publish('completed', 'Đã xử lý hết danh sách email thủ công.', {
+        terminalReason: finalReason
+      });
+    } else {
+      this.publish('failed', 'Nguồn liên tục kết thúc ngoài dự kiến.', {
+        terminalReason: finalReason
+      });
+    }
 
     return { ...this.progress, startedProfiles: [...this.startedProfiles] };
   }
 
-  /**
-   * Validates the request, prepares mailboxes, then runs the batch in the
-   * background. Resolves once the run has been accepted so IPC does not block
-   * for the whole hold window; progress arrives through subscribe().
-   */
-  async start(config: AutomationRunConfigDTO): Promise<{ runId: string }> {
-    if (this.activeRun) {
-      throw new ProviderError('CONFIG_ERROR', 'Đang có một phiên chạy khác, hãy dừng trước khi bắt đầu.');
+  /** Threads currently running, so the UI can stop one row at a time. */
+  getRunningThreads(): RunningThreadInfo[] {
+    return Array.from(this.activeThreads.values()).flatMap((thread) =>
+      thread.profileId
+        ? [{ accountId: thread.accountId, email: thread.email, profileId: thread.profileId }]
+        : []
+    );
+  }
+
+  async stopThread(accountId: string): Promise<boolean> {
+    const thread = this.activeThreads.get(accountId);
+    const controller = this.iterationAbort.get(accountId);
+    if (!thread) return false;
+
+    controller?.abort(new Error('stopThread requested'));
+    if (thread.profileStopFailed) thread.profileStopPromise = undefined;
+    const stopped = await this.closeOwnedProfile(thread);
+    if (thread.completionPromise) {
+      await thread.completionPromise;
     }
+    return stopped;
+  }
 
+  start(config: AutomationRunConfigDTO): Promise<{ runId: string }> {
+    if (this.isRunning() || this.activeThreads.size > 0) {
+      return Promise.reject(new ProviderError('CONFIG_ERROR', 'Đang có phiên hoặc profile chưa dừng, hãy dừng trước khi bắt đầu.'));
+    }
     const runId = this.nextId();
-    this.stopRequested = false;
+    this.runAbort = new AbortController();
+    this.acquisitionAbort = new AbortController();
+    this.terminalIntent = null;
+    this.iterationAbort.clear();
+    this.cleanupFailures = 0;
     this.startedProfiles = [];
-    this.activeThreads.clear();
     this.firstWaveDone = false;
-    this.stopSignal = new Promise<void>((resolve) => {
-      this.fireStop = resolve;
+    const runSignal = this.runAbort.signal;
+    const operation = Promise.resolve().then(async () => {
+      try {
+        return await this.prepareRun(config, runId, runSignal);
+      } catch (error: unknown) {
+        if (!runSignal.aborted) throw error;
+        this.publish('stopped', 'Đã dừng trước khi khởi chạy.', { terminalReason: this.terminalIntent ?? { code: 'USER_STOP' } });
+        this.lastSummary = { ...this.progress, startedProfiles: [...this.startedProfiles] };
+        return { runId };
+      } finally {
+        this.starting = null;
+      }
     });
-    this.publish('preparing', 'Đang chuẩn bị dữ liệu cho phiên chạy...', {
-      runId,
-      threadTotal: config.threadCount,
-      threadsStarted: 0,
-      threadsStopped: 0,
-      threadsFailed: 0
-    });
+    this.starting = operation;
+    return operation;
+  }
 
-    let plans: ThreadPlan[];
-    try {
-      plans = await this.buildThreadPlans(config);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Không chuẩn bị được phiên chạy.';
-      this.publish('failed', message);
-      this.log('ERROR', 'system', 'Run', message);
+  private async prepareRun(config: AutomationRunConfigDTO, runId: string, runSignal: AbortSignal): Promise<{ runId: string }> {
+    this.publish('preparing', 'Đang chuẩn bị dữ liệu cho phiên chạy...', {
+      runId, workerTarget: config.threadCount, workersActive: 0,
+      accountsAccepted: 0, accountsCompleted: 0, accountsFailed: 0, accountsStopped: 0,
+      terminalReason: undefined
+    });
+    runSignal.throwIfAborted();
+
+    if (config.module !== 'credit') {
+      const err = new AutomationTerminalError(
+        'blocked',
+        { code: 'PROVIDER_CONFIG_ERROR' },
+        'Module "' + config.module + '" chưa được hỗ trợ. Chỉ hỗ trợ module "credit".'
+      );
+      this.publish('blocked', err.message, { terminalReason: err.reason });
       throw err;
     }
 
-    this.activeRun = this.runPrepared(plans, config, runId)
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'Phiên chạy thất bại.';
-        this.publish('failed', message);
-        this.log('ERROR', 'system', 'Run', message);
-        return { ...this.progress, startedProfiles: [...this.startedProfiles] };
-      })
+    if (!isBrowserImplemented(config.browser)) {
+      const err = new AutomationTerminalError(
+        'blocked',
+        { code: 'PROVIDER_CONFIG_ERROR' },
+        'Browser "' + config.browser + '" chưa được tích hợp nên không mở được profile nào. ' +
+          'Hiện chỉ dùng được: ' + IMPLEMENTED_BROWSER_RUNTIMES.join(', ') + '.'
+      );
+      this.publish('blocked', err.message, { terminalReason: err.reason });
+      throw err;
+    }
+
+    let directProxies: BrowserProxySettings[] = [];
+    try {
+      directProxies = config.proxy.mode === 'direct'
+        ? this.parseDirectProxyList(config.proxy.entries, config.threadCount)
+        : [];
+      this.assertLauncherSupportsConfig(config, directProxies);
+    } catch (err: unknown) {
+      if (err instanceof ProviderError) {
+        const terminalErr = new AutomationTerminalError(
+          'blocked',
+          {
+            code: 'PROVIDER_CONFIG_ERROR',
+            ...(err.serviceName ? { provider: err.serviceName } : {})
+          },
+          err.message
+        );
+        this.publish('blocked', err.message, { terminalReason: terminalErr.reason });
+      }
+      throw err;
+    }
+
+    if (config.proxy.mode === 'proxykey') {
+      this.deps.proxies.configure?.({ keys: config.proxy.keys, region: config.proxy.region });
+      const slots = await this.deps.proxies.availableSlots?.();
+      runSignal.throwIfAborted();
+      if (slots !== null && slots !== undefined && slots < config.threadCount) {
+        const err = new AutomationTerminalError(
+          'blocked',
+          {
+            code: 'PROXY_CAPACITY_UNAVAILABLE',
+            provider: 'kiotproxy',
+            details: { requestedWorkers: config.threadCount, availableSlots: slots }
+          },
+          'Không đủ proxy key cho toàn bộ số luồng đã cấu hình.'
+        );
+        this.publish('blocked', err.message, { terminalReason: err.reason });
+        throw err;
+      }
+    }
+
+    const source = this.deps.workSources.create(config, runId);
+    let readiness: SourceReadiness;
+    try {
+      readiness = await measureStage(
+        'source-preflight',
+        () => source.prepare(config.threadCount, runSignal),
+        (message) => this.log('INFO', 'system', 'Timing', message)
+      );
+    } catch (err: unknown) {
+      runSignal.throwIfAborted();
+      if (err instanceof AutomationTerminalError) {
+        this.publish(err.state, err.message, { terminalReason: err.reason });
+        throw err;
+      }
+      if (err instanceof ProviderError) {
+        const code = err.code === 'AUTH_ERROR' ? 'PROVIDER_AUTH_REQUIRED' : 'PROVIDER_CONFIG_ERROR';
+        this.publish('blocked', err.message, { terminalReason: { code } });
+        this.log('ERROR', 'system', 'Run', err.message);
+        throw err;
+      }
+      const message = err instanceof Error ? err.message : 'Không chuẩn bị được phiên chạy.';
+      const terminalErr = new AutomationTerminalError(
+        'failed',
+        { code: 'INTERNAL_ERROR' },
+        message
+      );
+      this.publish('failed', message, { terminalReason: terminalErr.reason });
+      this.log('ERROR', 'system', 'Run', message);
+      throw terminalErr;
+    }
+
+    runSignal.throwIfAborted();
+    this.publish('running', 'Đang chạy ' + readiness.workerTarget + ' luồng...', {
+      workerTarget: readiness.workerTarget
+    });
+
+    this.activeRun = this.runPrepared(source, readiness, config, directProxies)
       .then((summary) => {
         this.lastSummary = summary;
         this.activeRun = null;
         return summary;
+      })
+      .catch((err: unknown) => {
+        this.acceptTerminalError(err);
+        this.lastSummary = { ...this.progress, startedProfiles: [...this.startedProfiles] };
+        this.activeRun = null;
+        return this.lastSummary;
       });
 
     return { runId };
@@ -1159,7 +1320,6 @@ export class AutomationRunService {
     }
   }
 
-  /** Resolves once the first wave of threads of the current run has launched. */
   async waitUntilRunning(): Promise<void> {
     if (this.firstWaveDone || !this.activeRun) return;
     await new Promise<void>((resolve) => {
@@ -1167,24 +1327,43 @@ export class AutomationRunService {
     });
   }
 
-  /** Resolves with the summary of the run that is in flight, or the last one. */
   async waitForCompletion(): Promise<AutomationRunSummary> {
+    if (this.starting) await this.starting.catch(() => undefined);
     if (this.activeRun) {
       return this.activeRun;
     }
     return this.lastSummary ?? { ...this.progress, startedProfiles: [...this.startedProfiles] };
   }
 
-  /** Ends the connectivity hold immediately and tears the run down. */
-  /** Stops the whole run: no queued thread starts, and every live hold ends now. */
-  async stop(): Promise<void> {
-    this.stopRequested = true;
-    if (this.fireStop) {
-      this.fireStop();
-      this.fireStop = null;
+  stop(code: 'USER_STOP' | 'APP_SHUTDOWN' = 'USER_STOP'): Promise<void> {
+    if (this.stopping) return this.stopping;
+    if (!this.starting && !this.activeRun && this.activeThreads.size === 0) return Promise.resolve();
+    this.terminalIntent = { code };
+    this.publish('stopping', 'Đang dừng các browser của phiên chạy...');
+    this.runAbort?.abort(new Error(code));
+    this.acquisitionAbort?.abort(new Error(code));
+    for (const controller of this.iterationAbort.values()) {
+      controller.abort(new Error(code));
     }
-    if (this.activeRun) {
-      await this.activeRun;
-    }
+    this.stopping = Promise.resolve().then(async () => {
+      this.log('INFO', 'system', 'Stop', 'Đã nhận yêu cầu dừng; không nhận thêm công việc.');
+      await Promise.all(Array.from(this.activeThreads.values()).map((thread) => {
+        if (thread.profileStopFailed) thread.profileStopPromise = undefined;
+        return this.closeOwnedProfile(thread);
+      }));
+      if (this.starting) await this.starting.catch(() => undefined);
+      if (this.activeRun) await this.activeRun;
+      if (this.activeThreads.size > 0) {
+        const message = 'Chưa dừng được ' + this.activeThreads.size + ' profile. Bấm Dừng để thử lại.';
+        this.publish('failed', message, { terminalReason: { code: 'INTERNAL_ERROR', details: { cleanupFailures: this.cleanupFailures, pendingProfiles: this.activeThreads.size } } });
+        this.lastSummary = { ...this.progress, startedProfiles: [...this.startedProfiles] };
+        throw new ProviderError('NETWORK_ERROR', message, 'multilogin');
+      }
+      this.publish('stopped', this.cleanupFailures ? 'Phiên đã dừng; có lỗi thu hồi tài nguyên, xem log Cleanup.' : 'Phiên chạy đã dừng.', {
+        terminalReason: { code, ...(this.cleanupFailures ? { details: { cleanupFailures: this.cleanupFailures } } : {}) }
+      });
+      this.lastSummary = { ...this.progress, startedProfiles: [...this.startedProfiles] };
+    }).finally(() => { this.stopping = null; });
+    return this.stopping;
   }
 }

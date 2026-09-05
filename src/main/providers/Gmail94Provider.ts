@@ -62,9 +62,16 @@ export class Gmail94Provider {
     const success = readBoolean(envelope, 'success') ?? readBoolean(envelope, 'status');
     if (success === false) {
       const message = readString(envelope, 'message');
+      const insufficient =
+        action === 'mua email' &&
+        typeof message === 'string' &&
+        /không đủ tiền/i.test(message);
+
       throw new ProviderError(
-        'CONFIG_ERROR',
-        'Gmail94 ' + action + ' thất bại: ' + (message ?? 'không rõ nguyên nhân') + '.',
+        insufficient ? 'INSUFFICIENT_FUNDS' : 'CONFIG_ERROR',
+        insufficient
+          ? 'Số dư Gmail94 không đủ để mua email CapCut.'
+          : 'Gmail94 ' + action + ' thất bại: ' + (message ?? 'không rõ nguyên nhân') + '.',
         GMAIL94_SERVICE_NAME
       );
     }

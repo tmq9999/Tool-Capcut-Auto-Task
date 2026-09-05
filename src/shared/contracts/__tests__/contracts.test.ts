@@ -223,10 +223,12 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
           data: {
             runId: 'none',
             state: 'idle',
-            threadTotal: 0,
-            threadsStarted: 0,
-            threadsStopped: 0,
-            threadsFailed: 0,
+            workerTarget: 0,
+            workersActive: 0,
+            accountsAccepted: 0,
+            accountsCompleted: 0,
+            accountsFailed: 0,
+            accountsStopped: 0,
             message: 'Chưa chạy'
           }
         }),

@@ -1,7 +1,7 @@
 import React from 'react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { Loader2, CheckCircle2, AlertCircle, Clock, Bug, Circle } from 'lucide-react';
+import { Loader2, CheckCircle2, AlertCircle, Clock, Bug, Circle, Square } from 'lucide-react';
 
 export type BadgeVariant =
   | 'running'
@@ -12,7 +12,8 @@ export type BadgeVariant =
   | 'error'
   | 'disabled'
   | 'debug'
-  | 'info';
+  | 'info'
+  | 'stopped';
 
 export interface BadgeProps {
   variant: BadgeVariant;
@@ -93,6 +94,13 @@ export const Badge: React.FC<BadgeProps> = ({
       border: 'border-primary/25',
       textColor: 'text-primary',
       icon: <span className="w-1.5 h-1.5 rounded-full bg-primary inline-block" />,
+    },
+    stopped: {
+      text: 'Đã dừng',
+      bg: 'bg-surface-variant/40',
+      border: 'border-outline/40',
+      textColor: 'text-on-surface-variant',
+      icon: <Square className="w-3 h-3" />,
     },
   };
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 
 import { parseDoAction, parseTaskList, TaskStore } from '../taskApi';
@@ -124,5 +124,37 @@ describe('TaskStore', () => {
     store.pushTaskList(RAW, 100);
     store.pushTaskList('{"data":{}}', 200);
     expect(store.snapshot()!.at).toBe(100);
+  });
+
+  it('cancels an action wait without spending its timeout', async () => {
+    vi.useFakeTimers();
+    const store = new TaskStore();
+    const controller = new AbortController();
+    let rejection = '';
+    void store.waitForAction('k-stop', 60_000, 0, controller.signal)
+      .catch((error: unknown) => { rejection = (error as Error).message; });
+
+    controller.abort(new Error('stop requested'));
+    await Promise.resolve();
+
+    expect(rejection).toBe('stop requested');
+    expect(vi.getTimerCount()).toBe(0);
+    vi.useRealTimers();
+  });
+
+  it('cancels a snapshot wait without spending its timeout', async () => {
+    vi.useFakeTimers();
+    const store = new TaskStore();
+    const controller = new AbortController();
+    let rejection = '';
+    void store.waitForSnapshot(0, 60_000, controller.signal)
+      .catch((error: unknown) => { rejection = (error as Error).message; });
+
+    controller.abort(new Error('stop requested'));
+    await Promise.resolve();
+
+    expect(rejection).toBe('stop requested');
+    expect(vi.getTimerCount()).toBe(0);
+    vi.useRealTimers();
   });
 });

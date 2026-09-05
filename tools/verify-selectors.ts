@@ -21,7 +21,7 @@ import path from 'node:path';
 import { chromium, type Page } from 'playwright-core';
 
 import { assertHittable } from '../src/main/services/capcut/diag';
-import { findTaskRow } from '../src/main/services/capcut/missionRunner';
+import { findTaskRow, findTaskEntries } from '../src/main/services/capcut/missionRunner';
 import { skipOnboardingSurvey, closeBlockingPricingModal, ensurePageUsable } from '../src/main/services/capcut/overlays';
 import { findExportButton, ensureNodeToolbar } from '../src/main/services/capcut/missions/videoStudio';
 import type { CapcutMissionEnv } from '../src/main/services/capcut/types';
@@ -74,6 +74,14 @@ async function main(): Promise<void> {
     const { page, close } = await open(browser, 'tools/fixtures/dom-ai-design.html');
     const n = counter(page);
     console.log('\n=== /ai-design @06:40 — trước khi gửi canvas prompt ===');
+
+    // Real captured DOM; absent header variants must not cost a timeout each.
+    page.setDefaultTimeout(200);
+    const probeAt = performance.now();
+    await findTaskEntries(page);
+    const probeMs = Math.round(performance.now() - probeAt);
+    check('header discovery skips absent variants without implicit per-selector waits', probeMs < 400, probeMs);
+    page.setDefaultTimeout(30_000);
 
     check('panel canvas prompt là duy nhất', (await n(CANVAS_PANEL)) === 1, await n(CANVAS_PANEL));
     check('nút mở panel là duy nhất', (await n(`${CANVAS_PANEL} [aria-label="Open canvas prompt"]`)) === 1);
@@ -234,10 +242,22 @@ async function main(): Promise<void> {
     );
     check('chưa có canvas nào cao > 100 -> waitCanvasReady phải chờ tiếp', tall === 0, tall);
 
-    const areaH = await page.evaluate(
-      () => Math.round(document.querySelector('#graphic-editor-render')!.getBoundingClientRect().height)
+    const editorCount = await n('#graphic-editor-render');
+    check(
+      '#graphic-editor-render selector resolves exactly once',
+      editorCount === 1,
+      editorCount
     );
-    check('#graphic-editor-render có kích thước thật để click', areaH > 300, areaH);
+
+    const editorIsInert = await page.evaluate(() => {
+      const editor = document.querySelector('#graphic-editor-render');
+      return editor?.closest('[inert]') !== null;
+    });
+    check(
+      '#graphic-editor-render is not inside an inert ancestor',
+      editorIsInert === false,
+      editorIsInert
+    );
 
     await close();
   }
@@ -579,8 +599,8 @@ async function main(): Promise<void> {
       (await page.evaluate(() => document.body.innerText.includes('页面异常'))) === true);
 
     const said: string[] = [];
-    const usable = await ensurePageUsable(page, (m) => said.push(m));
-    check('DOM tĩnh không dẹp được thì trả false (không nói dối)', usable === false, usable);
+    const blocked = await ensurePageUsable(page, (m) => said.push(m)).then(() => false, () => true);
+    check('modal không dẹp được phải chặn caller, không tiếp tục thao tác', blocked);
     check('log nêu được thủ phạm thay vì im lặng',
       said.some((m) => /trang lỗi|chưa nhận diện/i.test(m)), said);
 

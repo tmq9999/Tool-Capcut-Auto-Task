@@ -364,4 +364,18 @@ describe('ProxyLeaseManager chỉ dùng đúng danh sách key được chỉ đ�
 
     await expect(manager.availableSlots()).resolves.toBe(2);
   });
+
+  it('aborts a busy-key wait before requesting another proxy', async () => {
+    const api = new StubProxyApi(['K1']);
+    api.setIps('K1', ['20.0.0.1', '20.0.0.2']);
+    const manager = createManager(api, { acquireTimeoutMs: 5_000 });
+    const controller = new AbortController();
+    const first = await manager.acquire();
+    onSleep = () => controller.abort(new Error('stop requested'));
+
+    await expect(manager.acquire(controller.signal)).rejects.toThrow('stop requested');
+    expect(api.getNewCalls).toEqual(['K1']);
+    expect(sleepCalls).toEqual([100]);
+    await manager.release(first);
+  });
 });

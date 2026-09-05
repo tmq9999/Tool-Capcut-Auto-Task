@@ -58,6 +58,7 @@ const KEEP_ALL_CREDENTIALS: SettingsSaveRequestDTO['credentials'] = [
 export interface DashboardState {
   isLoading: boolean;
   isSubmitting: boolean;
+  isStopping: boolean;
   error: string | null;
   accounts: AccountListItemDTO[];
   totalAccounts: number;
@@ -80,10 +81,12 @@ export interface DashboardControllerOptions {
 const IDLE_PROGRESS: AutomationRunProgressDTO = {
   runId: 'none',
   state: 'idle',
-  threadTotal: 0,
-  threadsStarted: 0,
-  threadsStopped: 0,
-  threadsFailed: 0,
+  workerTarget: 0,
+  workersActive: 0,
+  accountsAccepted: 0,
+  accountsCompleted: 0,
+  accountsFailed: 0,
+  accountsStopped: 0,
   message: 'Chưa chạy'
 };
 
@@ -104,6 +107,7 @@ export class DashboardController {
   private storedSettings: AppSettingsDTO | null = null;
   private autoSaveEnabled = false;
   private pendingSave: Promise<boolean> | null = null;
+  private pendingStop: Promise<boolean> | null = null;
   private readonly maxLogs: number;
   private readonly accountPageSize: number;
 
@@ -116,6 +120,7 @@ export class DashboardController {
     this.state = {
       isLoading: true,
       isSubmitting: false,
+      isStopping: false,
       error: null,
       accounts: [],
       totalAccounts: 0,
@@ -221,6 +226,10 @@ export class DashboardController {
 
     await this.refreshRunningThreads();
     await this.refreshAccounts();
+    if (!response.data.stopped) {
+      this.setState({ error: 'Không thể dừng phiên trình duyệt. Hãy thử lại hoặc kiểm tra cửa sổ Multilogin.' });
+      return false;
+    }
     return response.data.stopped;
   }
 
@@ -286,9 +295,13 @@ export class DashboardController {
 
     this.detachers.push(
       this.bridge.run.onProgress((progress) => {
+        const terminalError =
+          progress.state === 'blocked' || progress.state === 'failed'
+            ? progress.message
+            : this.state.error;
         this.setState({
           progress,
-          error: progress.state === 'failed' ? progress.message : this.state.error
+          error: terminalError
         });
         // Rows appear as threads launch, so the grid follows every progress
         // event rather than waiting for the run to finish — otherwise the
@@ -302,6 +315,7 @@ export class DashboardController {
   }
 
   async start(): Promise<boolean> {
+    await this.flushPendingSave();
     const mapped = toRunConfig(this.state.config);
     if (!mapped.ok) {
       this.setState({ error: mapped.message });
@@ -335,13 +349,32 @@ export class DashboardController {
     return true;
   }
 
-  async stop(): Promise<boolean> {
-    const response = await this.bridge.run.stop();
-    if (!response.success) {
-      this.setState({ error: response.error.message });
+  stop(): Promise<boolean> {
+    if (this.pendingStop) return this.pendingStop;
+    this.setState({ isStopping: true });
+    this.pendingStop = this.stopAndRefresh().finally(() => {
+      this.pendingStop = null;
+      this.setState({ isStopping: false });
+    });
+    return this.pendingStop;
+  }
+
+  private async stopAndRefresh(): Promise<boolean> {
+    try {
+      const response = await this.bridge.run.stop();
+      await Promise.all([this.refreshRunningThreads(), this.refreshAccounts()]);
+      const progress = await this.bridge.run.progress();
+      if (progress.success) this.setState({ progress: progress.data });
+      if (!response.success || !response.data.success) {
+        this.setState({ error: response.success ? 'Chưa xác nhận được phiên đã dừng.' : response.error.message });
+        return false;
+      }
+      this.setState({ error: null });
+      return true;
+    } catch {
+      this.setState({ error: 'Không nhận được xác nhận dừng. Hãy kiểm tra kết nối rồi thử lại.' });
       return false;
     }
-    return true;
   }
 
   dispose(): void {

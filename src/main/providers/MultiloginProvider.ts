@@ -211,10 +211,11 @@ export class MultiloginProvider {
     };
   }
 
-  async stopProfile(token: string, profileId: string): Promise<void> {
+  async stopProfile(token: string, profileId: string, timeoutMs?: number): Promise<void> {
     const response = await this.http.send({
       method: 'GET',
       url: this.launcherBaseUrl + '/api/v1/profile/stop/p/' + encodeURIComponent(profileId),
+      timeoutMs,
       headers: { Authorization: 'Bearer ' + token }
     });
     this.unwrap(response, 'dừng profile');
@@ -225,10 +226,11 @@ export class MultiloginProvider {
    * available on the start response; it shows up here once the browser has
    * finished booting, which is what an automation client attaches to.
    */
-  async getQuickProfileStatuses(token: string): Promise<MultiloginQuickProfileStatus[]> {
+  async getQuickProfileStatuses(token: string, timeoutMs?: number): Promise<MultiloginQuickProfileStatus[]> {
     const response = await this.http.send({
       method: 'GET',
       url: this.launcherBaseUrl + '/api/v1/profile/quick/statuses',
+      timeoutMs,
       headers: { Authorization: 'Bearer ' + token }
     });
 

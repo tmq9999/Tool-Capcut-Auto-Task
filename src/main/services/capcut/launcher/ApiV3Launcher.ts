@@ -35,6 +35,7 @@ import {
   type MultiloginTokenSource
 } from '../../browserRuntime';
 import { seedPreferences } from '../prefs';
+import { withinDeadline } from '../cancellation';
 import {
   attachOverCdp,
   defaultSleep,
@@ -92,6 +93,7 @@ export class ApiV3Launcher implements BrowserLauncher {
 
   /** Handle CDP theo profileId — `stop()` nhả nó trước khi gọi API dừng profile. */
   private readonly attached = new Map<string, Browser>();
+  private readonly stopping = new Map<string, Promise<void>>();
 
   /**
    * `auth` và `api` được INJECT: `MultiloginAuthService` giữ vòng đời token,
@@ -116,24 +118,48 @@ export class ApiV3Launcher implements BrowserLauncher {
    * Lỗi khi đọc statuses không kết luận ngay là thất bại: cứ thử lại tới hết
    * hạn, vì launcher agent có lúc trả 5xx trong lúc browser đang bật.
    */
-  private async resolvePort(token: string, profileId: string): Promise<number | null> {
+  private async resolvePort(
+    token: string,
+    profileId: string,
+    signal?: AbortSignal
+  ): Promise<number | null> {
     const attempts = Math.max(1, Math.ceil(this.portTimeoutMs / this.portPollIntervalMs));
+    const deadline = Date.now() + this.portTimeoutMs;
 
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const statuses = await this.api.getQuickProfileStatuses(token).catch(() => null);
+      signal?.throwIfAborted();
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return null;
+      const statuses = await withinDeadline(this.api.getQuickProfileStatuses(token, remaining), remaining, signal)
+        .catch(() => { signal?.throwIfAborted(); return null; });
       const own = statuses?.find((entry) => entry.profileId === profileId);
       if (own?.port) return own.port;
 
       if (attempt < attempts - 1) {
-        await this.sleep(this.portPollIntervalMs);
+        await this.wait(this.portPollIntervalMs, signal);
       }
     }
 
     return null;
   }
 
+  private wait(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) return this.sleep(ms);
+    signal.throwIfAborted();
+    let onAbort: (() => void) | null = null;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(signal.reason ?? new Error('Aborted'));
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    return Promise.race([this.sleep(ms), aborted]).finally(() => {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
+    });
+  }
+
   async launch(opts: LaunchOptions): Promise<LaunchedProfile> {
+    opts.signal?.throwIfAborted();
     const token = await this.auth.getAccessToken();
+    opts.signal?.throwIfAborted();
 
     const params: StartQuickProfileParams = {
       isHeadless: opts.headless ?? false,
@@ -146,9 +172,12 @@ export class ApiV3Launcher implements BrowserLauncher {
     this.log('   → Đang khởi chạy Multilogin quick profile qua API v3...');
     const profile = await this.api.startQuickProfile(token, params);
     const profileId = profile.profileId;
+    const ownershipHandedOff = Boolean(opts.onProfileStarted);
+    opts.onProfileStarted?.(profileId);
     this.log(`   ✅ Profile đã tạo (ID: ${profileId}, ${profile.browserType})`);
 
     try {
+      opts.signal?.throwIfAborted();
       // Tắt dialog "Save password" — nó là UI của browser, nằm ngoài DOM nên
       // không click hay ẩn được, và nó che modal Upgrade khi soi giao diện.
       // Phải bơm Preferences TRƯỚC khi Chrome khởi động xong (xem ../prefs.ts).
@@ -162,7 +191,7 @@ export class ApiV3Launcher implements BrowserLauncher {
         this.log('   ✓ Đã tắt dialog lưu mật khẩu');
       }
 
-      const port = profile.port ?? (await this.resolvePort(token, profileId));
+      const port = profile.port ?? (await this.resolvePort(token, profileId, opts.signal));
       if (!port) {
         throw new ProviderError(
           'NETWORK_ERROR',
@@ -176,7 +205,8 @@ export class ApiV3Launcher implements BrowserLauncher {
       const attachment = await attachOverCdp(port, {
         attempts: this.connectAttempts,
         log: this.log,
-        sleep: this.sleep
+        sleep: this.sleep,
+        signal: opts.signal
       });
       this.attached.set(profileId, attachment.browser);
 
@@ -185,7 +215,7 @@ export class ApiV3Launcher implements BrowserLauncher {
     } catch (e) {
       // Mở được profile mà không gắn được vào thì phải dừng nó, nếu không mỗi
       // lượt chạy để lại một cửa sổ browser treo.
-      await this.stopProfile(token, profileId);
+      if (!ownershipHandedOff) await this.stop(profileId);
       throw e;
     }
   }
@@ -199,22 +229,46 @@ export class ApiV3Launcher implements BrowserLauncher {
    * vẫn coi profile là đang chạy.
    */
   async stop(profileId: string): Promise<void> {
-    const browser = this.attached.get(profileId);
-    this.attached.delete(profileId);
-    if (browser) await browser.close().catch(() => {});
+    const existing = this.stopping.get(profileId);
+    if (existing) return existing;
 
-    const token = await this.auth.getAccessToken();
-    await this.stopProfile(token, profileId);
+    const operation = (async (): Promise<void> => {
+      const token = await this.auth.getAccessToken();
+      await this.stopProfile(token, profileId);
+      const browser = this.attached.get(profileId);
+      this.attached.delete(profileId);
+      if (browser) await browser.close().catch(() => {});
+    })();
+    this.stopping.set(profileId, operation);
+    try {
+      await operation;
+    } finally {
+      if (this.stopping.get(profileId) === operation) this.stopping.delete(profileId);
+    }
   }
 
   /** Dừng ĐÚNG một profile. Không có stop-all ở bất cứ đâu. */
   private async stopProfile(token: string, profileId: string): Promise<void> {
     if (!profileId) return;
     try {
-      await this.api.stopProfile(token, profileId);
+      await withinDeadline(this.api.stopProfile(token, profileId, 10_000), 10_000);
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        if (Date.now() >= deadline) throw new Error('Profile stop confirmation timed out');
+        const remaining = deadline - Date.now();
+        const statuses = await withinDeadline(this.api.getQuickProfileStatuses(token, remaining), remaining);
+        const own = statuses.find((entry) => entry.profileId === profileId);
+        if (!own || own.status === 'stopped') break;
+        await this.sleep(250);
+      }
       this.log(`Đã dừng profile ${profileId}`);
-    } catch (e) {
-      this.log(`Không dừng được profile ${profileId}: ${(e as Error).message}`);
+    } catch {
+      this.log(`Không dừng được profile ${profileId}.`);
+      throw new ProviderError(
+        'NETWORK_ERROR',
+        'Không dừng được Multilogin profile ' + profileId + '.',
+        MULTILOGIN_SERVICE_NAME
+      );
     }
   }
 }

@@ -202,5 +202,30 @@ Khi thêm nhiệm vụ mới hoặc CapCut đổi UI: chạy một lượt làm 
 assertion trong `npm run selectors` **trước** khi sửa selector.
 Đó là cách duy nhất trong dự án này để không sửa mù.
 
+## 10. Ngân sách và thời gian chờ bằng chứng (Evidence Timeouts & Budgets)
 
+Thay thế cơ chế chờ độc lập (45s cho proof và 45s cho snapshot) bằng cơ chế đối soát chung một hạn mức (`reconcileMissionEvidence`):
 
+- **PWA install post-action:** Tối đa **12 giây** (`PWA_PROOF_TIMEOUT_MS = 12_000`). Bằng chứng bắt được trong lúc thao tác được tiêu thụ ngay; snapshot chỉ dùng thời gian còn lại của 12s.
+- **Notification post-action:** Tối đa **20 giây** (`NOTIF_PROOF_TIMEOUT_MS = 20_000`).
+- **Design Studio:** Giữ nguyên **90 giây** (`DESIGN_PROOF_TIMEOUT_MS = 90_000`).
+- **Video Studio:** Giữ nguyên **240 giây** (`VIDEO_PROOF_TIMEOUT_MS = 240_000`).
+- **Inter-round event/snapshot wait:** Tối đa **8 giây** (`INTER_ROUND_WAIT_MS = 8_000`), có lắng nghe hủy (`signal`).
+- **Final fresh snapshot wait:** Tối đa **10 giây** (`FINAL_SNAPSHOT_WAIT_MS = 10_000`).
+
+## 11. Bộ nhớ bằng chứng trong phiên (Per-Run Proof Memory)
+
+Mỗi phiên chạy duy trì `proofMemory: Set<string>` ghi nhận các nhiệm vụ đã thu thập thành công `do_action` (`err_no === 0`):
+
+- Khi `do_action` khớp và thành công, task key được nạp vào `proofMemory`.
+- Ở các vòng quét tiếp theo (`round > 1`), nhóm nhiệm vụ kiểm tra `proofMemory`: nếu toàn bộ task của nhóm đã được chứng minh, nhóm bị bỏ qua hoàn toàn.
+- Nếu snapshot của CapCut chưa cập nhật kịp thời, task vẫn không bị chạy lại mù quáng trong cùng một phiên chạy, tránh lãng phí credit và trigger rủi ro Shark.
+
+## 12. Chính sách khôi phục tab chính (One-Tab Page Recovery Policy)
+
+Khi tab chính của CapCut bị đóng hoặc crash ngoài ý muốn:
+
+- `PrimaryPageResolver` ưu tiên tái sử dụng các trang CapCut hợp lệ còn mở trong browser context trước khi mở trang thay thế.
+- Ngân sách khôi phục: **chính xác 1 tab thay thế** mỗi account run. Nếu tab thứ hai tiếp tục bị đóng hoặc crash, engine ném lỗi dừng rõ ràng thay vì rơi vào vòng lặp mở tab vô tận.
+- Khôi phục chỉ diễn ra ở các ranh giới an toàn: xác thực/OTP, cổng trial, bootstrap ban đầu và ranh giới giữa các nhóm nhiệm vụ.
+- Quá trình khôi phục trang giữ nguyên `proofMemory` để không làm mất bằng chứng của các nhiệm vụ đã thực hiện thành công.

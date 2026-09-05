@@ -23,7 +23,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { decideRowAction } from '../missions/simple';
+import { decideRowAction, notificationsGroup, pwaInstallGroup } from '../missions/simple';
+import { designStudioGroup } from '../missions/designStudio';
+import { videoStudioGroup } from '../missions/videoStudio';
 
 describe('decideRowAction', () => {
   it('nút Go thì bấm Go', () => {
@@ -47,5 +49,14 @@ describe('decideRowAction', () => {
   it('nhãn rỗng hoặc lạ thì không bấm gì', () => {
     expect(decideRowAction('')).toBe('skip');
     expect(decideRowAction('Xem thêm')).toBe('skip');
+  });
+});
+
+describe('mission budgets', () => {
+  it('uses the approved evidence budgets for all mission groups', () => {
+    expect(pwaInstallGroup.proofTimeoutMs).toBe(12_000);
+    expect(notificationsGroup.proofTimeoutMs).toBe(20_000);
+    expect(designStudioGroup.proofTimeoutMs).toBe(90_000);
+    expect(videoStudioGroup.proofTimeoutMs).toBe(240_000);
   });
 });
