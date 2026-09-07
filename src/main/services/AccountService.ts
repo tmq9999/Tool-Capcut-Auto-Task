@@ -92,4 +92,21 @@ export class AccountService {
   remove(ids: string[]): { deletedCount: number } {
     return { deletedCount: this.repo.deleteAccounts(ids) };
   }
+
+  getAutomationCredential(accountId: string): {
+    accountId: string;
+    email: string;
+    emailProvider: string;
+    capcutPassword: string;
+  } | null {
+    const record = this.repo.getAccountById(accountId);
+    if (!record || !record.passwordCapcutEncrypted) return null;
+    const capcutPassword = this.vault.decrypt(record.passwordCapcutEncrypted);
+    return {
+      accountId: record.id,
+      email: record.email,
+      emailProvider: record.emailProvider,
+      capcutPassword
+    };
+  }
 }

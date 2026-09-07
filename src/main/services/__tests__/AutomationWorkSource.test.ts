@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { AutomationRunConfigSchema } from '../../../shared/schemas/automation.schema';
 import type { EmailSourceProvider } from '../../../shared/schemas/provider.schema';
 import type {
@@ -97,6 +97,20 @@ beforeEach(() => {
 });
 
 describe('AutomationWorkSource', () => {
+  it('does not refill a failed billable acquisition slot', async () => {
+    fakeSession.acquireOne = async (id) => {
+      fakeSession.acquireCalls.push(id);
+      throw new Error('ambiguous purchase');
+    };
+    const source = createAutomationWorkSourceFactory(fakeEmailService).create({
+      ...CONFIG, mailLimit: 1, emailSource: { mode: 'api', provider: 'gmail94' }
+    }, 'failed-slot');
+    const signal = new AbortController().signal;
+    await source.prepare(1, signal);
+    await expect(source.next('worker-1', signal)).rejects.toThrow('ambiguous purchase');
+    expect(await source.next('worker-1', signal)).toBeNull();
+    expect(fakeSession.acquireCalls).toHaveLength(1);
+  });
   it('manual source returns every valid line once and then exhausts', async () => {
     const factory = createAutomationWorkSourceFactory(fakeEmailService);
     const source = factory.create({
@@ -153,6 +167,66 @@ describe('AutomationWorkSource', () => {
     expect(fakeEmailService.openCalls).toHaveLength(1);
     expect(fakeSession.acquireCalls).toEqual(['run-2:worker-1', 'run-2:worker-1']);
     expect(fakeSession.committed).toEqual([{ reservationId: 'reservation-1', accountId: 'account-1' }]);
+  });
+
+  it('continuous source stops at mailLimit and never acquires a fourth mailbox', async () => {
+    const source = createAutomationWorkSourceFactory(fakeEmailService).create({
+      ...CONFIG,
+      threadCount: 3,
+      mailLimit: 3,
+      emailSource: { mode: 'api', provider: 'gmail94', service: 'capcut' }
+    }, 'run-limit');
+    const signal = new AbortController().signal;
+
+    await expect(source.prepare(3, signal)).resolves.toMatchObject({ workerTarget: 3 });
+    await source.next('worker-1', signal);
+    await source.next('worker-2', signal);
+    await source.next('worker-3', signal);
+    await expect(source.next('worker-1', signal)).resolves.toBeNull();
+    expect(fakeSession.acquireCalls).toHaveLength(3);
+  });
+
+  it('reserves the limit before concurrent acquisition awaits', async () => {
+    const source = createAutomationWorkSourceFactory(fakeEmailService).create({
+      ...CONFIG, mailLimit: 3, emailSource: { mode: 'api', provider: 'gmail94' }
+    }, 'race');
+    const signal = new AbortController().signal;
+    await source.prepare(3, signal);
+    const items = await Promise.all(Array.from({ length: 6 }, (_, i) => source.next('worker-' + i, signal)));
+    expect(items.filter(Boolean)).toHaveLength(3);
+    expect(fakeSession.acquireCalls).toHaveLength(3);
+    for (const item of items) if (item) source.release(item);
+    expect(await source.next('again', signal)).toBeNull();
+  });
+
+  it('preflights only the limited initial wave', async () => {
+    const source = createAutomationWorkSourceFactory(fakeEmailService).create({
+      ...CONFIG, mailLimit: 2, emailSource: { mode: 'api', provider: 'gmail94' }
+    }, 'small');
+    expect((await source.prepare(10, new AbortController().signal)).workerTarget).toBe(2);
+    expect(fakeEmailService.openCalls[0].initialConcurrency).toBe(2);
+  });
+
+  it('does not acquire after Stop', async () => {
+    const source = createAutomationWorkSourceFactory(fakeEmailService).create({
+      ...CONFIG, mailLimit: 3, emailSource: { mode: 'api', provider: 'gmail94' }
+    }, 'stop');
+    const controller = new AbortController();
+    await source.prepare(3, controller.signal);
+    controller.abort(new Error('Stop'));
+    await expect(source.next('worker', controller.signal)).rejects.toThrow('Stop');
+    expect(fakeSession.acquireCalls).toHaveLength(0);
+  });
+
+  it('limits manual entries without purchasing', async () => {
+    const source = createAutomationWorkSourceFactory(fakeEmailService).create({
+      ...CONFIG, mailLimit: 1, emailSource: { mode: 'manual', entries: ['one@example.com', 'two@example.com'] }
+    }, 'manual-limit');
+    const signal = new AbortController().signal;
+    expect((await source.prepare(3, signal)).workerTarget).toBe(1);
+    expect(await source.next('worker', signal)).not.toBeNull();
+    expect(await source.next('worker', signal)).toBeNull();
+    expect(fakeSession.acquireCalls).toHaveLength(0);
   });
 
   it('continuous source releases reservation when item is released', async () => {
@@ -215,4 +289,82 @@ describe('AutomationWorkSource', () => {
       message: expect.stringContaining('trống')
     });
   });
+
+  it('does not open an email acquisition session for existing mode', async () => {
+    const mockCredentialReader = vi.fn((id: string) => ({
+      accountId: id,
+      email: `${id}@example.com`,
+      emailProvider: 'manual',
+      capcutPassword: 'pass'
+    }));
+
+    const source = (createAutomationWorkSourceFactory as unknown as (
+      email: typeof fakeEmailService,
+      creds: typeof mockCredentialReader
+    ) => ReturnType<typeof createAutomationWorkSourceFactory>)(fakeEmailService, mockCredentialReader).create({
+      ...CONFIG,
+      threadCount: 3,
+      emailSource: {
+        mode: 'existing',
+        accountIds: ['acc-1', 'acc-2', 'acc-3']
+      }
+    }, 'run-existing');
+
+    const signal = new AbortController().signal;
+    const readiness = await source.prepare(3, signal);
+
+    expect(readiness.workerTarget).toBe(3);
+    expect(fakeEmailService.openCalls).toHaveLength(0);
+
+    const item1 = await source.next('w1', signal);
+    expect(item1).toMatchObject({
+      kind: 'existing',
+      accountId: 'acc-1',
+      email: 'acc-1@example.com',
+      capcutPassword: 'pass'
+    });
+  });
+
+  it('fails before browser launch when an account or saved password is missing', async () => {
+    const mockCredentialReader = vi.fn((id: string) => {
+      if (id === 'acc-missing') return null;
+      if (id === 'acc-no-pass') {
+        return null;
+      }
+      return {
+        accountId: id,
+        email: `${id}@example.com`,
+        emailProvider: 'manual',
+        capcutPassword: 'pass'
+      };
+    });
+
+    const factory = (createAutomationWorkSourceFactory as unknown as (
+      email: typeof fakeEmailService,
+      creds: typeof mockCredentialReader
+    ) => ReturnType<typeof createAutomationWorkSourceFactory>)(fakeEmailService, mockCredentialReader);
+
+    // Case 1: missing ID
+    const source1 = factory.create({
+      ...CONFIG,
+      emailSource: {
+        mode: 'existing',
+        accountIds: ['acc-1', 'acc-missing']
+      }
+    }, 'run-missing');
+
+    await expect(source1.prepare(2, new AbortController().signal)).rejects.toThrow();
+
+    // Case 2: missing password
+    const source2 = factory.create({
+      ...CONFIG,
+      emailSource: {
+        mode: 'existing',
+        accountIds: ['acc-no-pass']
+      }
+    }, 'run-no-pass');
+
+    await expect(source2.prepare(1, new AbortController().signal)).rejects.toThrow();
+  });
 });
+

@@ -22,7 +22,6 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import type { BrowserContext, Page } from 'playwright-core';
 import {
   AutomationRunService,
-  type CapcutAccountResult,
   type CapcutTaskRunner,
   type IAccountSink,
   type IBrowserRuntimeApi,
@@ -54,6 +53,7 @@ const stubWorkSources: AutomationWorkSourceFactory = {
       const items: AutomationWorkItem[] = config.emailSource.entries.map((entry, i) => {
         const [email, password] = entry.split('|');
         return {
+          kind: 'new',
           sourceId: 'man-' + (i + 1),
           email,
           emailPassword: password,
@@ -70,6 +70,7 @@ const stubWorkSources: AutomationWorkSourceFactory = {
     }
     const items: AutomationWorkItem[] = [
       {
+        kind: 'new',
         sourceId: 'src-1',
         email: 'mail1@gmail.com',
         emailProvider: 'gmail94',
@@ -138,6 +139,8 @@ class StubLauncher implements BrowserLauncher {
   async stop(): Promise<void> {}
 }
 
+import type { CapcutUiAccountResult } from '../capcut/types';
+
 type RunAccountInput = Parameters<CapcutTaskRunner['runAccount']>[0];
 
 class RecordingCapcutRunner implements CapcutTaskRunner {
@@ -147,7 +150,7 @@ class RecordingCapcutRunner implements CapcutTaskRunner {
   public otpResult: string | null = null;
   public otpError: Error | null = null;
 
-  async runAccount(input: RunAccountInput): Promise<CapcutAccountResult> {
+  async runAccount(input: RunAccountInput): Promise<CapcutUiAccountResult> {
     this.lastInput = input;
     if (this.callOtp && input.getOtp) {
       try {
@@ -156,7 +159,17 @@ class RecordingCapcutRunner implements CapcutTaskRunner {
         this.otpError = err as Error;
       }
     }
-    return { done: 0, total: 0, credits: 0, creditsTotal: 0, missing: [], tasks: [] };
+    return {
+      authenticated: true,
+      done: 0,
+      total: 0,
+      credits: 0,
+      creditsTotal: 0,
+      missing: [],
+      tasks: [],
+      verification: null,
+      unsettledProofs: []
+    };
   }
 }
 

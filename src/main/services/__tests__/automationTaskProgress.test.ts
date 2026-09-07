@@ -50,6 +50,7 @@ const stubWorkSources: AutomationWorkSourceFactory = {
     const items: AutomationWorkItem[] = entries.map((entry, i) => {
       const [email, password] = entry.split('|');
       return {
+        kind: 'new',
         sourceId: 'man-' + (i + 1),
         email,
         emailPassword: password,

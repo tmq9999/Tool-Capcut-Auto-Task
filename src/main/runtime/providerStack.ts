@@ -41,7 +41,14 @@ import {
   MultiloginBrowserRuntime,
   UnsupportedBrowserRuntime
 } from '../services/browserRuntime';
-import type { IBrowserRuntimeApi } from '../services/AutomationRunService';
+import {
+  AutomationTerminalError
+} from '../services/AutomationTerminalError';
+import type {
+  HttpOnlyAccountRunner,
+  IBrowserRuntimeApi,
+  ICapcutTaskProgressSink
+} from '../services/AutomationRunService';
 
 export interface ProviderStackRepositories {
   credentialRepo: CredentialRepository;
@@ -76,6 +83,39 @@ export function createProviderStackRepositories(db: Database.Database): Provider
   };
 }
 
+export function createTaskProgressSink(
+  repo: Pick<AccountTaskRepository, 'recordCheckpoint' | 'upsertMany'>
+): ICapcutTaskProgressSink {
+  return {
+    record: async (accountId, checkpoint) => {
+      try {
+        repo.recordCheckpoint(accountId, {
+          rows: checkpoint.rows,
+          receipt: {
+            runId: checkpoint.receipt.runId,
+            sessionAlias: checkpoint.receipt.sessionAlias,
+            observedAt: checkpoint.receipt.observedAt,
+            requiredAfter: checkpoint.receipt.requiredAfter,
+            serverTotal: checkpoint.receipt.serverTotal,
+            serverDone: checkpoint.receipt.serverDone,
+            isFresh: checkpoint.receipt.fresh,
+            isFinal: checkpoint.receipt.final
+          }
+        });
+      } catch {
+        throw new AutomationTerminalError(
+          'failed',
+          { code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED' },
+          'Không lưu được checkpoint nhiệm vụ.'
+        );
+      }
+    },
+    recordLegacy: (accountId, rows) => {
+      repo.upsertMany(accountId, rows);
+    }
+  };
+}
+
 /**
  * Composition root for the provider layer. Wires the four implemented vendors
  * (Multilogin, KiotProxy, Gmail94, DongVanFB) into the services the IPC layer
@@ -90,6 +130,8 @@ export interface ProviderStackOptions {
    * hành vi giữ đúng như trước khi gộp.
    */
   userDataDir?: string;
+  /** Explicit HTTP-only composition; absent means HTTP-only runs fail closed. */
+  httpOnlyRunner?: HttpOnlyAccountRunner;
 }
 
 export function createProviderStack(
@@ -162,7 +204,10 @@ export function createProviderStack(
     });
   };
 
-  const workSources = createAutomationWorkSourceFactory(emailPurchaseService);
+  const workSources = createAutomationWorkSourceFactory(
+    emailPurchaseService,
+    (id) => accountService.getAutomationCredential(id)
+  );
   const automationRunService = new AutomationRunService({
     workSources,
     emailOtp: emailPurchaseService,
@@ -176,14 +221,8 @@ export function createProviderStack(
     capcut: options.userDataDir
       ? new CapcutEngineService({ userDataDir: options.userDataDir })
       : undefined,
-    /**
-     * Tiến độ nhiệm vụ luôn được nối, kể cả khi engine chưa bật: adapter chỉ là
-     * cầu nối service → repository (AGENTS.md §11) và `record` chỉ được gọi sau
-     * khi engine trả về rows, nên không có engine thì nó không bao giờ chạy.
-     */
-    taskProgress: {
-      record: (accountId, rows) => repositories.accountTaskRepo.upsertMany(accountId, rows)
-    }
+    httpOnlyRunner: options.httpOnlyRunner,
+    taskProgress: createTaskProgressSink(repositories.accountTaskRepo)
   });
 
   const providerRegistry = new ProviderRegistry(

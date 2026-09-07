@@ -33,6 +33,10 @@ export function isBrowserImplemented(browser: BrowserRuntime): boolean {
 export const AutomationModuleEnum = z.enum(['trial', 'team', 'credit']);
 export type AutomationModule = z.infer<typeof AutomationModuleEnum>;
 
+/** Execution policy. HTTP-only never enters the browser automation engine. */
+export const MissionTransportEnum = z.enum(['ui', 'http-only']);
+export type MissionTransport = z.infer<typeof MissionTransportEnum>;
+
 export const EmailSourceConfigSchema = z.discriminatedUnion('mode', [
   z.object({
     mode: z.literal('manual'),
@@ -46,6 +50,13 @@ export const EmailSourceConfigSchema = z.discriminatedUnion('mode', [
   // Catch-all domain the operator owns: addresses are generated, not bought.
   z.object({
     mode: z.literal('custom')
+  }).strict(),
+  z.object({
+    mode: z.literal('existing'),
+    accountIds: z.array(z.string().min(1)).min(1).max(20).refine(
+      (items) => new Set(items).size === items.length,
+      { message: 'Danh sách accountIds không được chứa giá trị trùng' }
+    )
   }).strict()
 ]);
 export type EmailSourceConfig = z.infer<typeof EmailSourceConfigSchema>;
@@ -101,7 +112,10 @@ export const PasswordConfigSchema = z.discriminatedUnion('mode', [
 export type PasswordConfig = z.infer<typeof PasswordConfigSchema>;
 
 export const AutomationRunConfigSchema = z.object({
+  missionTransport: MissionTransportEnum.optional(),
   threadCount: z.number().int().min(1).max(200),
+  /** Missing or zero preserves unlimited API/custom runs. */
+  mailLimit: z.number().int().min(0).max(200).optional(),
   browser: BrowserRuntimeEnum,
   headless: z.boolean(),
   retryCount: z.number().int().min(0).max(10),
@@ -146,6 +160,7 @@ export const AutomationRunStateEnum = z.enum([
 export type AutomationRunState = z.infer<typeof AutomationRunStateEnum>;
 
 export const AutomationTerminalCodeEnum = z.enum([
+  'MAIL_LIMIT_REACHED',
   'MANUAL_EXHAUSTED',
   'USER_STOP',
   'APP_SHUTDOWN',
@@ -153,8 +168,11 @@ export const AutomationTerminalCodeEnum = z.enum([
   'PROVIDER_AUTH_REQUIRED',
   'PROVIDER_CONFIG_ERROR',
   'PROVIDER_RETRY_EXHAUSTED',
+  'PURCHASE_OUTCOME_UNKNOWN',
   'PROXY_CAPACITY_UNAVAILABLE',
-  'INTERNAL_ERROR'
+  'INTERNAL_ERROR',
+  'TASK_CHECKPOINT_PERSISTENCE_FAILED',
+  'RESOURCE_CLEANUP_FAILED'
 ]);
 export type AutomationTerminalCode = z.infer<typeof AutomationTerminalCodeEnum>;
 
@@ -181,7 +199,9 @@ export type AutomationRunCountersDTO = z.infer<typeof AutomationRunCountersSchem
 export const RunningThreadInfoSchema = z.object({
   accountId: z.string().min(1),
   email: z.string().min(1),
-  profileId: z.string().min(1)
+  /** Optional for backward compatibility; HTTP-only threads have no profile. */
+  profileId: z.string().min(1).optional(),
+  transport: MissionTransportEnum.optional()
 }).strict();
 export type RunningThreadInfoDTO = z.infer<typeof RunningThreadInfoSchema>;
 

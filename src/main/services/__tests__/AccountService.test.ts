@@ -153,3 +153,30 @@ describe('AccountService.remove', () => {
     expect(service.list({ page: 1, pageSize: 50 }).total).toBe(0);
   });
 });
+
+describe('AccountService.getAutomationCredential', () => {
+  it('loads CapCut credentials in main process without exposing them in DTO output', () => {
+    const service = createService();
+    service.create({
+      email: 'user@example.com',
+      emailProvider: 'manual',
+      passwordCapcut: 'superSecretCapcutPass123',
+      credit: 0,
+      status: 'active'
+    });
+
+    const cred = (service as unknown as { getAutomationCredential: (id: string) => unknown }).getAutomationCredential('acc-1');
+    expect(cred).toEqual({
+      accountId: 'acc-1',
+      email: 'user@example.com',
+      emailProvider: 'manual',
+      capcutPassword: 'superSecretCapcutPass123'
+    });
+
+    // Public list still exposes only hasPasswordCapcut, never the decrypted password
+    const list = service.list({ page: 1, pageSize: 50 });
+    expect(list.items[0].hasPasswordCapcut).toBe(true);
+    expect(JSON.stringify(list.items)).not.toContain('superSecretCapcutPass123');
+  });
+});
+

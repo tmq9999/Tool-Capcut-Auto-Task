@@ -309,5 +309,43 @@ describe('AutomationEvidenceEventSchema', () => {
       }).success
     ).toBe(false);
   });
+
+  it('validates a non-empty unique list of existing account ids', () => {
+    // empty list
+    expect(
+      AutomationRunConfigSchema.safeParse({
+        ...baseConfig,
+        emailSource: { mode: 'existing', accountIds: [] }
+      }).success
+    ).toBe(false);
+
+    // duplicate ids
+    expect(
+      AutomationRunConfigSchema.safeParse({
+        ...baseConfig,
+        emailSource: { mode: 'existing', accountIds: ['acc-1', 'acc-1'] }
+      }).success
+    ).toBe(false);
+
+    // 21 items
+    const twentyOne = Array.from({ length: 21 }, (_, i) => `acc-${i + 1}`);
+    expect(
+      AutomationRunConfigSchema.safeParse({
+        ...baseConfig,
+        emailSource: { mode: 'existing', accountIds: twentyOne }
+      }).success
+    ).toBe(false);
+
+    // valid 3 items
+    const valid = AutomationRunConfigSchema.safeParse({
+      ...baseConfig,
+      emailSource: { mode: 'existing', accountIds: ['acc-1', 'acc-2', 'acc-3'] }
+    });
+    expect(valid.success).toBe(true);
+    if (valid.success && valid.data.emailSource.mode === 'existing') {
+      expect(valid.data.emailSource.accountIds).toEqual(['acc-1', 'acc-2', 'acc-3']);
+    }
+  });
 });
+
 

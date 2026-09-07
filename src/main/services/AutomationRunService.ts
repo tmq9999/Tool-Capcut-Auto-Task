@@ -285,6 +285,7 @@ interface ThreadRuntime {
   accountId: string;
   email: string;
   capcutPassword: string;
+  isExistingAccount?: boolean;
   purchasedEmailId?: string;
   lease?: AcquiredProxyLease;
   directProxy?: BrowserProxySettings;
@@ -802,7 +803,7 @@ export class AutomationRunService {
     thread: ThreadRuntime | undefined,
     lease: AcquiredProxyLease | undefined
   ): Promise<void> {
-    if (item && !committed) {
+    if (item && item.kind !== 'existing' && !committed) {
       try {
         source.release(item);
       } catch {
@@ -837,22 +838,39 @@ export class AutomationRunService {
     runId: string,
     workerAlias: string
   ): ThreadRuntime {
-    const capcutPassword = generateCapcutPassword(config.password);
-    const created = this.deps.accounts.create({
-      email: item.email,
-      emailProvider: item.emailProvider,
-      emailPassword: item.emailPassword,
-      passwordCapcut: capcutPassword,
-      credit: 0,
-      status: 'processing',
-      automationStep: config.missionTransport === 'http-only'
-        ? 'Đang khởi chạy HTTP-only'
-        : 'Đang khởi chạy browser',
-      ...(config.missionTransport === 'http-only' ? {} : { browserProvider: config.browser })
-    });
+    let accountId: string;
+    let capcutPassword: string;
+    const isExisting = item.kind === 'existing';
+
+    if (isExisting) {
+      accountId = item.accountId;
+      capcutPassword = item.capcutPassword;
+      this.deps.accounts.update(accountId, {
+        status: 'processing',
+        automationStep: config.missionTransport === 'http-only'
+          ? 'Đang khởi chạy HTTP-only'
+          : 'Đang khởi chạy browser',
+        ...(config.missionTransport === 'http-only' ? {} : { browserProvider: config.browser })
+      });
+    } else {
+      capcutPassword = generateCapcutPassword(config.password);
+      const created = this.deps.accounts.create({
+        email: item.email,
+        emailProvider: item.emailProvider,
+        emailPassword: item.emailPassword,
+        passwordCapcut: capcutPassword,
+        credit: 0,
+        status: 'processing',
+        automationStep: config.missionTransport === 'http-only'
+          ? 'Đang khởi chạy HTTP-only'
+          : 'Đang khởi chạy browser',
+        ...(config.missionTransport === 'http-only' ? {} : { browserProvider: config.browser })
+      });
+      accountId = created.id;
+    }
 
     const threadController = new AbortController();
-    this.iterationAbort.set(created.id, threadController);
+    this.iterationAbort.set(accountId, threadController);
 
     let notifyDone: () => void = () => {};
     const completionPromise = new Promise<void>((resolve) => {
@@ -862,10 +880,11 @@ export class AutomationRunService {
     const runtime: ThreadRuntime = {
       runId,
       workerAlias,
-      accountId: created.id,
+      accountId,
       email: item.email,
       capcutPassword,
-      purchasedEmailId: item.purchasedEmailId,
+      isExistingAccount: isExisting,
+      purchasedEmailId: item.kind === 'new' ? item.purchasedEmailId : undefined,
       lease,
       directProxy: slotProxy,
       sessionSequence: 0,
@@ -1121,14 +1140,14 @@ export class AutomationRunService {
       email: thread.email,
       password,
       accountId: thread.accountId,
-      isNewAccount: authAttempt === 'existing-only' ? false : thread.purchasedEmailId !== undefined,
+      isNewAccount: (authAttempt === 'existing-only' || thread.isExistingAccount) ? false : thread.purchasedEmailId !== undefined,
       authAttempt,
       runId: thread.runId,
       sessionAlias: session.alias,
       sessionStartedAt: session.startedAt,
       signal,
       ui: session.ui,
-      getOtp: authAttempt === 'existing-only' ? undefined : this.buildOtpReader(thread, signal),
+      getOtp: (authAttempt === 'existing-only' || thread.isExistingAccount) ? undefined : this.buildOtpReader(thread, signal),
       maxRounds: Math.max(1, Math.min(1 + config.retryCount, 4)),
       pace: {
         stepMinMs: config.stepDelayMinMs,
@@ -1317,9 +1336,9 @@ export class AutomationRunService {
           email: thread.email,
           password,
           accountId: thread.accountId,
-          isNewAccount: thread.purchasedEmailId !== undefined,
+          isNewAccount: thread.isExistingAccount ? false : thread.purchasedEmailId !== undefined,
           signal: iterationSignal,
-          getOtp: this.buildOtpReader(thread, iterationSignal),
+          getOtp: thread.isExistingAccount ? undefined : this.buildOtpReader(thread, iterationSignal),
           proxy: toHttpOnlyProxy(proxy),
           onTaskProgress: (rows) => {
             if (this.activeThreads.get(thread.accountId) !== thread) return;
@@ -1334,7 +1353,7 @@ export class AutomationRunService {
         return this.classifyUiResult(thread, result, config);
       }
 
-      let authAttempt: CapcutAuthAttempt = 'initial';
+      let authAttempt: CapcutAuthAttempt = thread.isExistingAccount ? 'existing-only' : 'initial';
       let carriedUnsettledProofs: readonly UnsettledTaskProof[] = [];
 
       while (true) {
@@ -1558,7 +1577,7 @@ export class AutomationRunService {
                 this.releaseRunningWaiters();
               }
               iterationSignal.throwIfAborted();
-              if (item!.purchasedEmailId) {
+              if (item!.kind === 'new' && item!.purchasedEmailId) {
                 source.commit(item!, thread.accountId);
                 committed = true;
               }

@@ -234,6 +234,7 @@ function createService(
           if (!trimmed) return [];
           const [email, password] = trimmed.split('|');
           return [{
+            kind: 'new',
             sourceId: 'man-' + (i + 1),
             email: email.trim(),
             emailPassword: password?.trim(),
@@ -264,6 +265,7 @@ function createService(
             : 'gmail94';
         const row = purchasedRow(i + 1, provider);
         return {
+          kind: 'new',
           sourceId: row.id,
           email: row.email,
           emailProvider: row.provider,
@@ -287,10 +289,11 @@ function createService(
         },
         next: async () => items.shift() ?? null,
         commit: (item, accountId) => {
-          emailSource.markConsumed(item.purchasedEmailId ?? item.sourceId, accountId);
+          const id = item.kind === 'new' && item.purchasedEmailId ? item.purchasedEmailId : item.sourceId;
+          emailSource.markConsumed(id, accountId);
         },
         release: (item) => {
-          if (item.purchasedEmailId) {
+          if (item.kind === 'new' && item.purchasedEmailId) {
             emailSource.release(item.purchasedEmailId);
           }
         }
@@ -884,7 +887,7 @@ describe('AutomationRunService HTTP-only mission transport', () => {
           next: async () => {
             if (!available) return null;
             available = false;
-            return { sourceId: 'm-1', email: 'bound@x.com', emailProvider: 'manual' };
+            return { kind: 'new' as const, sourceId: 'm-1', email: 'bound@x.com', emailProvider: 'manual' };
           },
           commit: () => {},
           release: () => {}
@@ -935,7 +938,7 @@ describe('AutomationRunService HTTP-only mission transport', () => {
           next: async () => {
             if (!available) return null;
             available = false;
-            return { sourceId: 'm-1', email: 'stop@x.com', emailProvider: 'manual' };
+            return { kind: 'new' as const, sourceId: 'm-1', email: 'stop@x.com', emailProvider: 'manual' };
           },
           commit: () => {}, release: () => {}
         })
@@ -979,6 +982,7 @@ describe('AutomationRunService chặn tổ hợp xcli + proxy user/pass', () => 
           const items: AutomationWorkItem[] = config.emailSource.entries.map((entry, i) => {
             const [email, password] = entry.split('|');
             return {
+              kind: 'new',
               sourceId: 'man-' + (i + 1),
               email,
               emailPassword: password,
@@ -996,7 +1000,7 @@ describe('AutomationRunService chặn tổ hợp xcli + proxy user/pass', () => 
         return {
           kind: 'continuous',
           prepare: async (c) => ({ workerTarget: c }),
-          next: async () => ({ sourceId: 's-1', email: 'a@x.com', emailProvider: 'gmail94' }),
+          next: async () => ({ kind: 'new' as const, sourceId: 's-1', email: 'a@x.com', emailProvider: 'gmail94' }),
           commit: () => {},
           release: () => {}
         };
@@ -1730,6 +1734,7 @@ describe('AutomationRunService continuous cancellable worker lifecycle', () => {
 
   function makeItems(count: number, provider = 'gmail94'): AutomationWorkItem[] {
     return Array.from({ length: count }, (_value, index) => ({
+      kind: 'new',
       sourceId: 'source-' + (index + 1),
       email: 'mail' + (index + 1) + '@gmail.com',
       emailProvider: provider,
@@ -1859,6 +1864,7 @@ describe('AutomationRunService continuous cancellable worker lifecycle', () => {
     entries: string[];
   }) {
     const items = options.entries.map((email, index) => ({
+      kind: 'new' as const,
       sourceId: 'manual:' + (index + 1),
       email,
       emailProvider: 'manual'
@@ -2251,6 +2257,7 @@ describe('session-scoped browser ownership', () => {
     return {
       create: () => {
         const items = entries.map((entry, idx) => ({
+          kind: 'new' as const,
           sourceId: 'man-' + (idx + 1),
           email: entry.split('|')[0],
           emailProvider: 'manual'
@@ -3530,5 +3537,194 @@ describe('session-scoped browser ownership', () => {
       });
     });
   });
+
+  describe('Task 11: Non-purchasing existing-account resume source', () => {
+    it('does not create or commit an account row for an existing work item', async () => {
+      let commitCalled = false;
+      const customWorkSources: AutomationWorkSourceFactory = {
+        create: () => {
+          let delivered = false;
+          return {
+            kind: 'finite',
+            prepare: async () => ({ workerTarget: 1 }),
+            next: async () => {
+              if (delivered) return null;
+              delivered = true;
+              return {
+                kind: 'existing',
+                sourceId: 'existing:acc-existing-1',
+                accountId: 'acc-existing-1',
+                email: 'existing@example.com',
+                emailProvider: 'manual',
+                capcutPassword: 'existingPass123'
+              };
+            },
+            commit: () => { commitCalled = true; },
+            release: () => {}
+          };
+        }
+      };
+
+      const fakeLauncher: BrowserLauncher = {
+        name: 'api-v3',
+        launch: vi.fn(async (opts) => {
+          opts.onProfileStarted?.('prof-existing');
+          return {
+            page: {} as unknown as LaunchedProfile['page'],
+            context: {} as unknown as LaunchedProfile['context'],
+            port: 9222,
+            profileId: 'prof-existing'
+          };
+        }),
+        stop: vi.fn(async () => {})
+      };
+
+      const customCapcut: CapcutTaskRunner = {
+        runAccount: async (input) => ({
+          authenticated: true,
+          done: 1,
+          total: 1,
+          credits: 10,
+          creditsTotal: 10,
+          missing: [],
+          tasks: [],
+          unsettledProofs: [],
+          verification: {
+            runId: input.runId ?? 'run-1',
+            sessionAlias: input.sessionAlias ?? 's1',
+            observedAt: new Date().toISOString(),
+            requiredAfter: new Date().toISOString(),
+            fresh: true,
+            final: true,
+            serverTotal: 1,
+            serverDone: 1,
+            complete: true
+          }
+        })
+      };
+
+      const service = new AutomationRunService(
+        {
+          workSources: customWorkSources,
+          emailOtp: { readOtp: async () => '123456' },
+          proxies: proxySource,
+          browser,
+          accounts,
+          logBus,
+          launcher: () => fakeLauncher,
+          capcut: customCapcut
+        },
+        {
+          sleep: async () => {},
+          nextId: () => 'run-1'
+        }
+      );
+
+      await service.start(baseConfig({ threadCount: 1 }));
+      const summary = await service.waitForCompletion();
+
+      expect(summary.state).toBe('completed');
+      expect(accounts.created.length).toBe(0);
+      expect(commitCalled).toBe(false);
+      expect(accounts.updates.some((u) => u.id === 'acc-existing-1')).toBe(true);
+    });
+
+    it('uses existing-only auth from the first session', async () => {
+      let firstRunAccountInput: Parameters<CapcutTaskRunner['runAccount']>[0] | null = null;
+      const customWorkSources: AutomationWorkSourceFactory = {
+        create: () => {
+          let delivered = false;
+          return {
+            kind: 'finite',
+            prepare: async () => ({ workerTarget: 1 }),
+            next: async () => {
+              if (delivered) return null;
+              delivered = true;
+              return {
+                kind: 'existing',
+                sourceId: 'existing:acc-existing-2',
+                accountId: 'acc-existing-2',
+                email: 'existing2@example.com',
+                emailProvider: 'manual',
+                capcutPassword: 'existingPass456'
+              };
+            },
+            commit: () => {},
+            release: () => {}
+          };
+        }
+      };
+
+      const fakeLauncher: BrowserLauncher = {
+        name: 'api-v3',
+        launch: vi.fn(async (opts) => {
+          opts.onProfileStarted?.('prof-existing-2');
+          return {
+            page: {} as unknown as LaunchedProfile['page'],
+            context: {} as unknown as LaunchedProfile['context'],
+            port: 9222,
+            profileId: 'prof-existing-2'
+          };
+        }),
+        stop: vi.fn(async () => {})
+      };
+
+      const customCapcut: CapcutTaskRunner = {
+        runAccount: async (input) => {
+          if (!firstRunAccountInput) {
+            firstRunAccountInput = input;
+          }
+          return {
+            authenticated: true,
+            done: 1,
+            total: 1,
+            credits: 10,
+            creditsTotal: 10,
+            missing: [],
+            tasks: [],
+            unsettledProofs: [],
+            verification: {
+              runId: input.runId ?? 'run-1',
+              sessionAlias: input.sessionAlias ?? 's1',
+              observedAt: new Date().toISOString(),
+              requiredAfter: new Date().toISOString(),
+              fresh: true,
+              final: true,
+              serverTotal: 1,
+              serverDone: 1,
+              complete: true
+            }
+          };
+        }
+      };
+
+      const service = new AutomationRunService(
+        {
+          workSources: customWorkSources,
+          emailOtp: { readOtp: async () => '123456' },
+          proxies: proxySource,
+          browser,
+          accounts,
+          logBus,
+          launcher: () => fakeLauncher,
+          capcut: customCapcut
+        },
+        {
+          sleep: async () => {},
+          nextId: () => 'run-1'
+        }
+      );
+
+      await service.start(baseConfig({ threadCount: 1 }));
+      await service.waitForCompletion();
+
+      expect(firstRunAccountInput).not.toBeNull();
+      const input = firstRunAccountInput!;
+      expect(input.authAttempt).toBe('existing-only');
+      expect(input.isNewAccount).toBe(false);
+      expect(input.getOtp).toBeUndefined();
+    });
+  });
 });
+
 
