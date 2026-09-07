@@ -35,6 +35,7 @@ import {
   type MultiloginTokenSource
 } from '../../browserRuntime';
 import { seedPreferences } from '../prefs';
+import { checkRendererHealth } from '../rendererHealth';
 import { withinDeadline } from '../cancellation';
 import {
   attachOverCdp,
@@ -203,12 +204,17 @@ export class ApiV3Launcher implements BrowserLauncher {
       }
 
       const attachment = await attachOverCdp(port, {
+        headless: opts.headless ?? false,
         attempts: this.connectAttempts,
         log: this.log,
         sleep: this.sleep,
-        signal: opts.signal
+        signal: opts.signal,
+        ui: opts.ui
       });
       this.attached.set(profileId, attachment.browser);
+      if (opts.headless) {
+        await checkRendererHealth(attachment.page, { signal: opts.signal, log: this.log, ui: opts.ui });
+      }
 
       this.log(`   ✅ Session sẵn sàng — port ${port}, profile ${profileId}`);
       return { page: attachment.page, context: attachment.context, port, profileId };

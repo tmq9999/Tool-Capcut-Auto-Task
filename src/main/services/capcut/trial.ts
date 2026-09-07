@@ -29,7 +29,9 @@
 import type { BrowserContext, Page } from 'playwright-core';
 
 import { dump } from './diag';
-import { rand } from './human';
+import { foregroundPage, rand } from './human';
+import { createDirectUiInteraction } from './uiInteractionScheduler';
+import type { AccountUiInteraction } from './types';
 
 export interface TrialInfo {
   /** Có ưu đãi dùng thử miễn phí không */
@@ -95,7 +97,15 @@ const READ_TRIAL = `(() => {
 })()`;
 
 /** Mở modal nâng cấp. Trả về false nếu không bấm được lối vào nào. */
-async function openUpgradeModal(page: Page, log: (m: string) => void): Promise<boolean> {
+async function openUpgradeModal(
+  page: Page,
+  log: (m: string) => void,
+  ui?: AccountUiInteraction,
+  signal?: AbortSignal
+): Promise<boolean> {
+  const targetSig = signal ?? new AbortController().signal;
+  const targetUi = ui ?? createDirectUiInteraction(targetSig);
+
   // Các popup che header phải dẹp trước: banner xin email, và onboarding "Got it".
   for (const sel of [
     'button.lv-btn-primary:has-text("Got it")',
@@ -105,7 +115,11 @@ async function openUpgradeModal(page: Page, log: (m: string) => void): Promise<b
   ]) {
     const el = page.locator(sel).first();
     if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
-      await el.click({ timeout: 3000, force: true }).catch(() => {});
+      await foregroundPage(
+        page,
+        { signal: targetSig, stage: 'trial:banner-close', ui: targetUi },
+        () => el.click({ timeout: 3000, force: true })
+      ).catch(() => {});
       await page.waitForTimeout(800);
     }
   }
@@ -132,7 +146,11 @@ async function openUpgradeModal(page: Page, log: (m: string) => void): Promise<b
 
     // `[data-id=...]` là div rỗng bọc ngoài; click vào chính nó vẫn nổi bọt
     // xuống component React bên trong, nên dùng force thay vì đòi visible.
-    await el.click({ timeout: 5000, force: true }).catch(() => {});
+    await foregroundPage(
+      page,
+      { signal: targetSig, stage: 'trial:open-upgrade', ui: targetUi },
+      () => el.click({ timeout: 5000, force: true })
+    ).catch(() => {});
     log(`đã bấm ${label}`);
     await page.waitForTimeout(rand(6000, 8000));
 
@@ -156,7 +174,9 @@ async function openUpgradeModal(page: Page, log: (m: string) => void): Promise<b
 export async function checkProTrial(
   page: Page,
   _context: BrowserContext,
-  log: (m: string) => void
+  log: (m: string) => void,
+  ui?: AccountUiInteraction,
+  signal?: AbortSignal
 ): Promise<TrialInfo> {
   const fallback = (error: string, dumpName?: string | null): TrialInfo => ({
     canTrial: true,
@@ -176,7 +196,7 @@ export async function checkProTrial(
     .catch(() => {});
   await page.waitForTimeout(rand(6000, 9000));
 
-  if (!(await openUpgradeModal(page, log))) {
+  if (!(await openUpgradeModal(page, log, ui, signal))) {
     return fallback('không mở được modal nâng cấp', await dump(page, 'upgrade_modal_missing'));
   }
 

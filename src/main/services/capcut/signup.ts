@@ -37,6 +37,9 @@ import type { BrowserContext, Locator, Page } from 'playwright-core';
 import type { CapcutCredentials, LogFn } from './login';
 import { dump, StepError } from './diag';
 import { skipOnboardingSurvey } from './overlays';
+import type { AccountUiInteraction } from './types';
+import { foregroundPage } from './human';
+import { createDirectUiInteraction } from './uiInteractionScheduler';
 
 const SIGNUP_URL =
   'https://www.capcut.com/signup?redirect_url=https%3A%2F%2Fwww.capcut.com%2Fmy-edit&lang=en';
@@ -61,6 +64,8 @@ export interface SignupOptions {
    * Không truyền mà CapCut lại đòi OTP thì `getOtpCode` ném lỗi rõ ràng.
    */
   getOtp?: (email: string) => Promise<string>;
+  ui?: AccountUiInteraction;
+  signal?: AbortSignal;
 }
 
 // -----------------------------------------------------------------------------
@@ -90,10 +95,19 @@ async function fillVerified(
 }
 
 /** Bấm trigger nhiều lần cho tới khi target xuất hiện (UI CapCut hay lag) */
-async function clickUntilVisible(trigger: Locator, target: Locator, attempts = 60): Promise<void> {
+async function clickUntilVisible(
+  trigger: Locator,
+  target: Locator,
+  ui: AccountUiInteraction,
+  signal: AbortSignal,
+  attempts = 60
+): Promise<void> {
   await trigger.waitFor({ state: 'visible', timeout: 25000 });
   for (let i = 0; i < attempts; i++) {
-    await trigger.click({ timeout: 3000 }).catch(() => {});
+    signal.throwIfAborted();
+    await foregroundPage(trigger.page(), { signal, stage: 'signup:open-email-form', ui }, async () => {
+      await trigger.click({ timeout: 3000 }).catch(() => {});
+    });
     if (await target.isVisible({ timeout: 600 }).catch(() => false)) return;
   }
   throw new StepError(
@@ -134,7 +148,13 @@ async function getOtpCode(
 }
 
 /** Điền mã OTP vào ô nhập (hỗ trợ cả 1 input dài và 6 input rời) */
-async function fillOtp(page: Page, code: string, log: LogFn): Promise<void> {
+async function fillOtp(
+  page: Page,
+  code: string,
+  log: LogFn,
+  ui: AccountUiInteraction,
+  signal: AbortSignal
+): Promise<void> {
   // Kiểu 1: nhiều input rời, mỗi ô 1 chữ số
   const boxes = page.locator(
     'input[maxlength="1"], .verify-code-input input, div[class*="codeInput"] input'
@@ -143,7 +163,10 @@ async function fillOtp(page: Page, code: string, log: LogFn): Promise<void> {
 
   if (boxCount >= 6) {
     for (let i = 0; i < 6; i++) {
-      await boxes.nth(i).fill(code[i]);
+      signal.throwIfAborted();
+      await foregroundPage(page, { signal, stage: 'signup:fill-otp-digit', ui }, () =>
+        boxes.nth(i).fill(code[i])
+      );
       await page.waitForTimeout(140);
     }
     log('   ✅ Đã điền mã OTP (6 ô rời)');
@@ -166,7 +189,12 @@ async function fillOtp(page: Page, code: string, log: LogFn): Promise<void> {
 }
 
 /** Tick các checkbox điều khoản nếu chúng đang bắt buộc */
-async function acceptTermsIfAny(page: Page, log: LogFn): Promise<void> {
+async function acceptTermsIfAny(
+  page: Page,
+  log: LogFn,
+  ui: AccountUiInteraction,
+  signal: AbortSignal
+): Promise<void> {
   const boxes = page.locator('input[type="checkbox"]:not(:checked)');
   const n = await boxes.count().catch(() => 0);
 
@@ -174,7 +202,9 @@ async function acceptTermsIfAny(page: Page, log: LogFn): Promise<void> {
     const box = boxes.nth(i);
     if (!(await box.isVisible({ timeout: 600 }).catch(() => false))) continue;
     // Dùng click thay vì check() vì CapCut bọc checkbox trong label custom
-    await box.click({ timeout: 2500, force: true }).catch(() => {});
+    await foregroundPage(page, { signal, stage: 'signup:accept-terms', ui }, async () => {
+      await box.click({ timeout: 2500, force: true }).catch(() => {});
+    });
   }
   if (n > 0) log(`   → Đã xử lý ${n} checkbox điều khoản`);
 }
@@ -192,7 +222,12 @@ async function readAuthHeading(page: Page): Promise<string> {
 }
 
 /** Xử lý màn hình "When's your birthday?" nếu CapCut yêu cầu */
-async function handleBirthdayIfPresent(page: Page, log: LogFn): Promise<void> {
+async function handleBirthdayIfPresent(
+  page: Page,
+  log: LogFn,
+  ui: AccountUiInteraction,
+  signal: AbortSignal
+): Promise<void> {
   const isBirthday =
     (await page.getByRole('heading', { name: /birthday/i }).isVisible({ timeout: 12000 }).catch(() => false)) ||
     (await page.locator('.gate_birthday-picker-input, input[placeholder="Year"], .gate_birthday-picker-selector').first().isVisible({ timeout: 4000 }).catch(() => false));
@@ -208,8 +243,10 @@ async function handleBirthdayIfPresent(page: Page, log: LogFn): Promise<void> {
     .locator('input[placeholder="Year"], .gate_birthday-picker-input')
     .first();
   if (await yearInput.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await yearInput.click();
-    await yearInput.fill('1998');
+    await foregroundPage(page, { signal, stage: 'signup:birthday-year', ui }, async () => {
+      await yearInput.click();
+      await yearInput.fill('1998');
+    });
     await page.waitForTimeout(400);
     log('   → Đã điền Year: 1998');
   }
@@ -217,11 +254,15 @@ async function handleBirthdayIfPresent(page: Page, log: LogFn): Promise<void> {
   // 2. Chọn Month
   const monthSelector = page.locator('.gate_birthday-picker-selector').first();
   if (await monthSelector.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await monthSelector.click();
+    await foregroundPage(page, { signal, stage: 'signup:birthday-month-open', ui }, () =>
+      monthSelector.click()
+    );
     await page.waitForTimeout(600);
     const monthOpt = page.locator('.lv-select-option, [role="option"]').first();
     if (await monthOpt.isVisible({ timeout: 3000 }).catch(() => false)) {
-      await monthOpt.click();
+      await foregroundPage(page, { signal, stage: 'signup:birthday-month-select', ui }, () =>
+        monthOpt.click()
+      );
       await page.waitForTimeout(400);
       log('   → Đã chọn Month');
     }
@@ -230,13 +271,19 @@ async function handleBirthdayIfPresent(page: Page, log: LogFn): Promise<void> {
   // 3. Chọn Day (ngày 15)
   const daySelector = page.locator('.gate_birthday-picker-selector').last();
   if (await daySelector.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await daySelector.click();
+    await foregroundPage(page, { signal, stage: 'signup:birthday-day-open', ui }, () =>
+      daySelector.click()
+    );
     await page.waitForTimeout(600);
     const dayOpt = page.locator('.lv-select-option, [role="option"]').nth(14);
     if (await dayOpt.isVisible({ timeout: 3000 }).catch(() => false)) {
-      await dayOpt.click();
+      await foregroundPage(page, { signal, stage: 'signup:birthday-day-select', ui }, () =>
+        dayOpt.click()
+      );
     } else {
-      await page.locator('.lv-select-option, [role="option"]').first().click().catch(() => {});
+      await foregroundPage(page, { signal, stage: 'signup:birthday-day-select-fallback', ui }, async () => {
+        await page.locator('.lv-select-option, [role="option"]').first().click().catch(() => {});
+      });
     }
     await page.waitForTimeout(400);
     log('   → Đã chọn Day');
@@ -249,7 +296,9 @@ async function handleBirthdayIfPresent(page: Page, log: LogFn): Promise<void> {
     )
     .first();
   if (await continueBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await continueBtn.click({ timeout: 10000 });
+    await foregroundPage(page, { signal, stage: 'signup:birthday-continue', ui }, () =>
+      continueBtn.click({ timeout: 10000 })
+    );
     log('   → Đã bấm Continue ở màn hình Birthday');
     await page.waitForTimeout(5000);
   }
@@ -268,13 +317,20 @@ export async function isInsideApp(page: Page): Promise<boolean> {
 }
 
 /** Bỏ qua khảo sát / modal onboarding / màn Get started with space */
-async function dismissOnboarding(page: Page, log: LogFn): Promise<void> {
+async function dismissOnboarding(
+  page: Page,
+  log: LogFn,
+  ui: AccountUiInteraction,
+  signal: AbortSignal
+): Promise<void> {
   // Màn hình "Get started with space" -> Bấm "Open CapCut"
   const openCapcutBtn = page
     .locator('.lv-create-teamspace-confirm, button:has-text("Open CapCut")')
     .first();
   if (await openCapcutBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await openCapcutBtn.click({ timeout: 8000 }).catch(() => {});
+    await foregroundPage(page, { signal, stage: 'signup:open-capcut-space', ui }, async () => {
+      await openCapcutBtn.click({ timeout: 8000 }).catch(() => {});
+    });
     log('   → Đã bấm "Open CapCut"');
     await page.waitForTimeout(4000);
   }
@@ -282,13 +338,15 @@ async function dismissOnboarding(page: Page, log: LogFn): Promise<void> {
   // Khảo sát onboarding 3 bước: bấm Skip rồi ĐỌC LẠI DOM xem mask đã tắt chưa.
   // Bản cũ bấm một lần, nuốt lỗi, in "Đã bấm Skip khảo sát" vô điều kiện — nên
   // modal phủ trang suốt phiên mà không ai biết (xem `onboarding.ts`).
-  await skipOnboardingSurvey(page, log);
+  await skipOnboardingSurvey(page, log, ui, signal);
 
   const close = page
     .locator('button[aria-label="Close"], div[aria-label="Close"], .semi-modal-close')
     .first();
   if (await close.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await close.click({ timeout: 5000 }).catch(() => {});
+    await foregroundPage(page, { signal, stage: 'signup:close-onboarding-modal', ui }, async () => {
+      await close.click({ timeout: 5000 }).catch(() => {});
+    });
     await page.waitForTimeout(1500);
   }
 }
@@ -310,6 +368,8 @@ export async function signupCapcut(
   opts: SignupOptions
 ): Promise<SignupResult> {
   const { log, getOtp } = opts;
+  const signal = opts.signal ?? new AbortController().signal;
+  const ui = opts.ui ?? createDirectUiInteraction(signal);
 
   log('\n============================================================');
   log('📝 ĐĂNG KÝ TÀI KHOẢN CAPCUT WEB');
@@ -330,7 +390,7 @@ export async function signupCapcut(
     const continueEmail = page.getByText(
       /^(Continue with email|Tiếp tục bằng email|Sign up with email)$/
     );
-    await clickUntilVisible(continueEmail, emailInput);
+    await clickUntilVisible(continueEmail, emailInput, ui, signal);
   }
   log('   → Đã mở form email');
 
@@ -339,7 +399,9 @@ export async function signupCapcut(
 
   const continueBtn = page.getByRole('button', { name: /^(Continue|Tiếp tục|Next)$/ }).first();
   await continueBtn.waitFor({ state: 'visible', timeout: 25000 });
-  await continueBtn.click({ timeout: 25000 });
+  await foregroundPage(page, { signal, stage: 'signup:continue-email', ui }, () =>
+    continueBtn.click({ timeout: 25000 })
+  );
   log('   → Đã bấm Continue');
   await page.waitForTimeout(3000);
 
@@ -367,18 +429,20 @@ export async function signupCapcut(
     await fillVerified(pwInputs.nth(1), creds.password, 'Xác nhận password', log);
   }
 
-  await acceptTermsIfAny(page, log);
+  await acceptTermsIfAny(page, log, ui, signal);
 
   const submitBtn = page
     .getByRole('button', { name: /^(Sign up|Continue|Create account|Đăng ký|Tiếp tục|Next)$/ })
     .first();
   await submitBtn.waitFor({ state: 'visible', timeout: 25000 });
-  await submitBtn.click({ timeout: 25000 });
+  await foregroundPage(page, { signal, stage: 'signup:submit-account', ui }, () =>
+    submitBtn.click({ timeout: 25000 })
+  );
   log('   → Đã gửi thông tin đăng ký');
   await page.waitForTimeout(5000);
 
   // --- Bước 5: màn hình "When's your birthday?" (nếu có) ---
-  await handleBirthdayIfPresent(page, log);
+  await handleBirthdayIfPresent(page, log, ui, signal);
 
   // --- Bước 6: màn hình "Confirm your Email" (OTP) ---
   const isConfirmEmail =
@@ -388,7 +452,7 @@ export async function signupCapcut(
   if (isConfirmEmail) {
     log('   📩 Phát hiện yêu cầu OTP -> bắt đầu lấy mã xác minh...');
     const code = await getOtpCode(creds.email, log, getOtp);
-    await fillOtp(page, code, log);
+    await fillOtp(page, code, log, ui, signal);
     await page.waitForTimeout(1000);
 
     // Bấm nút xác nhận / Continue / Confirm sau khi điền mã nếu có
@@ -398,7 +462,9 @@ export async function signupCapcut(
       })
       .first();
     if (await verifyBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
-      await verifyBtn.click({ timeout: 15000 }).catch(() => {});
+      await foregroundPage(page, { signal, stage: 'signup:verify-otp', ui }, async () => {
+        await verifyBtn.click({ timeout: 15000 }).catch(() => {});
+      });
     }
     log('   → Đã gửi mã xác minh, chờ chuyển trang...');
     await page.waitForTimeout(6000);
@@ -407,13 +473,13 @@ export async function signupCapcut(
   }
 
   // --- Bước 7: xử lý "Open CapCut" & bỏ qua khảo sát ---
-  await dismissOnboarding(page, log);
+  await dismissOnboarding(page, log, ui, signal);
 
   await page
     .waitForURL((u) => !/\/(login|signup)/.test(u.toString()), { timeout: 90000 })
     .catch(() => {});
   await page.waitForTimeout(5000);
-  await dismissOnboarding(page, log);
+  await dismissOnboarding(page, log, ui, signal);
 
   if (!(await isInsideApp(page))) {
     await page
@@ -423,7 +489,7 @@ export async function signupCapcut(
       })
       .catch(() => {});
     await page.waitForTimeout(5000);
-    await dismissOnboarding(page, log);
+    await dismissOnboarding(page, log, ui, signal);
   }
 
   if (!(await isInsideApp(page))) {

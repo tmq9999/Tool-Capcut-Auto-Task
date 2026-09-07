@@ -31,19 +31,22 @@ import type { Locator, Page } from 'playwright-core';
 import path from 'node:path';
 import fs from 'node:fs';
 
-import { dump, getDumpDir, mustSee } from './diag';
+import { dump, getDumpDir, mustSee, StepError } from './diag';
 
 import {
   clickIfVisible,
   dismissOverlays,
+  foregroundPage,
   humanClick,
   humanType,
   type PerCharDelay,
+  type HumanInteractionOptions,
   pick,
   rand,
   sleep,
   waitEnabled,
 } from './human';
+import { createDirectUiInteraction } from './uiInteractionScheduler';
 
 import type { CapcutMissionEnv } from './types';
 import { URLS } from './urls';
@@ -62,7 +65,7 @@ export { URLS };
  * Mở bằng dạng `my-edit?inspirationKey=<id>` để modal prompt hiện ngay.
  */
 export const INSPIRATION_KEYS = [
-  '7601067982688718098', // Template chuẩn Tutorial_Task.md (Change text với input-slot)
+  '7611886117142531329', // Template đã xác nhận cho nhiệm vụ Inspiration
   '7601075239333776648',
   '7601066420239191304',
   '7601064346852019463',
@@ -87,6 +90,7 @@ const CHAT_PROMPTS = ['hello', 'xin chào', 'hi there', 'chào bạn'] as const;
 export const S = {
   /** Nút gửi prompt — mọi panel của CapCut đều dùng aria-label này */
   send: '[aria-label="Send message"]',
+  minimize: 'button:has-text("Minimize"), button:has-text("Thu nhỏ"), [aria-label="Minimize"]',
   /** Ô text nhỏ trong prompt template của Inspiration */
   inputSlot: '[data-placeholder="your preferred text"]',
   /** Panel chat AI agent bên phải Design Studio */
@@ -128,13 +132,20 @@ export async function uploadImage(
   page: Page,
   button: Locator | null,
   filePath: string,
-  log: (m: string) => void
+  log: (m: string) => void,
+  options?: HumanInteractionOptions
 ): Promise<boolean> {
   if (button && (await button.isVisible({ timeout: 3000 }).catch(() => false))) {
     try {
+      const humanOptions = options ?? {
+        signal: new AbortController().signal,
+        stage: 'upload-image',
+        ui: createDirectUiInteraction(new AbortController().signal),
+        log
+      };
       const [chooser] = await Promise.all([
         page.waitForEvent('filechooser', { timeout: 8000 }),
-        humanClick(page, button),
+        humanClick(page, button, humanOptions),
       ]);
       await chooser.setFiles(filePath);
       log('Đã upload ảnh qua hộp thoại chọn file');
@@ -170,10 +181,12 @@ export async function fillEditor(
   page: Page,
   editor: Locator,
   text: string,
-  perChar?: PerCharDelay
+  perChar?: PerCharDelay,
+  options?: HumanInteractionOptions
 ): Promise<void> {
-  await editor.scrollIntoViewIfNeeded({ timeout: 4000 }).catch(() => {});
-  await humanType(page, editor, text, perChar);
+  // The bounded click inside humanType already scrolls; avoid an unbounded pre-read.
+  if (!options) await editor.scrollIntoViewIfNeeded({ timeout: 4000 }).catch(() => {});
+  await humanType(page, editor, text, perChar, options);
 }
 
 /** Bấm nút gửi trong 1 vùng cụ thể; tự chờ hết disabled. */
@@ -181,7 +194,8 @@ export async function clickSend(
   page: Page,
   scope: Locator | Page,
   log: (m: string) => void,
-  timeoutMs = 20000
+  timeoutMs = 20000,
+  options?: HumanInteractionOptions
 ): Promise<boolean> {
   const send = ('locator' in scope ? scope.locator(S.send) : page.locator(S.send)).last();
 
@@ -197,14 +211,23 @@ export async function clickSend(
     return false;
   }
 
-  if (!(await waitEnabled(send, timeoutMs))) {
+  const humanOptions: HumanInteractionOptions = options ?? {
+    signal: new AbortController().signal,
+    stage: 'click-send',
+    ui: createDirectUiInteraction(new AbortController().signal),
+    log
+  };
+
+  if (!(await waitEnabled(send, timeoutMs, humanOptions.signal))) {
     const shot = await dump(page, 'send_message_disabled');
     log(`⚠️  Nút Send vẫn disabled sau khi chờ → thử Enter — dump: ${shot ?? 'không ghi được'}`);
-    await page.keyboard.press('Enter');
+    await foregroundPage(page, humanOptions, () =>
+      page.keyboard.press('Enter')
+    );
     return true;
   }
 
-  await humanClick(page, send);
+  await humanClick(page, send, humanOptions);
   log('Đã bấm Send message');
   return true;
 }
@@ -220,14 +243,21 @@ export async function clickSend(
  * Nhiệm vụ hoàn thành ở bước này: **Try an Inspiration template +130**
  */
 export async function stepInspirationTemplate(env: CapcutMissionEnv): Promise<Page | null> {
+  env.captureStage?.('inspiration:submit');
   const { page, context, log } = env;
-  // Template chuẩn Change text (7601067982688718098) - 40 credits
   const key = INSPIRATION_KEYS[0];
 
-  log(`Mở template Inspiration (40 credits): ${key}`);
+  const humanOptions: HumanInteractionOptions = {
+    signal: env.signal,
+    stage: 'inspiration:setup',
+    ui: env.ui,
+    log: env.log,
+  };
+
+  log(`Mở template Inspiration: ${key}`);
   await page.goto(URLS.inspirationKey(key), { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(rand(5000, 7000));
-  await dismissOverlays(page);
+  await dismissOverlays(page, humanOptions);
 
   // 1. Nếu có chip ý tưởng "Change text" -> click
   const changeTextChip = page
@@ -235,7 +265,7 @@ export async function stepInspirationTemplate(env: CapcutMissionEnv): Promise<Pa
     .filter({ hasText: /change text/i })
     .first();
   if (await changeTextChip.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await humanClick(page, changeTextChip);
+    await humanClick(page, changeTextChip, { ...humanOptions, stage: 'inspiration:chip' });
     log('Đã chọn ý tưởng "Change text"');
     await page.waitForTimeout(1500);
   }
@@ -247,7 +277,8 @@ export async function stepInspirationTemplate(env: CapcutMissionEnv): Promise<Pa
       page,
       slot,
       pick(SLOT_TEXTS),
-      env.pace && { minMs: env.pace.typeMinMs, maxMs: env.pace.typeMaxMs }
+      env.pace && { minMs: env.pace.typeMinMs, maxMs: env.pace.typeMaxMs },
+      { ...humanOptions, stage: 'inspiration:slot' }
     );
     log('Đã điền text vào ô trống của prompt mẫu');
   }
@@ -255,15 +286,15 @@ export async function stepInspirationTemplate(env: CapcutMissionEnv): Promise<Pa
 
   // Bấm gửi → CapCut mở tab mới chạy generate
   const before = context.pages().length;
-  const sent = await clickSend(page, page, log, 25000);
+  const sent = await clickSend(page, page, log, 25000, { ...humanOptions, stage: 'inspiration:send' });
   if (!sent) {
-    await snap(page, 'inspiration_send_fail');
+    await dump(page, 'inspiration_send_fail');
     return null;
   }
 
-  // Chờ tab mới (tối đa 30s). Nếu không có tab mới, CapCut generate ngay tại tab hiện tại.
+  // Chờ tab mới rất ngắn để bắt workspace, nhưng không chờ ảnh generate.
   let studio: Page | null = null;
-  const deadline = Date.now() + 30000;
+  const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     const pages = context.pages();
     if (pages.length > before) {
@@ -277,16 +308,31 @@ export async function stepInspirationTemplate(env: CapcutMissionEnv): Promise<Pa
     await sleep(1000);
   }
 
+  const workspace = studio ?? page;
   if (studio) {
-    await studio.bringToFront();
+    const studioOptions: HumanInteractionOptions = {
+      signal: env.signal,
+      stage: 'inspiration:studio-foreground',
+      ui: env.ui,
+      log: env.log,
+    };
+    await foregroundPage(studio, studioOptions, () => studio.bringToFront());
     await studio.waitForLoadState('domcontentloaded').catch(() => {});
-    await studio.waitForTimeout(rand(6000, 9000));
-    await dismissOverlays(studio);
+    await studio.waitForTimeout(rand(1000, 2000));
+    await dismissOverlays(studio, studioOptions);
     log(`Đã chuyển sang workspace generate: ${studio.url().slice(0, 80)}`);
-    log('Chờ CapCut tạo ảnh Inspiration template (khoảng 35s)...');
-    await studio.waitForTimeout(rand(32000, 40000));
   } else {
-    log('⚠️  Không thấy tab workspace mới sau khi gửi');
+    log('Không thấy tab workspace mới sau khi gửi; tiếp tục trên tab hiện tại');
+  }
+  const minimize = workspace.locator(S.minimize).last();
+  if (await minimize.isVisible({ timeout: 5000 }).catch(() => false)) {
+    await humanClick(workspace, minimize, {
+      signal: env.signal,
+      stage: 'inspiration:minimize',
+      ui: env.ui,
+      log: env.log,
+    });
+    log('Đã thu nhỏ workspace Inspiration; không chờ generate');
   }
   return studio;
 }
@@ -329,15 +375,27 @@ export async function setFilesOutsideChat(
  * vùng `inert`/`aria-hidden` → Playwright coi là ẩn và sẽ gõ lạc sang chat.
  */
 export async function stepChatWithAgent(dp: Page, env: CapcutMissionEnv): Promise<void> {
+  env.captureStage?.('design:chat');
   const { log } = env;
-  await dp.bringToFront();
-  await dismissOverlays(dp);
+  const humanOptions: HumanInteractionOptions = {
+    signal: env.signal,
+    stage: 'design:chat',
+    ui: env.ui,
+    log: env.log,
+  };
+  await foregroundPage(dp, humanOptions, () => dp.bringToFront());
+  await dismissOverlays(dp, humanOptions);
 
   const panel = dp.locator(S.chatPanel).first();
   // Tuỳ chọn: panel có thể đang thu gọn vì nút "Hide chat" đã bấm -> mở lại.
   if (!(await panel.isVisible({ timeout: 6000 }).catch(() => false))) {
     log('Panel chat đang ẩn → thử mở lại');
-    await clickIfVisible(dp, dp.locator('[aria-label="Show chat"], [aria-label="Open chat"]'));
+    await clickIfVisible(
+      dp,
+      dp.locator('[aria-label="Show chat"], [aria-label="Open chat"]'),
+      2500,
+      { ...humanOptions, stage: 'design:chat:show' }
+    );
     await dp.waitForTimeout(1500);
   }
 
@@ -356,14 +414,38 @@ export async function stepChatWithAgent(dp: Page, env: CapcutMissionEnv): Promis
     dp,
     editor,
     pick(CHAT_PROMPTS),
-    env.pace && { minMs: env.pace.typeMinMs, maxMs: env.pace.typeMaxMs }
+    env.pace && { minMs: env.pace.typeMinMs, maxMs: env.pace.typeMaxMs },
+    { ...humanOptions, stage: 'design:chat:fill' }
   );
   log('Đã nhập nội dung chat với AI agent');
   await dp.waitForTimeout(rand(700, 1300));
 
-  await clickSend(dp, scope, log, 20000);
-  log('Chờ AI agent phản hồi...');
-  await dp.waitForTimeout(rand(10000, 14000));
+  const sent = await clickSend(dp, scope, log, 20000, { ...humanOptions, stage: 'design:chat:send' });
+  if (!sent) throw new StepError('Không bấm được Send trong chat AI agent', await dump(dp, 'chat_send_failed'));
+
+  // A click is not evidence: CapCut may leave the editor untouched when the
+  // panel is still settling. Accept only a short, observable acknowledgement.
+  const acknowledged = await dp
+    .waitForFunction(
+      (selector) => {
+        const panel = document.querySelector(selector);
+        if (!panel) return false;
+        if (panel.querySelector('[aria-label="Stop generating"]')) return true;
+        const editor = panel.querySelector('.tiptap.ProseMirror');
+        return editor instanceof HTMLElement && !(editor.textContent ?? '').trim();
+      },
+      S.chatPanel,
+      { timeout: 6000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+  if (!acknowledged) {
+    throw new StepError(
+      'Chat AI agent chưa xác nhận đã gửi sau 6s',
+      await dump(dp, 'chat_send_unacknowledged')
+    );
+  }
+  log('Đã gửi chat AI agent; chuyển bước không chờ phản hồi');
 }
 
 /** Chọn phần việc nào của luồng Design Studio cần chạy */

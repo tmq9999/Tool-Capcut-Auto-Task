@@ -88,7 +88,21 @@ class FakeBridge implements IAccountsBridge {
       if (this.tasksError) {
         return { success: false, error: { code: 'ERR_PERSISTENCE_FAILED', message: this.tasksError } };
       }
-      return { success: true, data: { items: [], doneCount: 3, creditsEarned: 30 } };
+      return {
+        success: true,
+        data: {
+          items: [],
+          doneCount: 3,
+          creditsEarned: 30,
+          verification: {
+            state: 'missing',
+            runId: null,
+            observedAt: null,
+            serverTotal: 0,
+            serverDone: 0
+          }
+        }
+      };
     }
   };
 }
@@ -537,7 +551,18 @@ describe('AccountsController.loadTasks', () => {
     const result = await controller.loadTasks('acc-7');
 
     expect(bridge.lastTasksRequest).toEqual({ accountId: 'acc-7' });
-    expect(result).toEqual({ items: [], doneCount: 3, creditsEarned: 30 });
+    expect(result).toEqual({
+      items: [],
+      doneCount: 3,
+      creditsEarned: 30,
+      verification: {
+        state: 'missing',
+        runId: null,
+        observedAt: null,
+        serverTotal: 0,
+        serverDone: 0
+      }
+    });
   });
 
   it('lỗi thì trả null và ghi câu lỗi vào state, không ném', async () => {

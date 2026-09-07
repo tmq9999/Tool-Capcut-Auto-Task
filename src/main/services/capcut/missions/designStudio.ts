@@ -26,12 +26,13 @@
 import type { Page } from 'playwright-core';
 
 import { assertHittable, assertNotInert, dump, mustSee, StepError, waitNotInert } from '../diag';
-import { humanClick, pick, rand, waitEnabled } from '../human';
+import { foregroundPage, humanClick, pick, rand, waitEnabled } from '../human';
 import type { MissionGroup } from '../missionRunner';
 import { closeBlockingPricingModal, ensurePageUsable } from '../overlays';
 import { fillEditor, stepChatWithAgent, stepInspirationTemplate } from '../steps';
 import type { CapcutMissionEnv } from '../types';
 import { URLS } from '../urls';
+import { abortableDelay, boundedDomRead, DomReadTimeoutError } from '../cancellation';
 
 const CANVAS_PANEL = '[aria-label="Canvas prompt panel"]';
 const CANVAS_EXPANDED = `${CANVAS_PANEL} [class*="expandedWrapper"]`;
@@ -44,6 +45,7 @@ const CANVAS_PROMPTS = [
 
 /** Upload ảnh bằng nút trên THANH CÔNG CỤ CANVAS, không phải nút "+" của khung chat. */
 async function uploadToCanvas(dp: Page, env: CapcutMissionEnv): Promise<void> {
+  env.captureStage?.('design:upload');
   // 30s: thanh Canvas tools render muon sau khi mo trang. Luot 06:05 that bai
   // ca 4 nhiem vu Design Studio chi vi mustSee mac dinh 15s la chua du.
   const btn = await mustSee(
@@ -54,7 +56,7 @@ async function uploadToCanvas(dp: Page, env: CapcutMissionEnv): Promise<void> {
   );
   const [chooser] = await Promise.all([
     dp.waitForEvent('filechooser', { timeout: 15000 }),
-    humanClick(dp, btn),
+    humanClick(dp, btn, { signal: env.signal, stage: 'design:upload-click', ui: env.ui, log: env.log }),
   ]);
   await chooser.setFiles(env.sampleImage);
   env.log('Đã upload ảnh lên canvas');
@@ -70,22 +72,28 @@ async function uploadToCanvas(dp: Page, env: CapcutMissionEnv): Promise<void> {
  * lỗi "không thấy canvas" — đúng chuyện đã xảy ra lượt 2026-09-02 04:36.
  * Hai canvas còn lại còn tệ hơn: một là bánh xe màu, một là `#offscreenCanvas`.
  */
-async function waitCanvasReady(dp: Page, timeoutMs = 40000): Promise<void> {
+export async function waitCanvasReady(
+  dp: Page,
+  timeoutMs = 40000,
+  signal?: AbortSignal
+): Promise<void> {
+  signal?.throwIfAborted();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const ready = await dp
-      .evaluate(() =>
+    const remaining = Math.max(1, deadline - Date.now());
+    const ready = await boundedDomRead(
+      () => dp.evaluate(() =>
         Array.from(document.querySelectorAll('#__editor_container_id__ canvas')).some(
           (c) => c.getBoundingClientRect().height > 100
         )
-      )
-      .catch(() => false);
+      ), 'canvas-ready', Math.min(1000, remaining), signal
+    );
     if (ready) return;
-    await new Promise((r) => setTimeout(r, 500));
+    await abortableDelay(Math.max(0, Math.min(500, deadline - Date.now())), signal ?? new AbortController().signal);
   }
   throw new StepError(
     'Canvas của Design Studio chưa layout xong (mọi canvas đều cao 0)',
-    await dump(dp, 'canvas_zero_height')
+    await dump(dp, 'canvas_zero_height', signal)
   );
 }
 
@@ -108,99 +116,127 @@ async function waitCanvasReady(dp: Page, timeoutMs = 40000): Promise<void> {
  * Nói cách khác: prompt và nút Send đều đúng, chỉ có click là rơi vào khung chat.
  * "Hide chat" là nút của chính CapCut nên không phá layout của nó.
  */
-async function hideChatPanel(dp: Page, env: CapcutMissionEnv): Promise<void> {
-  const hide = dp.locator('[aria-label="Hide chat"]').first();
-  if (!(await hide.isVisible({ timeout: 3000 }).catch(() => false))) return;
-  // Nút này nằm ở header khung chat, không bị gì che -> click thường là đủ.
-  await hide.click({ timeout: 6000 }).catch(() => {});
-  await dp.waitForTimeout(rand(800, 1400));
+export async function hideChatPanel(dp: Page, env: CapcutMissionEnv): Promise<void> {
+  env.signal.throwIfAborted();
+  const panel = dp.locator('#ai-design-chat-panel-container[aria-hidden="false"]').first();
+  if (!await boundedDomRead(() => panel.isVisible(), 'canvas-chat-visible', 3000, env.signal)) return;
+  const hide = panel.locator('[aria-label="Hide chat"]').first();
+  await foregroundPage(dp, { signal: env.signal, stage: 'design:canvas-hide-chat', ui: env.ui }, () =>
+    boundedDomRead(() => hide.click({ timeout: 6000 }), 'canvas-hide-chat', 6500, env.signal)
+  );
+  await boundedDomRead(() => dp.waitForFunction(() => {
+    const element = document.querySelector('#ai-design-chat-panel-container');
+    if (!element || element.getAttribute('aria-hidden') === 'true') return true;
+    const bounds = element.getBoundingClientRect();
+    return bounds.width === 0 || bounds.height === 0 || getComputedStyle(element).visibility === 'hidden';
+  }, undefined, { timeout: 4000 }), 'canvas-chat-hidden', 4500, env.signal);
   env.log('Đã ẩn khung chat "Design with AI" (nó phủ đúng nút Send của canvas)');
 }
 
 async function editOnCanvas(dp: Page, env: CapcutMissionEnv): Promise<void> {
+  env.captureStage?.('design:canvas-edit');
   /**
    * Bảng giá "Choose your plan" phủ kín trang thì Send không tới đích và bước
    * này báo `canvas_send_no_effect` — đo 04/09/2026 06:29, dump có
    * `subscriptionModal-wrapper` `display: block`. Năng lực đóng bảng giá trước
    * đây chỉ nằm trong Video Studio nên luồng này không có gì dẹp nó.
    */
-  await closeBlockingPricingModal(dp, env.log);
+  await closeBlockingPricingModal(dp, env.log, env.ui, env.signal);
   await hideChatPanel(dp, env);
-  await waitCanvasReady(dp);
-  // Click vào VÙNG editor, không phải thẻ <canvas> đầu tiên (xem waitCanvasReady).
-  const area = await mustSee(dp, dp.locator('#graphic-editor-render'), 'vung editor Design Studio');
-  await humanClick(dp, area);
-  await dp.waitForTimeout(rand(1200, 2000));
+  env.log('Canvas readiness: starting bounded DOM probe');
+  await waitCanvasReady(dp, 40000, env.signal);
+  env.log('Canvas readiness: layout confirmed');
+  const interaction = (stage: string) => ({ signal: env.signal, log: env.log, stage, ui: env.ui });
+  // Click into the editor to select the image before using its prompt panel.
+  env.log('Canvas stage: area-visible');
+  const area = await mustSee(dp, dp.locator('#graphic-editor-render'), 'vung editor Design Studio', 15000, env.signal);
+  await humanClick(dp, area, interaction('canvas-area'));
+  await abortableDelay(rand(1200, 2000), env.signal);
 
+  env.log('Canvas stage: opener-visible');
+  await hideChatPanel(dp, env);
   const opener = await mustSee(
     dp,
     dp.locator(`${CANVAS_PANEL} [aria-label="Open canvas prompt"]`),
-    'nut mo canvas prompt'
+    'nut mo canvas prompt', 30000, env.signal
   );
-  await assertHittable(dp, opener, 'nut mo canvas prompt');
-  await humanClick(dp, opener);
-  await waitNotInert(dp, `${CANVAS_PANEL} [class*="expandedWrapper"]`, 15000);
+  await assertHittable(dp, opener, 'nut mo canvas prompt', env.signal);
+  await humanClick(dp, opener, interaction('canvas-opener'));
+  await waitNotInert(dp, `${CANVAS_PANEL} [class*="expandedWrapper"]`, 15000, env.signal);
   env.log('Panel canvas prompt đã mở (hết inert)');
 
+  env.log('Canvas stage: editor-visible');
   const editor = await mustSee(
     dp,
     dp.locator(`${CANVAS_PANEL} [data-placeholder="Describe your design ideas"]`),
-    'o prompt trong panel canvas'
+    'o prompt trong panel canvas', 15000, env.signal
   );
-  await assertNotInert(editor, 'ô prompt canvas');
+  await assertNotInert(editor, 'ô prompt canvas', env.signal);
   const prompt = pick(CANVAS_PROMPTS);
-  await fillEditor(dp, editor, prompt, env.pace && { minMs: env.pace.typeMinMs, maxMs: env.pace.typeMaxMs });
-  await dp.waitForTimeout(rand(1200, 2000));
+  await fillEditor(dp, editor, prompt, env.pace && { minMs: env.pace.typeMinMs, maxMs: env.pace.typeMaxMs }, interaction('canvas-prompt'));
+  await abortableDelay(rand(1200, 2000), env.signal);
 
   // Đọc LẠI từ DOM: bản cũ gõ vào editor inert rồi vẫn in "đã nhập prompt".
-  const typed = await dp
+  env.log('Canvas stage: prompt-readback');
+  const typed = await boundedDomRead(() => dp
     .locator(`${CANVAS_EXPANDED} .tiptap.ProseMirror`)
     .first()
-    .innerText()
-    .catch(() => '');
+    .innerText(), 'canvas-prompt-readback', 5000, env.signal);
   if (!typed.replace(/\s+/g, ' ').includes(prompt)) {
     throw new StepError(
       `Prompt không vào được ô canvas — đọc lại được: "${typed.replace(/\s+/g, ' ').slice(0, 80)}"`,
-      await dump(dp, 'canvas_prompt_not_typed')
+      await dump(dp, 'canvas_prompt_not_typed', env.signal)
     );
   }
 
+  env.log('Canvas stage: send-visible');
   const send = await mustSee(
     dp,
     dp.locator(`${CANVAS_EXPANDED} [aria-label="Send message"]`),
-    'nut Send cua panel canvas'
+    'nut Send cua panel canvas', 15000, env.signal
   );
-  await assertNotInert(send, 'nút Send canvas');
+  await assertNotInert(send, 'nút Send canvas', env.signal);
   // Trả về của waitEnabled trước đây bị bỏ, nên nút disabled vẫn được click.
-  if (!(await waitEnabled(send, 10000))) {
+  env.log('Canvas stage: send-enabled');
+  if (!(await waitEnabled(send, 10000, env.signal))) {
     throw new StepError(
       'Nút Send của canvas vẫn disabled sau 10s',
-      await dump(dp, 'canvas_send_disabled')
+      await dump(dp, 'canvas_send_disabled', env.signal)
     );
   }
-  await assertHittable(dp, send, 'nut Send canvas');
-  await humanClick(dp, send);
+  // Chat can reopen while upload/chat responses finish, after the first close.
+  // Close it again without clearing the canvas prompt, then recheck the hit target.
+  await hideChatPanel(dp, env);
+  await assertHittable(dp, send, 'nut Send canvas', env.signal);
+  await humanClick(dp, send, interaction('canvas-send'));
 
   // Tín hiệu phụ đã kiểm trên DOM dump: sau khi gửi, chính nút đó đổi thành
   // "Stop generating" và nhãn panel đổi thành "Thinking".
-  const stopped = await dp
-    .locator('[aria-label="Stop generating"]')
-    .first()
-    .waitFor({ state: 'attached', timeout: 8000 })
+  env.log('Canvas stage: send-ack');
+  const stopped = await boundedDomRead(
+    () => dp.locator('[aria-label="Stop generating"]').first().waitFor({ state: 'attached', timeout: 8000 }).then(() => true),
+    'canvas-send-ack', 8000, env.signal
+  )
     .then(() => true)
-    .catch(() => false);
+    .catch((error: unknown) => {
+      env.signal.throwIfAborted();
+      if (error instanceof DomReadTimeoutError) throw error;
+      return false;
+    });
   if (stopped) {
     env.log('Canvas đã nhận prompt (nút đổi thành Stop generating)');
     return;
   }
   // Không còn im lặng: hit-target đã được kiểm, nên đây là hiện tượng MỚI —
   // để lại hiện trường thay vì chờ do_action 90 giây rồi không biết gì.
-  const shot = await dump(dp, 'canvas_send_no_effect');
+  const shot = await dump(dp, 'canvas_send_no_effect', env.signal);
   env.log(`⚠️  Bấm Send canvas xong không thấy "Stop generating" sau 8s — dump: ${shot ?? 'không ghi được'}`);
 }
 
 export const designStudioGroup: MissionGroup = {
+  id: 'design-studio',
   name: 'Design Studio (Inspiration + Chat + Upload + Canvas)',
+  workspace: 'editor',
   keys: [
     'capcut_web_inspiration_generate_done',
     'capcut_web_design_studio_ai_chat',
@@ -233,9 +269,20 @@ export const designStudioGroup: MissionGroup = {
       await ensurePageUsable(inspirationTab, env.log);
     }
 
-    // 2. Chat làm được trên tab nào cũng xong.
+    // 2. Chat phải chạy trên Design Studio thật. Tab Inspiration chỉ dùng để
+    // gửi nhiệm vụ inspiration; sau khi thu nhỏ, nó không có chat panel.
+    let workspaceReady = false;
     if (need.has('capcut_web_design_studio_ai_chat')) {
-      await stepChatWithAgent(inspirationTab ?? env.page, env);
+      const chatPage = env.page;
+      await foregroundPage(chatPage, { signal: env.signal, stage: 'design:chat-focus', ui: env.ui }, async () => {
+        await chatPage.bringToFront().catch(() => {});
+      }).catch(() => {});
+      await chatPage.goto(URLS.aiDesign, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await chatPage.waitForTimeout(rand(6000, 9000));
+      await ensurePageUsable(chatPage, env.log);
+      await stepChatWithAgent(chatPage, env);
+      env.captureStage?.('design:chat-accepted');
+      workspaceReady = true;
     }
 
     if (!need.has('capcut_web_design_studio_upload_img') && !need.has('capcut_web_design_studio_canvas_edit')) {
@@ -253,11 +300,15 @@ export const designStudioGroup: MissionGroup = {
      *    thường, `do_action` bắn ngay (lượt 05:48).
      */
     const dp = env.page;
-    await dp.bringToFront().catch(() => {});
-    await dp.goto(URLS.aiDesign, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await dp.waitForTimeout(rand(6000, 9000));
+    await foregroundPage(dp, { signal: env.signal, stage: 'design:canvas-focus', ui: env.ui }, async () => {
+      await dp.bringToFront().catch(() => {});
+    }).catch(() => {});
+    if (!workspaceReady) {
+      await dp.goto(URLS.aiDesign, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await dp.waitForTimeout(rand(6000, 9000));
+    }
     // Trang vừa load lại thì modal có thể mọc lại — dẹp trước khi upload.
-    await ensurePageUsable(dp, env.log);
+    await ensurePageUsable(dp, env.log, env.ui, env.signal);
 
     // Edit on canvas cần có ảnh trên canvas -> upload cả khi chỉ thiếu canvas.
     await uploadToCanvas(dp, env);

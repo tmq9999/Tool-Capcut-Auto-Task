@@ -29,7 +29,7 @@
 import type { Locator, Page } from 'playwright-core';
 
 import { assertHittable, dump, mustSee, StepError } from '../diag';
-import { clickIfVisible, humanClick, isDisabled, pick, rand, waitEnabled } from '../human';
+import { clickIfVisible, foregroundPage, humanClick, isDisabled, pick, rand, waitEnabled } from '../human';
 import type { MissionGroup } from '../missionRunner';
 import { closeBlockingPricingModal } from '../overlays';
 import { fillEditor } from '../steps';
@@ -51,7 +51,9 @@ async function openStudio(env: CapcutMissionEnv): Promise<Page> {
   if (!sp.url().includes('ai-creator/studio')) {
     await sp.goto(URLS.videoStudio, { waitUntil: 'domcontentloaded', timeout: 60000 });
   }
-  await sp.bringToFront();
+  await foregroundPage(sp, { signal: env.signal, stage: 'creator:studio-focus', ui: env.ui }, async () => {
+    await sp.bringToFront();
+  });
   await sp.waitForTimeout(rand(7000, 10000));
   return sp;
 }
@@ -59,13 +61,13 @@ async function openStudio(env: CapcutMissionEnv): Promise<Page> {
 /** CỔNG BẮT BUỘC: không qua bước này thì không có ô nhập nào tồn tại. */
 async function selectImageMode(sp: Page, env: CapcutMissionEnv): Promise<void> {
   const trigger = await mustSee(sp, sp.locator(`${STUDIO} [class*="triggerLabel"]`), 'o chon che do tao');
-  await humanClick(sp, trigger);
+  await humanClick(sp, trigger, { signal: env.signal, stage: 'creator:mode-trigger', ui: env.ui, log: env.log });
   await sp.waitForTimeout(rand(900, 1500));
 
   // Lọc trên chính optionLabel — element có text ĐÚNG BẰNG "Image".
   const option = sp.locator('li.lv-select-option [class*="optionLabel"]').filter({ hasText: /^Image$/ });
   const found = await mustSee(sp, option, 'option Image trong dropdown che do tao', 8000);
-  await humanClick(sp, found);
+  await humanClick(sp, found, { signal: env.signal, stage: 'creator:mode-select-image', ui: env.ui, log: env.log });
   await sp.waitForTimeout(rand(1200, 2000));
   env.log('Đã chọn chế độ tạo: Image');
 }
@@ -98,7 +100,7 @@ const PRO_UPSELL = 'Use advanced features with Pro';
  * — 04/09/2026 nó thiếu đúng bước này và báo `canvas_send_no_effect`.
  */
 async function closeSubscriptionModal(sp: Page, env: CapcutMissionEnv): Promise<void> {
-  await closeBlockingPricingModal(sp, env.log);
+  await closeBlockingPricingModal(sp, env.log, env.ui, env.signal);
 }
 
 /**
@@ -117,10 +119,11 @@ async function closeSubscriptionModal(sp: Page, env: CapcutMissionEnv): Promise<
  * Hàm được gọi lặp trong vòng chờ node mới, nên xử lý MỘT card mỗi lượt là đủ.
  */
 async function confirmCredits(sp: Page, env: CapcutMissionEnv): Promise<void> {
+  env.captureStage?.('creator:confirm');
   const proCard = sp.locator('[class*="strongContent"]').filter({ hasText: PRO_UPSELL }).first();
   if (await proCard.isVisible({ timeout: 500 }).catch(() => false)) {
     const skip = proCard.locator('button').filter({ hasText: /^Skip$/ });
-    if (await clickIfVisible(sp, skip, 3000)) {
+    if (await clickIfVisible(sp, skip, 3000, { signal: env.signal, stage: 'creator:pro-skip', ui: env.ui })) {
       env.log(`Đã bấm Skip ở card "${PRO_UPSELL}" (Continue ở card này chỉ mở bảng giá)`);
       await sp.waitForTimeout(rand(1200, 2000));
       return;
@@ -133,7 +136,7 @@ async function confirmCredits(sp: Page, env: CapcutMissionEnv): Promise<void> {
   // "Continue" trong `#studio-chat` là an toàn trở lại.
   for (const label of ['Continue', 'Confirm']) {
     const btn = sp.locator(`${STUDIO} button.lv-btn`).filter({ hasText: new RegExp(`^${label}$`) });
-    if (await clickIfVisible(sp, btn, 6000)) {
+    if (await clickIfVisible(sp, btn, 6000, { signal: env.signal, stage: 'creator:confirm-' + label.toLowerCase(), ui: env.ui })) {
       env.log(`Đã bấm ${label} trong card tiêu credits`);
       await sp.waitForTimeout(rand(1500, 2500));
     }
@@ -203,7 +206,7 @@ export async function ensureNodeToolbar(
     if (n > 0) return n;
 
     env.log(`Node toolbar chưa có nút — chọn lại node (lần ${i}/${attempts})`);
-    await humanClick(sp, sp.locator(`.react-flow__node[data-id="${nodeId}"]`).first()).catch(() => {});
+    await humanClick(sp, sp.locator(`.react-flow__node[data-id="${nodeId}"]`).first(), { signal: env.signal, stage: 'creator:select-node', ui: env.ui, log: env.log }).catch(() => {});
     await sp.waitForTimeout(rand(1200, 2000));
   }
 
@@ -241,7 +244,9 @@ export async function findExportButton(sp: Page, env: CapcutMissionEnv): Promise
 
   for (let i = 0; i < n; i++) {
     const btn = btns.nth(i);
-    await btn.hover({ force: true }).catch(() => {});
+    await foregroundPage(sp, { signal: env.signal, stage: 'creator:export-hover', ui: env.ui }, () =>
+      btn.hover({ force: true })
+    ).catch(() => {});
     await sp.waitForTimeout(600);
     const tip = await sp
       .evaluate(() =>
@@ -271,6 +276,7 @@ export async function findExportButton(sp: Page, env: CapcutMissionEnv): Promise
  * lượt chỉ còn thiếu export nhưng canvas trống (xem `act`).
  */
 async function generateImage(sp: Page, env: CapcutMissionEnv): Promise<string> {
+  env.captureStage?.('creator:generate');
   await selectImageMode(sp, env);
   await waitImageEditor(sp);
 
@@ -281,13 +287,14 @@ async function generateImage(sp: Page, env: CapcutMissionEnv): Promise<string> {
     sp,
     editor,
     pick(ANIMAL_PROMPTS),
-    env.pace && { minMs: env.pace.typeMinMs, maxMs: env.pace.typeMaxMs }
+    env.pace && { minMs: env.pace.typeMinMs, maxMs: env.pace.typeMaxMs },
+    { signal: env.signal, stage: 'creator:fill-editor', ui: env.ui, log: env.log }
   );
   await sp.waitForTimeout(rand(900, 1600));
 
   const send = await mustSee(sp, sp.locator(`${STUDIO} [class*="sendButton"]`), 'nut gui cua Video Studio');
   await waitEnabled(send, 15000);
-  await humanClick(sp, send);
+  await humanClick(sp, send, { signal: env.signal, stage: 'creator:send-prompt', ui: env.ui, log: env.log });
   env.log('Đã gửi prompt tạo ảnh');
 
   await confirmCredits(sp, env);
@@ -360,7 +367,9 @@ async function waitNodeRendered(sp: Page, nodeId: string, timeoutMs = 240000): P
 }
 
 export const videoStudioGroup: MissionGroup = {
+  id: 'video-studio',
   name: 'Video Studio (Chat + Generate + Export)',
+  workspace: 'editor',
   keys: [
     'capcut_web_video_studio_send_msg',
     'capcut_web_video_studio_generate_done',
@@ -369,10 +378,11 @@ export const videoStudioGroup: MissionGroup = {
   // Đo được: send→generate 37s, generate→export 11s. 240s là dư dả.
   proofTimeoutMs: 240000,
   async act(env: CapcutMissionEnv, need: Set<string>): Promise<void> {
+    env.captureStage?.('creator:open');
     const sp = await openStudio(env);
 
     // Onboarding của credit task che thanh công cụ; có thể không xuất hiện.
-    await clickIfVisible(sp, sp.locator('button.lv-btn-primary').filter({ hasText: /^Got it$/ }), 5000);
+    await clickIfVisible(sp, sp.locator('button.lv-btn-primary').filter({ hasText: /^Got it$/ }), 5000, { signal: env.signal, stage: 'creator:got-it', ui: env.ui });
 
     // Chỉ generate khi THẬT SỰ còn thiếu. Lượt 2026-09-02 04:20 chạy lại cả luồng
     // dù chỉ thiếu export, tốn thêm một lần generate ảnh và để lại hai
@@ -415,13 +425,14 @@ export const videoStudioGroup: MissionGroup = {
 
     // Toolbar chỉ dùng được khi ảnh đã vẽ xong — xem `waitNodeRendered`.
     await waitNodeRendered(sp, target);
+    env.captureStage?.('creator:export');
 
-    await humanClick(sp, sp.locator(`.react-flow__node[data-id="${target}"]`).first());
+    await humanClick(sp, sp.locator(`.react-flow__node[data-id="${target}"]`).first(), { signal: env.signal, stage: 'creator:select-export-node', ui: env.ui, log: env.log });
     await sp.waitForTimeout(rand(1500, 2500));
 
     // Dep guide "Save once, reuse anytime" — chinh no lam moc them nut
     // "Save to library" vao node toolbar va gay nhap nhang selector.
-    await clickIfVisible(sp, sp.locator('button').filter({ hasText: /^Got it$/ }), 3000);
+    await clickIfVisible(sp, sp.locator('button').filter({ hasText: /^Got it$/ }), 3000, { signal: env.signal, stage: 'creator:guide-got-it', ui: env.ui });
 
     // Dẹp guide xong có thể làm node mất selection ⇒ toolbar biến mất. Đọc lại
     // và chọn lại node nếu cần, thay vì để `findExportButton` báo "0 nút".
@@ -447,7 +458,7 @@ export const videoStudioGroup: MissionGroup = {
     sp.once('download', (d) => {
       downloaded = d.suggestedFilename();
     });
-    await humanClick(sp, exportBtn);
+    await humanClick(sp, exportBtn, { signal: env.signal, stage: 'creator:click-export', ui: env.ui, log: env.log });
     env.log('Đã bấm export trên node toolbar');
 
     // Nút này là menu trigger: có thể bung menu chọn định dạng. Lượt làm tay chỉ
@@ -461,13 +472,15 @@ export const videoStudioGroup: MissionGroup = {
       .locator('[class*="menu"] [class*="item"], .lv-dropdown-menu-item')
       .filter({ hasText: /png|jpg|jpeg|download|tải/i })
       .first();
-    if (await clickIfVisible(sp, menuItem, 4000)) {
+    if (await clickIfVisible(sp, menuItem, 4000, { signal: env.signal, stage: 'creator:export-menu', ui: env.ui })) {
       env.log('Đã chọn định dạng trong menu download');
     }
     await sp.waitForTimeout(rand(2000, 3000));
     if (downloaded) env.log(`Đã tải file: ${downloaded}`);
     await sp.waitForTimeout(rand(2000, 3000));
 
-    await env.page.bringToFront().catch(() => {});
+    await foregroundPage(env.page, { signal: env.signal, stage: 'creator:restore-focus', ui: env.ui }, async () => {
+      await env.page.bringToFront().catch(() => {});
+    }).catch(() => {});
   },
 };

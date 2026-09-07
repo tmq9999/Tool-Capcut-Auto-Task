@@ -32,15 +32,37 @@ import {
   runGroup,
   selectGroups,
   withTaskPopover,
+  type MissionEvidence
 } from './missionRunner';
 import { designStudioGroup } from './missions/designStudio';
 import { notificationsGroup, pwaInstallGroup } from './missions/simple';
 import { videoStudioGroup } from './missions/videoStudio';
-import { attachTaskMonitor, TaskStore, type TaskSnapshot } from './taskApi';
-import type { CapcutMissionEnv, CapcutPace, MissionGroup, TaskOutcome } from './types';
+import { attachTaskMonitor, TaskStore, type ActionProof, type TaskSnapshot } from './taskApi';
+import type {
+  CapcutMissionEnv,
+  CapcutPace,
+  MissionGroup,
+  TaskOutcome,
+  TaskSnapshotSummary,
+  SnapshotTaskSummary,
+  TaskCheckpoint,
+  UnsettledTaskProof,
+  CapcutVerificationReceipt,
+  AccountUiInteraction
+} from './types';
 import { URLS } from './urls';
 import { abortable } from './cancellation';
 import { measureStage } from '../stageTiming';
+import { createDirectUiInteraction } from './uiInteractionScheduler';
+import type { CapcutHttpTaskApi } from './http/taskApi';
+
+export type {
+  TaskSnapshotSummary,
+  SnapshotTaskSummary,
+  TaskCheckpoint,
+  UnsettledTaskProof,
+  CapcutVerificationReceipt
+};
 
 /**
  * Thứ tự theo đúng lượt làm tay: hai nhiệm vụ "miễn phí" trước để có credits,
@@ -60,6 +82,12 @@ export const INTER_ROUND_WAIT_MS = 8_000;
 export const FINAL_SNAPSHOT_WAIT_MS = 10_000;
 export const BOOTSTRAP_DEADLINE_MS = 30_000;
 
+export function needsFinalSnapshotRefresh(
+  snapshot: Partial<TaskSnapshotSummary> & Pick<TaskSnapshotSummary, 'total' | 'done' | 'missing'>
+): boolean {
+  return snapshot.total === 0 || snapshot.done < snapshot.total || snapshot.missing.length > 0;
+}
+
 export interface RunTasksInput {
   page: Page;
   context: BrowserContext;
@@ -77,6 +105,16 @@ export interface RunTasksInput {
   pace?: CapcutPace;
   groups?: MissionGroup[];
   resolvePage?: (stage: string) => Promise<Page>;
+  captureStage?: (stage: string) => void;
+  /** Optional browser-HTTP task discovery; UI remains the default. */
+  httpTaskApi?: CapcutHttpTaskApi;
+  httpStrict?: boolean;
+  runId?: string;
+  sessionAlias?: string;
+  sessionStartedAt?: number;
+  unsettledProofs?: readonly UnsettledTaskProof[];
+  ui?: AccountUiInteraction;
+  onCheckpoint?: (checkpoint: TaskCheckpoint) => Promise<void>;
 }
 
 async function waitForDelay(
@@ -111,48 +149,97 @@ export function paceGapMs(pace?: CapcutPace): number {
   return Math.round(rand(pace.stepMinMs, pace.stepMaxMs));
 }
 
-export interface TaskSnapshotSummary {
-  total: number; // số nhiệm vụ account này CÓ
-  done: number; // số nhiệm vụ status === 4
-  credits: number; // credits đã nhận
-  creditsTotal: number; // tổng credits khả dụng
-  missing: string[]; // task_key chưa xong
-  /**
-   * true khi KHÔNG đọc lại được `task_list` ở bước chốt — tab chính chết giữa
-   * lượt là nguyên nhân đã đo được (04/09/2026 06:5x). Lúc đó các con số ở trên
-   * là của snapshot CŨ, nên người đọc phải ưu tiên `do_action err_no=0` của
-   * từng `TaskOutcome` thay vì tin `missing`.
-   */
-  stale?: boolean;
-}
-
 export interface RunTasksResult {
   outcomes: TaskOutcome[];
   snapshot: TaskSnapshotSummary | null;
+  fatalError?: Error;
+  unsettledProofs: UnsettledTaskProof[];
+}
+
+export function buildUnsettledProofs(
+  outcomes: Iterable<TaskOutcome>,
+  snapshot: TaskSnapshotSummary | null
+): UnsettledTaskProof[] {
+  const snapshotTasksByKey = new Map(snapshot?.tasks.map((t) => [t.key, t]) ?? []);
+  const unsettled: UnsettledTaskProof[] = [];
+  for (const o of outcomes) {
+    if (o.proof && o.proof.errNo === 0) {
+      const snapTask = snapshotTasksByKey.get(o.key);
+      if (!snapTask || snapTask.status !== 4) {
+        unsettled.push({
+          key: o.key,
+          proof: o.proof as ActionProof & { errNo: 0 }
+        });
+      }
+    }
+  }
+  return unsettled;
+}
+
+export function mergeGroupEvidence(
+  outcomes: Map<string, TaskOutcome>,
+  proofBacked: Set<string>,
+  evidence: ReadonlyMap<string, MissionEvidence>,
+  log: (message: string) => void
+): void {
+  for (const [key, item] of evidence) {
+    const outcome = outcomes.get(key);
+    if (!outcome) continue;
+    outcome.attempts++;
+
+    if (item.proof?.errNo === 0) {
+      proofBacked.add(key);
+      outcome.proof = item.proof;
+    }
+    if (item.state === 'verified') {
+      outcome.done = true;
+      outcome.error = undefined;
+      log(`   ✅ ${outcome.title} (+${outcome.reward}) — do_action err_no=0`);
+    } else if (item.state === 'proved-awaiting-snapshot') {
+      outcome.done = false;
+      outcome.error = 'Đã có do_action nhưng chưa nhận được task_status=4 mới.';
+      log(`   🟡 ${outcome.title} (+${outcome.reward}) — đã có do_action, chờ snapshot`);
+    } else {
+      outcome.done = false;
+      outcome.error = item.error?.message ?? 'Không xác minh được nhiệm vụ.';
+      outcome.dumpName = item.error instanceof StepError ? item.error.dumpName : null;
+      log(`   ❌ ${outcome.title} (+${outcome.reward}) — ${outcome.error}`);
+    }
+  }
 }
 
 /**
  * Rút snapshot của CapCut thành con số cho app — thay chỗ của `printReport`.
- * Nguyên văn luật của `printReport` giữ lại ở đây vì nó là luật, không phải
- * cách in:
- *
- *   Báo cáo. Con số tổng kết lấy từ snapshot của CapCut, KHÔNG phải từ bộ đếm của
- *   ta — nhờ vậy không thể báo thừa như con số "7/10" của bản cũ.
- *
- * `credits`/`creditsTotal` lấy từ `task_list` (`earnedReward`/`totalReward`),
- * KHÔNG phải từ header. `readCredits` cũ đọc chip credits trong DOM (component
- * rolling digits nhân đôi mỗi chữ số: 520 -> "552200"), nên nó đo SỐ DƯ của
- * account — có cả credits mua/tặng — và không có "tổng" nào để so. Con số của
- * cổng chứng minh phải cùng một nguồn với `task_status`, mà nguồn đó là
+ * Con số của cổng chứng minh phải cùng một nguồn với `task_status`, mà nguồn đó là
  * `task_list`.
  */
-function summarize(snap: TaskSnapshot): TaskSnapshotSummary {
+export function summarize(
+  snap: TaskSnapshot,
+  observedAt: number = snap.at,
+  requiredAfter: number = 0
+): TaskSnapshotSummary {
+  const tasks: SnapshotTaskSummary[] = [...snap.byKey.values()].map((task) => ({
+    key: task.taskKey,
+    title: task.title,
+    reward: task.reward,
+    status: task.status
+  }));
+  const done = tasks.filter((t) => t.status === 4).length;
+  const missing = tasks.filter((t) => t.status !== 4).map((t) => t.key);
+  const fresh = observedAt > requiredAfter;
+  const final = fresh && missing.length === 0;
+
   return {
-    total: snap.byKey.size,
-    done: snap.doneKeys.length,
+    observedAt,
+    requiredAfter,
+    tasks,
+    total: tasks.length,
+    done,
     credits: snap.earnedReward,
     creditsTotal: snap.totalReward,
-    missing: [...snap.byKey.values()].filter((t) => t.status !== 4).map((t) => t.taskKey),
+    missing,
+    fresh,
+    final
   };
 }
 
@@ -191,6 +278,8 @@ async function bootstrap(
     log: (message: string) =>
       log(message.startsWith('stage=') ? message : '      · ' + message),
     signal: input.signal,
+    ui: input.ui ?? createDirectUiInteraction(input.signal),
+    captureStage: input.captureStage,
     // Nhịp gõ đi kèm env để từng mission truyền xuống `fillEditor`; sàn nằm ở
     // `humanType` nên cấu hình nhanh hơn khoảng đã đo không lọt qua được.
     pace: input.pace,
@@ -208,8 +297,26 @@ async function bootstrap(
     });
   };
 
-  log('Mở route nhiệm vụ; deadline bootstrap 30s.');
+  log(input.httpTaskApi ? `Đọc task_list qua ${input.httpTaskApi.mechanism}; UI chỉ là fallback.` : 'Mở route nhiệm vụ; deadline bootstrap 30s.');
   input.signal.throwIfAborted();
+  if (input.httpTaskApi) {
+    try {
+      const httpSnapshot = await input.httpTaskApi.getTaskList(input.signal);
+      store.pushTaskList(JSON.stringify({ data: { task_list: [...httpSnapshot.byKey.values()].map((task) => ({
+        task_key: task.taskKey,
+        task_id: task.taskId,
+        task_status: task.status,
+        task_reward_view: { reward_amount: task.reward },
+        task_view: { title: task.title, button_text: task.buttonText },
+        task_relation: { child_task_ids: task.childIds },
+      })) } }));
+      return { store, env, snap: httpSnapshot };
+    } catch (error) {
+      input.signal.throwIfAborted();
+      if (input.httpStrict) throw new StepError('HTTP task_list failed before any mission mutation: ' + (error instanceof Error ? error.message : 'HTTP_ERROR'), await dump(page, 'http_task_list_failed'));
+      log('HTTP task_list thất bại; chuyển fallback UI: ' + (error instanceof Error ? error.message : 'HTTP_ERROR'));
+    }
+  }
   await abortable(
     page.goto(URLS.tasks, { waitUntil: 'domcontentloaded', timeout: 12_000 }),
     input.signal
@@ -220,7 +327,8 @@ async function bootstrap(
     log('   ℹ️  Chưa thấy task_list — mở popover nhiệm vụ để kích hoạt');
     await withTaskPopover(page, async () => { snap = await tryGet(remaining()); }, log, {
       signal: input.signal,
-      deadlineAt
+      deadlineAt,
+      ui: env.ui
     }).catch(() => { input.signal.throwIfAborted(); });
     snap = store.snapshot();
   }
@@ -307,6 +415,7 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
   log('🚀 LÀM NHIỆM VỤ FREE CREDITS');
   log('============================================================');
 
+  input.captureStage?.('task-bootstrap');
   const { store, env, snap: first } = await measureStage('task-bootstrap', () => bootstrap(input), log);
   let snap = first;
   log(
@@ -326,6 +435,33 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
 
   const groups = input.groups ?? GROUPS;
   const proofBacked = new Set<string>();
+
+  if (input.unsettledProofs) {
+    for (const item of input.unsettledProofs) {
+      if (item.proof?.errNo === 0) {
+        proofBacked.add(item.key);
+        const outcome = outcomes.get(item.key);
+        if (outcome) {
+          outcome.proof = item.proof;
+        }
+      }
+    }
+  }
+
+  let requiredAfter = input.sessionStartedAt ?? 0;
+  const emitCheckpoint = async (isFinal: boolean, actionSettledAt?: number): Promise<void> => {
+    if (actionSettledAt) {
+      requiredAfter = Math.max(requiredAfter, actionSettledAt);
+    }
+    const checkpointSummary = summarize(snap, snap.at, requiredAfter);
+    checkpointSummary.final = isFinal && checkpointSummary.fresh && checkpointSummary.missing.length === 0;
+    if (input.onCheckpoint) {
+      await input.onCheckpoint({
+        outcomes: [...outcomes.values()],
+        snapshot: checkpointSummary
+      });
+    }
+  };
 
   for (let attempt = 1; attempt <= rounds; attempt++) {
     input.signal.throwIfAborted();
@@ -349,37 +485,34 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
       }
       if (env.page.isClosed()) {
         log('   ❌ Tab chính đã bị đóng — dừng ở đây');
-        return { outcomes: [...outcomes.values()], snapshot: summarize(snap) };
+        const closedSummary = summarize(snap, snap.at, requiredAfter);
+        closedSummary.final = false;
+        return {
+          outcomes: [...outcomes.values()],
+          snapshot: closedSummary,
+          unsettledProofs: buildUnsettledProofs(outcomes.values(), closedSummary)
+        };
       }
 
       log(`\n📌 ${group.name}`);
+      input.captureStage?.('mission:' + group.name);
       log(`   cần: ${[...need].join(', ')}`);
       const result = await runGroup(group, env, store, need);
       if (result.snapshot) snap = result.snapshot;
-
-      for (const [key, evidence] of result.evidence) {
-        const outcome = outcomes.get(key);
-        if (!outcome) continue;
-        outcome.attempts++;
-
-        if (evidence.proof?.errNo === 0) {
-          proofBacked.add(key);
-          outcome.proof = evidence.proof;
-        }
-        if (evidence.state === 'verified') {
-          outcome.done = true;
-          outcome.error = undefined;
-          log(`   ✅ ${outcome.title} (+${outcome.reward}) — do_action err_no=0`);
-        } else if (evidence.state === 'proved-awaiting-snapshot') {
-          outcome.done = false;
-          outcome.error = 'Đã có do_action nhưng chưa nhận được task_status=4 mới.';
-          log(`   🟡 ${outcome.title} (+${outcome.reward}) — đã có do_action, chờ snapshot`);
-        } else {
-          outcome.done = false;
-          outcome.error = evidence.error?.message ?? 'Không xác minh được nhiệm vụ.';
-          outcome.dumpName = evidence.error instanceof StepError ? evidence.error.dumpName : null;
-          log(`   ❌ ${outcome.title} (+${outcome.reward}) — ${outcome.error}`);
-        }
+      mergeGroupEvidence(outcomes, proofBacked, result.evidence, log);
+      if (result.actionSettledAt) {
+        requiredAfter = Math.max(requiredAfter, result.actionSettledAt);
+      }
+      await emitCheckpoint(false, result.actionSettledAt);
+      if (result.fatalError) {
+        const fatalSummary = summarize(snap, snap.at, requiredAfter);
+        fatalSummary.final = false;
+        return {
+          outcomes: [...outcomes.values()],
+          snapshot: fatalSummary,
+          fatalError: result.fatalError,
+          unsettledProofs: buildUnsettledProofs(outcomes.values(), fatalSummary)
+        };
       }
 
       // Hết một nhóm là một BƯỚC LỚN — cùng với chỗ nghỉ giữa hai lượt quét, đây
@@ -402,26 +535,44 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
   }
 
   // Chốt lại bằng snapshot MỚI NHẤT trước khi báo cáo.
-  //
-  // Nhiệm vụ Bonus (+80) nhảy 1→2→4 vài giây SAU nhiệm vụ con cuối cùng, nên
-  // nếu chỉ dùng `snap` của vòng lặp thì báo cáo in ❌ cho một nhiệm vụ mà
-  // CapCut đã tính xong — đúng chuyện xảy ra lượt 2026-09-02 05:48.
   let stale = false;
-  const final = await store
-    .waitForSnapshot(snap.at, FINAL_SNAPSHOT_WAIT_MS, input.signal)
-    .catch(() => {
-      input.signal.throwIfAborted();
-      // Không đọc lại được `task_list`: tab chính chết là nguyên nhân đã đo.
-      // Nói ra thay vì im lặng trả về snapshot cũ như thể nó còn đúng.
-      stale = true;
-      log('   ⚠️  Không đọc lại được task_list ở bước chốt — số liệu snapshot là của lượt trước');
-      return store.snapshot() ?? snap;
-    });
-  snap = final;
+  const currentSnapSummary = summarize(snap, snap.at, requiredAfter);
+  if (snap.at <= requiredAfter || needsFinalSnapshotRefresh(currentSnapSummary)) {
+    const waitAfter = Math.max(requiredAfter, snap.at);
+    const finalSnap = await store
+      .waitForSnapshot(waitAfter, FINAL_SNAPSHOT_WAIT_MS, input.signal)
+      .catch(() => {
+        input.signal.throwIfAborted();
+        stale = true;
+        log('   ⚠️  Không đọc lại được task_list ở bước chốt — số liệu snapshot là của lượt trước');
+        return null;
+      });
+    if (finalSnap) {
+      snap = finalSnap;
+    }
+  }
+
   for (const [key, t] of snap.byKey) {
     const o = outcomes.get(key);
     if (o && t.status === 4) o.done = true;
   }
 
-  return { outcomes: [...outcomes.values()], snapshot: { ...summarize(snap), stale } };
+  const fresh = snap.at > requiredAfter;
+  const finalSummary = summarize(snap, snap.at, requiredAfter);
+  finalSummary.fresh = fresh;
+  finalSummary.final = fresh && finalSummary.missing.length === 0;
+  finalSummary.stale = stale;
+
+  if (input.onCheckpoint) {
+    await input.onCheckpoint({
+      outcomes: [...outcomes.values()],
+      snapshot: finalSummary
+    });
+  }
+
+  return {
+    outcomes: [...outcomes.values()],
+    snapshot: finalSummary,
+    unsettledProofs: buildUnsettledProofs(outcomes.values(), finalSummary)
+  };
 }

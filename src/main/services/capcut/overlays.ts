@@ -44,7 +44,9 @@
 import type { Page } from 'playwright-core';
 
 import { dump, StepError } from './diag';
-import { clickIfVisible } from './human';
+import { clickIfVisible, foregroundPage } from './human';
+import { createDirectUiInteraction } from './uiInteractionScheduler';
+import type { AccountUiInteraction } from './types';
 import type { LogFn } from './login';
 
 /**
@@ -85,6 +87,8 @@ async function isSurveyBlocking(page: Page): Promise<boolean> {
 export async function skipOnboardingSurvey(
   page: Page,
   log: LogFn,
+  ui?: AccountUiInteraction,
+  signal?: AbortSignal,
   maxSteps = 3
 ): Promise<boolean> {
   let clicks = 0;
@@ -94,13 +98,23 @@ export async function skipOnboardingSurvey(
     return true;
   };
 
+  const targetSig = signal ?? new AbortController().signal;
+  const targetUi = ui ?? createDirectUiInteraction(targetSig);
+
   for (let step = 0; step < maxSteps; step += 1) {
     if (!(await isSurveyBlocking(page))) return succeed();
 
     const skip = page.locator(SURVEY_SKIP).first();
     if (!(await skip.isVisible({ timeout: 3000 }).catch(() => false))) break;
 
-    await skip.click({ timeout: 8000 }).catch(() => {});
+    const clicked = await foregroundPage(
+      page,
+      { signal: targetSig, stage: 'overlay:survey-skip', ui: targetUi },
+      () => skip.click({ timeout: 8000 })
+    )
+      .then(() => true)
+      .catch(() => false);
+    if (!clicked) break;
     clicks += 1;
 
     // Bước bản cũ thiếu: chờ mask thật sự biến mất. Mask đổi `display` nên nó
@@ -126,13 +140,15 @@ export async function skipOnboardingSurvey(
  * ---------------------------------------------------------------------------
  * 2. BẢNG GIÁ "CHOOSE YOUR PLAN"
  * ---------------------------------------------------------------------------
- * Bảng giá phủ kín trang, và nó mở ra vì có ai bấm `Continue` trên card upsell
- * Pro (bản cũ của Video Studio làm đúng thế). Mở rồi thì mọi bước sau vô nghĩa.
+ * ĐO ĐƯỢC 04/09/2026 06:29, dump `tools/fixtures/dom-pricing-modal.html`:
+ * `missions/designStudio.ts` báo "Bấm Send canvas xong không thấy Stop
+ * generating", nhưng prompt đã vào, ảnh đã có. Nguyên nhân: modal
+ * `subscriptionModal-wrapper` mở đè lên toàn bộ canvas. Nút Send không bấm
+ * được vì bị mask `display: block` chặn.
  *
- * ĐO ĐƯỢC 04/09/2026 06:29, dump `tools/fixtures/dom-canvas-pricing-modal.html`:
- * nhiệm vụ `capcut_web_design_studio_canvas_edit` báo `canvas_send_no_effect`,
- * và trong DOM lúc đó có `subscriptionModal-wrapper` `display: block` cùng
- * `lv-modal-mask` `display: block` — Send không thể tới đích.
+ * Cách đóng:
+ *   1. Phím Escape (CapCut hỗ trợ Escape trên modal này)
+ *   2. Nút Close `[aria-label="Close"]` góc trên phải modal (fallback khi Escape không ăn)
  *
  * Hàm này trước đây chỉ tồn tại trong `missions/videoStudio.ts`, nên luồng
  * Design Studio không có gì đóng bảng giá. Cùng kiểu thiếu sót như khảo sát
@@ -140,12 +156,24 @@ export async function skipOnboardingSurvey(
  *
  * @returns `true` khi không còn bảng giá nào phủ trang.
  */
-export async function closeBlockingPricingModal(page: Page, log: LogFn): Promise<boolean> {
+export async function closeBlockingPricingModal(
+  page: Page,
+  log: LogFn,
+  ui?: AccountUiInteraction,
+  signal?: AbortSignal
+): Promise<boolean> {
   const modal = page.locator('[class*="subscriptionModal"]').first();
   if ((await modal.count().catch(() => 0)) === 0) return true;
   if (!(await modal.isVisible({ timeout: 500 }).catch(() => false))) return true;
 
-  await page.keyboard.press('Escape').catch(() => {});
+  const targetSig = signal ?? new AbortController().signal;
+  const targetUi = ui ?? createDirectUiInteraction(targetSig);
+
+  await foregroundPage(
+    page,
+    { signal: targetSig, stage: 'overlay:pricing-escape', ui: targetUi },
+    () => page.keyboard.press('Escape')
+  ).catch(() => {});
   await page.waitForTimeout(900);
 
   if (await modal.isVisible({ timeout: 500 }).catch(() => false)) {
@@ -154,7 +182,8 @@ export async function closeBlockingPricingModal(page: Page, log: LogFn): Promise
       page.locator(
         '[class*="subscriptionModal"] [aria-label="Close"], [class*="subscriptionModal"] [class*="close"]'
       ),
-      2500
+      2500,
+      { signal: targetSig, stage: 'overlay:pricing-close', ui: targetUi }
     );
     await page.waitForTimeout(600);
   }
@@ -191,13 +220,25 @@ export async function closeBlockingPricingModal(page: Page, log: LogFn): Promise
  */
 const PAGE_ERROR_TEXT = /页面异常|Page (error|exception)/;
 
-async function closePageErrorModal(page: Page, log: LogFn): Promise<boolean> {
+async function closePageErrorModal(
+  page: Page,
+  log: LogFn,
+  ui?: AccountUiInteraction,
+  signal?: AbortSignal
+): Promise<boolean> {
   const wrapper = page.locator('.lv-modal-wrapper').filter({ hasText: PAGE_ERROR_TEXT }).first();
   if ((await wrapper.count().catch(() => 0)) === 0) return true;
 
+  const targetSig = signal ?? new AbortController().signal;
+  const targetUi = ui ?? createDirectUiInteraction(targetSig);
+
   const refresh = wrapper.getByRole('button', { name: /Refresh|刷新/i }).first();
   if (await refresh.isVisible({ timeout: 800 }).catch(() => false)) {
-    await refresh.click({ timeout: 5000 }).catch(() => {});
+    await foregroundPage(
+      page,
+      { signal: targetSig, stage: 'overlay:page-error-refresh', ui: targetUi },
+      () => refresh.click({ timeout: 5000 })
+    ).catch(() => {});
   } else {
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
   }
@@ -228,12 +269,17 @@ async function closePageErrorModal(page: Page, log: LogFn): Promise<boolean> {
  * A remaining blocker throws so every caller, including nested missions,
  * stops before clicking covered controls. The boolean return is success-only.
  */
-export async function ensurePageUsable(page: Page, log: LogFn): Promise<boolean> {
+export async function ensurePageUsable(
+  page: Page,
+  log: LogFn,
+  ui?: AccountUiInteraction,
+  signal?: AbortSignal
+): Promise<boolean> {
   if ((await page.locator(BLOCKING_MASK).count().catch(() => 0)) === 0) return true;
 
-  await skipOnboardingSurvey(page, log);
-  await closeBlockingPricingModal(page, log);
-  await closePageErrorModal(page, log);
+  await skipOnboardingSurvey(page, log, ui, signal);
+  await closeBlockingPricingModal(page, log, ui, signal);
+  await closePageErrorModal(page, log, ui, signal);
 
   if ((await page.locator(BLOCKING_MASK).count().catch(() => 0)) === 0) return true;
 

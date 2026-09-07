@@ -26,6 +26,7 @@ import { chromium, type Browser, type BrowserContext, type Page } from 'playwrig
 
 import { ProviderError } from '../../../providers/ProviderError';
 import { MULTILOGIN_SERVICE_NAME } from '../../../providers/MultiloginProvider';
+import { boundedDomRead, withinDeadline } from '../cancellation';
 
 export const BROWSER_LAUNCHER_KINDS = ['xcli', 'api-v3'] as const;
 
@@ -61,6 +62,9 @@ export interface LauncherProxy {
   password?: string;
 }
 
+import type { AccountUiInteraction } from '../types';
+import { createDirectUiInteraction } from '../uiInteractionScheduler';
+
 export interface LaunchOptions {
   /** `null`/bỏ trống = chạy bằng IP máy thật (tương đương `--no-proxy` của engine). */
   proxy?: LauncherProxy | null;
@@ -74,6 +78,7 @@ export interface LaunchOptions {
   signal?: AbortSignal;
   /** Called as soon as the vendor reports the profile id, before CDP attach. */
   onProfileStarted?: (profileId: string) => void;
+  ui?: AccountUiInteraction;
 }
 
 /**
@@ -106,13 +111,16 @@ export interface BrowserLauncher {
 
 /** CapCut cần quyền notifications (nhiệm vụ "Enable browser notifications"). */
 const CAPCUT_ORIGIN = 'https://www.capcut.com';
+const MIN_HEADED_VIEWPORT = { width: 1440, height: 900 } as const;
 
 export interface CdpAttachOptions {
+  headless?: boolean;
   attempts?: number;
   intervalMs?: number;
   log?: LauncherLog;
   sleep?: (ms: number) => Promise<void>;
   signal?: AbortSignal;
+  ui?: AccountUiInteraction;
 }
 
 export interface CdpAttachment {
@@ -194,6 +202,154 @@ export async function connectOverCdpWithRetry(
  * Từ `port` thành `{ context, page }` sẵn sàng làm việc.
  *
  * Ném thì đã tự ngắt CDP, nhưng KHÔNG tự dừng profile — người gọi mới biết
+ */
+export async function configureHeadedWindowUnlocked(
+  page: Page,
+  context: BrowserContext,
+  options: CdpAttachOptions
+): Promise<void> {
+  await page.bringToFront().catch(() => {});
+
+  if (options.headless === false) {
+    // setViewportSize only changes Playwright's emulated viewport over CDP;
+    // the Multilogin window stays narrow and still clips real mouse targets.
+    const session = await context.newCDPSession(page);
+    try {
+      const [viewport, window] = await Promise.all([
+        boundedDomRead(
+          () => page.evaluate(() => ({
+            width: innerWidth,
+            height: innerHeight,
+            screenWidth: screen.availWidth,
+            screenHeight: screen.availHeight
+          })),
+          'headed-viewport',
+          5000,
+          options.signal
+        ),
+        withinDeadline(session.send('Browser.getWindowForTarget'), 5000, options.signal)
+      ]);
+      options.signal?.throwIfAborted();
+      const { bounds, windowId } = window;
+      if (
+        !Number.isFinite(viewport.width) || !Number.isFinite(viewport.height) ||
+        !Number.isFinite(viewport.screenWidth) || !Number.isFinite(viewport.screenHeight) ||
+        !Number.isFinite(bounds.width) || !Number.isFinite(bounds.height)
+      ) {
+        throw new Error('Không đọc được kích thước cửa sổ headed.');
+      }
+
+      const currentWidth = bounds.width as number;
+      const currentHeight = bounds.height as number;
+      const frameWidth = Math.max(0, currentWidth - viewport.width);
+      const frameHeight = Math.max(0, currentHeight - viewport.height);
+      const target = {
+        width: Math.max(
+          currentWidth,
+          Math.min(MIN_HEADED_VIEWPORT.width, viewport.screenWidth) + frameWidth
+        ),
+        height: Math.max(
+          currentHeight,
+          Math.min(MIN_HEADED_VIEWPORT.height, viewport.screenHeight) + frameHeight
+        )
+      };
+      const needsResize = target.width > currentWidth || target.height > currentHeight;
+
+      let nativeViewport = viewport;
+      let nativeWindow = window;
+
+      if (needsResize) {
+        if (bounds.windowState && bounds.windowState !== 'normal') {
+          await withinDeadline(
+            session.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } }),
+            5000,
+            options.signal
+          );
+        }
+        await withinDeadline(
+          session.send('Browser.setWindowBounds', { windowId, bounds: target }),
+          8000,
+          options.signal
+        );
+        [nativeViewport, nativeWindow] = await Promise.all([
+          boundedDomRead(
+            () => page.evaluate(() => ({
+              width: innerWidth,
+              height: innerHeight,
+              screenWidth: screen.availWidth,
+              screenHeight: screen.availHeight
+            })),
+            'headed-native-viewport-readback',
+            5000,
+            options.signal
+          ),
+          withinDeadline(session.send('Browser.getWindowForTarget'), 5000, options.signal)
+        ]);
+        options.signal?.throwIfAborted();
+      }
+
+      const nativeWidth = nativeWindow.bounds.width;
+      const nativeHeight = nativeWindow.bounds.height;
+      if (
+        !Number.isFinite(nativeWidth) || !Number.isFinite(nativeHeight) ||
+        (nativeWidth ?? 0) <= 0 || (nativeHeight ?? 0) <= 0 ||
+        !Number.isFinite(nativeViewport.width) || !Number.isFinite(nativeViewport.height) ||
+        nativeViewport.width <= 0 || nativeViewport.height <= 0
+      ) {
+        throw new Error('Không đọc được kích thước cửa sổ headed sau khi resize.');
+      }
+
+      let layoutViewport = { width: nativeViewport.width, height: nativeViewport.height };
+      if (
+        nativeViewport.width < MIN_HEADED_VIEWPORT.width ||
+        nativeViewport.height < MIN_HEADED_VIEWPORT.height
+      ) {
+        layoutViewport = {
+          width: Math.max(nativeViewport.width, MIN_HEADED_VIEWPORT.width),
+          height: Math.max(nativeViewport.height, MIN_HEADED_VIEWPORT.height)
+        };
+        await withinDeadline(page.setViewportSize(layoutViewport), 8000, options.signal);
+        const viewportReady = await boundedDomRead(
+          () => page.waitForFunction(
+            ({ width, height }) => innerWidth >= width && innerHeight >= height,
+            layoutViewport,
+            { timeout: 5000 }
+          ),
+          'headed-layout-viewport-readback',
+          5500,
+          options.signal
+        );
+        await viewportReady.dispose().catch(() => {});
+      }
+
+      if ((nativeWidth ?? 0) < target.width || (nativeHeight ?? 0) < target.height) {
+        options.log?.(
+          `⚠️ Headed native window bị giới hạn: yêu cầu ${target.width}x${target.height}, ` +
+          `native ${nativeWidth}x${nativeHeight}; layout viewport ${layoutViewport.width}x${layoutViewport.height}`
+        );
+      } else if (needsResize || layoutViewport.width !== viewport.width || layoutViewport.height !== viewport.height) {
+        options.log?.(
+          `Headed native window ${nativeWidth}x${nativeHeight}; ` +
+          `layout viewport ${layoutViewport.width}x${layoutViewport.height}`
+        );
+      }
+    } finally {
+      await session.detach().catch(() => {});
+    }
+  }
+}
+
+/**
+ * Gắn Playwright vào một profile Multilogin đã mở sẵn cổng debug.
+ *
+ * Hàm này dùng chung cho cả `xcli` lẫn `api-v3` sau khi mỗi bên đã hoàn thành
+ * việc MỞ profile. Nó gom:
+ *   - retry kết nối CDP
+ *   - mở rộng cửa sổ nếu chạy HEADED để không bị che nút
+ *   - cấp sẵn quyền notifications cho CapCut
+ *
+ * Nếu kết nối/resize thất bại, hàm chủ động đóng browser CDP và ném tiếp để
+ * caller dọn dẹp profile. Caller phải luôn bọc trong `try..catch` và gọi `stop()`
  * profileId để dừng cho đúng.
  */
 export async function attachOverCdp(
@@ -207,7 +363,17 @@ export async function attachOverCdp(
     if (!context) throw new Error('Không tìm thấy BrowserContext nào trong browser');
 
     const page = context.pages()[0] ?? (await context.newPage());
-    await page.bringToFront().catch(() => {});
+
+    if (options.headless === false && !options.ui) {
+      throw new Error('Headed launch requires an AccountUiInteraction session facade');
+    }
+
+    const ui = options.ui ?? createDirectUiInteraction(options.signal ?? new AbortController().signal);
+    await ui.foreground('launcher:window-setup', () =>
+      configureHeadedWindowUnlocked(page, context, options)
+    );
+
+    options.signal?.throwIfAborted();
 
     // Cấp sẵn quyền notifications (phục vụ nhiệm vụ "Enable browser notifications")
     await context.grantPermissions(['notifications'], { origin: CAPCUT_ORIGIN }).catch(() => {});

@@ -223,10 +223,13 @@ export class XcliLauncher implements BrowserLauncher {
       await this.wait(this.bootWaitMs, opts.signal);
 
       const attachment = await attachOverCdp(port, {
+        // xcli has no measured headless flag and always opens a real window.
+        headless: false,
         attempts: this.connectAttempts,
         log: this.log,
         sleep: this.sleep,
-        signal: opts.signal
+        signal: opts.signal,
+        ui: opts.ui
       });
       this.attached.set(profileId, attachment.browser);
 

@@ -28,6 +28,7 @@ import type { BrowserContext, Page } from 'playwright-core';
 
 import { isLoggedIn, loginCapcut, type CapcutCredentials } from './login';
 import { signupCapcut } from './signup';
+import type { AccountUiInteraction } from './types';
 
 /**
  * Tài khoản tối thiểu mà tầng xác thực cần: email + password, cộng NGUỒN lấy
@@ -65,6 +66,9 @@ export interface AuthOptions {
    * `EmailPurchaseService`; thiếu nó mà CapCut đòi OTP thì signup ném lỗi rõ ràng.
    */
   getOtp?: (email: string) => Promise<string>;
+  ui?: AccountUiInteraction;
+  signal?: AbortSignal;
+  allowSignupFallback?: boolean;
 }
 
 /**
@@ -101,10 +105,10 @@ export async function ensureInApp(
   );
 
   if (trySignup) {
-    const r = await signupCapcut(page, context, account, { log, getOtp: opts.getOtp });
+    const r = await signupCapcut(page, context, account, { log, getOtp: opts.getOtp, ui: opts.ui, signal: opts.signal });
     if (r.alreadyExists && !(await isLoggedIn(page))) {
       log('Email đã tồn tại → chuyển sang đăng nhập');
-      await loginCapcut(page, context, account, log);
+      await loginCapcut(page, context, account, log, { ui: opts.ui, signal: opts.signal });
       await assertInApp(page, account);
       return { mode: 'signup-then-login', created: false };
     }
@@ -112,14 +116,14 @@ export async function ensureInApp(
     return { mode: 'signup', created: r.created };
   }
 
-  await loginCapcut(page, context, account, log).catch((e: unknown) => {
+  await loginCapcut(page, context, account, log, { ui: opts.ui, signal: opts.signal }).catch((e: unknown) => {
     log(`Đăng nhập thất bại: ${(e as Error).message}`);
   });
   if (await isLoggedIn(page)) return { mode: 'login', created: false };
 
   // Không vào được: có thể email chưa từng được tạo trên CapCut.
   log('Đăng nhập không vào được app → thử đăng ký');
-  const r = await signupCapcut(page, context, account, { log, getOtp: opts.getOtp });
+  const r = await signupCapcut(page, context, account, { log, getOtp: opts.getOtp, ui: opts.ui, signal: opts.signal });
   await assertInApp(page, account);
   return { mode: 'login-then-signup', created: r.created };
 }

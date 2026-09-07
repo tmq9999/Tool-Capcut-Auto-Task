@@ -25,6 +25,7 @@ import { findTaskRow, findTaskEntries } from '../src/main/services/capcut/missio
 import { skipOnboardingSurvey, closeBlockingPricingModal, ensurePageUsable } from '../src/main/services/capcut/overlays';
 import { findExportButton, ensureNodeToolbar } from '../src/main/services/capcut/missions/videoStudio';
 import type { CapcutMissionEnv } from '../src/main/services/capcut/types';
+import { createDirectUiInteraction } from '../src/main/services/capcut/uiInteractionScheduler';
 
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const CANVAS_PANEL = '[aria-label="Canvas prompt panel"]';
@@ -441,13 +442,13 @@ async function main(): Promise<void> {
       .count();
     check('lọc title + +210 ra 0 dòng (đúng lỗi đã gặp)', byBoth === 0, byBoth);
 
-    const found = await findTaskRow(page, 'Install CapCut Web Desktop', 210)
+    const found = await findTaskRow(page, 'capcut_web_pwa_install', 'Install CapCut Web Desktop')
       .then(() => 'ok')
       .catch((e: unknown) => (e as Error).message);
     check('findTaskRow vẫn tìm được dòng khi reward lệch', found === 'ok', found);
 
     // Bảo đảm cũ phải còn: title trùng 2 dòng thì KHÔNG được bốc bừa.
-    const ambiguous = await findTaskRow(page, 'Chat with AI agent', 12345)
+    const ambiguous = await findTaskRow(page, 'unknown-task', 'Chat with AI agent')
       .then(() => 'KHÔNG ném — bảo đảm chống nhầm đã mất')
       .catch(() => 'ném');
     check('title trùng 2 dòng + reward không khớp thì vẫn NÉM', ambiguous === 'ném', ambiguous);
@@ -485,7 +486,13 @@ async function main(): Promise<void> {
       (await n('.react-flow__node-toolbar [data-testid="global-export-trigger"]')) === 0);
 
     const said: string[] = [];
-    const env = { page, log: (m: string) => said.push(m) } as unknown as CapcutMissionEnv;
+    const signal = new AbortController().signal;
+    const env = {
+      page,
+      signal,
+      ui: createDirectUiInteraction(signal),
+      log: (m: string) => said.push(m),
+    } as unknown as CapcutMissionEnv;
     const btn = await findExportButton(page, env)
       .then((locator) => locator.evaluate((el) => el.getAttribute('data-testid')))
       .catch((e: unknown) => 'NÉM: ' + (e as Error).message);
@@ -500,10 +507,16 @@ async function main(): Promise<void> {
      * mà KHÔNG chọn lại node vô ích.
      */
     const quiet: string[] = [];
+    const signalQuiet = new AbortController().signal;
     const count = await ensureNodeToolbar(
       page,
       'ec97a52f-079a-436f-b733-035bebbcf18c',
-      { page, log: (m: string) => quiet.push(m) } as unknown as CapcutMissionEnv
+      {
+        page,
+        signal: signalQuiet,
+        ui: createDirectUiInteraction(signalQuiet),
+        log: (m: string) => quiet.push(m),
+      } as unknown as CapcutMissionEnv
     ).catch((e: unknown) => 'NÉM: ' + (e as Error).message);
     check('toolbar đã có nút thì trả về số nút, không chọn lại node', count === 5, count);
     check('và không in dòng chọn lại nào', quiet.length === 0, quiet);
@@ -522,7 +535,13 @@ async function main(): Promise<void> {
     console.log('\n=== node toolbar rỗng — chọn lại node trước khi bỏ cuộc ===');
 
     const said: string[] = [];
-    const env = { page, log: (m: string) => said.push(m) } as unknown as CapcutMissionEnv;
+    const signalEmpty = new AbortController().signal;
+    const env = {
+      page,
+      signal: signalEmpty,
+      ui: createDirectUiInteraction(signalEmpty),
+      log: (m: string) => said.push(m),
+    } as unknown as CapcutMissionEnv;
     const err = await ensureNodeToolbar(page, 'n1', env, 2)
       .then(() => '')
       .catch((e: unknown) => (e as Error).message);

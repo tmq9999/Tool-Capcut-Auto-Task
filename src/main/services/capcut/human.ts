@@ -12,6 +12,49 @@
  */
 
 import type { Locator, Page } from 'playwright-core';
+import { abortableDelay, boundedDomRead, DomReadTimeoutError } from './cancellation';
+import type { AccountUiInteraction } from './types';
+import { createDirectUiInteraction } from './uiInteractionScheduler';
+
+export interface HumanInteractionOptions {
+  signal?: AbortSignal;
+  stage?: string;
+  ui?: AccountUiInteraction;
+  log?: (message: string) => void;
+}
+
+export function foregroundPage<T>(
+  page: Page,
+  options: Pick<HumanInteractionOptions, 'signal' | 'stage' | 'ui'> | undefined,
+  operation: () => Promise<T>
+): Promise<T> {
+  const signal = options?.signal ?? new AbortController().signal;
+  const stage = options?.stage ?? 'unspecified';
+  const ui = options?.ui ?? createDirectUiInteraction(signal);
+  return ui.foreground(stage, async () => {
+    signal.throwIfAborted();
+    await page.bringToFront();
+    signal.throwIfAborted();
+    return operation();
+  });
+}
+
+function command<T>(run: () => Promise<T>, phase: string, ms: number, options?: HumanInteractionOptions): Promise<T> {
+  if (!options) return run();
+  options.signal?.throwIfAborted();
+  const stage = options.stage ?? 'unspecified';
+  if (phase !== 'mouse-move' && phase !== 'type') options.log?.('Browser command: ' + stage + ':' + phase);
+  return boundedDomRead(run, stage + ':' + phase, ms, options.signal ?? new AbortController().signal);
+}
+
+function pause(ms: number, options?: HumanInteractionOptions): Promise<void> {
+  return options?.signal ? abortableDelay(ms, options.signal) : sleep(ms);
+}
+
+function rethrowInterrupted(error: unknown, options?: HumanInteractionOptions): void {
+  options?.signal?.throwIfAborted();
+  if (error instanceof DomReadTimeoutError) throw error;
+}
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -20,46 +63,50 @@ export const rand = (min: number, max: number): number => min + Math.random() * 
 /** Lấy 1 phần tử ngẫu nhiên trong danh sách (dùng cho prompt / link mẫu) */
 export const pick = <T>(arr: readonly T[]): T => arr[Math.floor(Math.random() * arr.length)];
 
-/**
- * Di chuyển chuột theo đường cong ease-in-out có nhiễu nhỏ (mô phỏng rung tay).
- * Điểm bắt đầu ngẫu nhiên để mỗi lần chạy có quỹ đạo khác nhau.
- */
-export async function humanMouseMove(page: Page, tx: number, ty: number): Promise<void> {
-  const sx = rand(80, 400);
-  const sy = rand(80, 400);
-  const steps = 22 + Math.floor(rand(0, 10));
+async function humanClickUnlocked(
+  page: Page,
+  locator: Locator,
+  options: HumanInteractionOptions
+): Promise<void> {
+  async function humanMouseMove(tx: number, ty: number): Promise<void> {
+    options.log?.('Browser command: ' + options.stage + ':mouse-move');
+    const sx = rand(80, 400);
+    const sy = rand(80, 400);
+    const steps = 22 + Math.floor(rand(0, 10));
 
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps;
-    const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-    const x = sx + (tx - sx) * ease + Math.sin(t * Math.PI) * rand(-4, 4);
-    const y = sy + (ty - sy) * ease + Math.cos(t * Math.PI) * rand(-3, 3);
-    await page.mouse.move(x, y);
-    await sleep(rand(8, 20));
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      const x = sx + (tx - sx) * ease + Math.sin(t * Math.PI) * rand(-4, 4);
+      const y = sy + (ty - sy) * ease + Math.cos(t * Math.PI) * rand(-3, 3);
+      await command(() => page.mouse.move(x, y), 'mouse-move', 5000, options);
+      await pause(rand(8, 20), options);
+    }
+    await command(() => page.mouse.move(tx, ty), 'mouse-move', 5000, options);
   }
-  await page.mouse.move(tx, ty);
-}
 
-/** Click kiểu người thật: cuộn tới → hover → dừng → mousedown → dừng → mouseup */
-export async function humanClick(page: Page, locator: Locator): Promise<void> {
-  await locator.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
-  const box = await locator.boundingBox().catch(() => null);
+  await command(() => locator.scrollIntoViewIfNeeded({ timeout: 5000 }), 'scroll', 6000, options)
+    .catch(error => { rethrowInterrupted(error, options); });
+  const box = await command(() => locator.boundingBox(), 'bounding-box', 5000, options)
+    .catch(error => { rethrowInterrupted(error, options); return null; });
 
   // Không lấy được toạ độ (element ẩn/0 kích thước) → dùng click thường
   if (!box || box.width === 0 || box.height === 0) {
-    await locator.click({ timeout: 8000 });
+    await command(() => locator.click({ timeout: 8000 }), 'fallback-click', 9000, options);
     return;
   }
 
   const tx = box.x + box.width / 2 + rand(-3, 3);
   const ty = box.y + box.height / 2 + rand(-2, 2);
 
-  await humanMouseMove(page, tx, ty);
-  await sleep(rand(180, 420));
-  await page.mouse.down();
-  await sleep(rand(70, 150));
-  await page.mouse.up();
-  await sleep(rand(250, 500));
+  // A bounded timeout abandons our wait; it does not cancel the browser
+  // command. Propagate it instead of queueing another input on the same page.
+  await humanMouseMove(tx, ty);
+  await pause(rand(180, 420), options);
+  await command(() => page.mouse.down(), 'mouse-down', 5000, options);
+  await pause(rand(70, 150), options);
+  await command(() => page.mouse.up(), 'mouse-up', 5000, options);
+  await pause(rand(250, 500), options);
 }
 
 /**
@@ -93,22 +140,66 @@ export function perCharDelayRange(perChar?: PerCharDelay): PerCharDelay {
   return { minMs, maxMs };
 }
 
-/** Gõ chữ theo nhịp người thật vào editor (tiptap / contenteditable / input) */
-export async function humanType(
+async function humanTypeUnlocked(
   page: Page,
   locator: Locator,
   text: string,
-  perChar?: PerCharDelay
+  perChar: PerCharDelay | undefined,
+  options: HumanInteractionOptions
 ): Promise<void> {
   const { minMs, maxMs } = perCharDelayRange(perChar);
-  await humanClick(page, locator);
-  await sleep(rand(150, 350));
+  await humanClickUnlocked(page, locator, options);
+  await pause(rand(150, 350), options);
+  options.log?.('Browser command: ' + options.stage + ':type');
   for (const ch of text) {
-    await page.keyboard.type(ch, { delay: rand(minMs, maxMs) });
+    const delay = rand(minMs, maxMs);
+    await command(() => page.keyboard.type(ch, { delay }), 'type', delay + 5000, options);
     // Thỉnh thoảng "suy nghĩ" một nhịp như người thật
-    if (Math.random() < 0.08) await sleep(rand(200, 500));
+    if (Math.random() < 0.08) await pause(rand(200, 500), options);
   }
-  await sleep(rand(250, 600));
+  await pause(rand(250, 600), options);
+}
+
+/** Click kiểu người thật: cuộn tới → hover → dừng → mousedown → dừng → mouseup */
+export function humanClick(
+  page: Page,
+  locator: Locator,
+  options?: HumanInteractionOptions
+): Promise<void> {
+  const signal = options?.signal ?? new AbortController().signal;
+  const stage = options?.stage ?? 'unspecified';
+  const ui = options?.ui ?? createDirectUiInteraction(signal);
+  const normalized: HumanInteractionOptions = {
+    signal,
+    stage,
+    ui,
+    log: options?.log
+  };
+  return foregroundPage(page, normalized, () =>
+    humanClickUnlocked(page, locator, normalized)
+  );
+}
+
+/** Gõ chữ theo nhịp người thật vào editor (tiptap / contenteditable / input) */
+export function humanType(
+  page: Page,
+  locator: Locator,
+  text: string,
+  perChar?: PerCharDelay,
+  options?: HumanInteractionOptions
+): Promise<void> {
+  const signal = options?.signal ?? new AbortController().signal;
+  const stage = options?.stage ?? 'unspecified';
+  const ui = options?.ui ?? createDirectUiInteraction(signal);
+  const normalized: HumanInteractionOptions = {
+    signal,
+    stage,
+    ui,
+    log: options?.log
+  };
+  return foregroundPage(page, normalized, () =>
+    humanTypeUnlocked(page, locator, text, perChar, normalized)
+  );
 }
 
 /**
@@ -118,36 +209,50 @@ export async function humanType(
  *   - `aria-disabled="true"`
  *   - thuộc tính `disabled` của <button>
  */
-export async function isDisabled(locator: Locator): Promise<boolean> {
-  return locator
+export async function isDisabled(locator: Locator, signal?: AbortSignal, timeoutMs = 1000): Promise<boolean> {
+  const read = () => locator
     .evaluate((el: Element) => {
       const cls = el.getAttribute('class') ?? '';
       if (/disabled/i.test(cls)) return true;
       if (el.getAttribute('aria-disabled') === 'true') return true;
       if ((el as HTMLButtonElement).disabled === true) return true;
       return false;
-    })
-    .catch(() => false);
+    });
+  return (signal ? boundedDomRead(read, 'enabled-check', timeoutMs, signal) : read())
+    .catch(error => {
+      signal?.throwIfAborted();
+      if (error instanceof DomReadTimeoutError) throw error;
+      return false;
+    });
 }
 
 /** Chờ tới khi element hết disabled. Trả về false nếu quá thời gian vẫn disabled. */
-export async function waitEnabled(locator: Locator, timeoutMs = 15000): Promise<boolean> {
+export async function waitEnabled(locator: Locator, timeoutMs = 15000, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!(await isDisabled(locator))) return true;
-    await sleep(500);
+    if (!(await isDisabled(locator, signal, Math.min(1000, deadline - Date.now())))) return true;
+    const delay = Math.max(0, Math.min(500, deadline - Date.now()));
+    if (signal) await abortableDelay(delay, signal);
+    else await sleep(delay);
   }
   return false;
 }
 
 /** Click nếu element xuất hiện; trả về true nếu đã click. Không ném lỗi. */
-export async function clickIfVisible(page: Page, locator: Locator, timeout = 2500): Promise<boolean> {
+export async function clickIfVisible(
+  page: Page,
+  locator: Locator,
+  timeout = 2500,
+  options?: HumanInteractionOptions
+): Promise<boolean> {
   const visible = await locator
     .first()
     .isVisible({ timeout })
     .catch(() => false);
   if (!visible) return false;
-  await humanClick(page, locator.first()).catch(() => {});
+  if (!options) return false;
+  await humanClick(page, locator.first(), options).catch(() => {});
   return true;
 }
 
@@ -155,7 +260,19 @@ export async function clickIfVisible(page: Page, locator: Locator, timeout = 250
  * Đóng các popup hướng dẫn / onboarding hay chen ngang (Got it, Skip, Next...).
  * Trả về số popup đã đóng.
  */
-export async function dismissOverlays(page: Page): Promise<number> {
+export async function dismissOverlays(
+  page: Page,
+  options?: HumanInteractionOptions
+): Promise<number> {
+  const signal = options?.signal ?? new AbortController().signal;
+  const stage = options?.stage ?? 'dismiss-overlays';
+  const ui = options?.ui ?? createDirectUiInteraction(signal);
+  const normalized: HumanInteractionOptions = {
+    ...options,
+    signal,
+    stage,
+    ui,
+  };
   const candidates = [
     'button:has-text("Got it")',
     'div[role="button"]:text-is("Got it")',
@@ -169,11 +286,14 @@ export async function dismissOverlays(page: Page): Promise<number> {
 
   let closed = 0;
   for (const sel of candidates) {
+    signal.throwIfAborted();
     const loc = page.locator(sel).first();
     if (await loc.isVisible({ timeout: 600 }).catch(() => false)) {
-      await loc.click({ timeout: 2500 }).catch(() => {});
+      await foregroundPage(page, normalized, async () => {
+        await loc.click({ timeout: 2500 }).catch(() => {});
+      });
       closed++;
-      await sleep(rand(400, 800));
+      await pause(rand(400, 800), normalized);
     }
   }
   return closed;

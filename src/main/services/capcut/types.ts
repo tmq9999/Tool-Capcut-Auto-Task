@@ -15,6 +15,7 @@
 import type { BrowserContext, Page } from 'playwright-core';
 
 import type { ActionProof } from './taskApi';
+import type { CapcutAccountResult } from '../AutomationRunService';
 
 /**
  * Nhịp thao tác do người dùng đặt ở Dashboard (`stepDelay*` / `typeDelay*`).
@@ -37,6 +38,11 @@ export interface CapcutPace {
   typeMaxMs: number;
 }
 
+export interface AccountUiInteraction {
+  foreground<T>(label: string, operation: () => Promise<T>): Promise<T>;
+  editor<T>(label: string, operation: () => Promise<T>): Promise<T>;
+}
+
 export interface CapcutMissionEnv {
   page: Page;
   context: BrowserContext;
@@ -46,10 +52,14 @@ export interface CapcutMissionEnv {
   signal: AbortSignal;
   /** Không có thì engine giữ đúng nhịp đã đo (xem `CapcutPace`). */
   pace?: CapcutPace;
+  captureStage?: (stage: string) => void;
+  ui: AccountUiInteraction;
 }
 
 export interface MissionGroup {
+  id: 'pwa-install' | 'notifications' | 'design-studio' | 'video-studio';
   name: string;
+  workspace: 'none' | 'editor';
   /** Các `task_key` mà nhóm này hoàn thành. */
   keys: string[];
   proofTimeoutMs: number;
@@ -66,4 +76,72 @@ export interface TaskOutcome {
   proof?: ActionProof;
   error?: string;
   dumpName?: string | null;
+}
+
+export type CapcutFatalCode = 'DOM_READ_TIMEOUT';
+
+export interface SnapshotTaskSummary {
+  key: string;
+  title: string;
+  reward: number;
+  status: number;
+}
+
+export interface TaskSnapshotSummary {
+  observedAt: number;
+  requiredAfter: number;
+  tasks: SnapshotTaskSummary[];
+  total: number;
+  done: number;
+  credits: number;
+  creditsTotal: number;
+  missing: string[];
+  fresh: boolean;
+  final: boolean;
+  stale?: boolean;
+}
+
+export interface TaskCheckpoint {
+  outcomes: TaskOutcome[];
+  snapshot: TaskSnapshotSummary;
+}
+
+export interface CapcutVerificationReceipt {
+  runId: string;
+  sessionAlias: string;
+  observedAt: string;
+  requiredAfter: string;
+  fresh: boolean;
+  final: boolean;
+  serverTotal: number;
+  serverDone: number;
+  complete: boolean;
+}
+
+export interface UnsettledTaskProof {
+  key: string;
+  proof: ActionProof & { errNo: 0 };
+}
+
+export interface CapcutUiAccountResult extends CapcutAccountResult {
+  authenticated: boolean;
+  verification: CapcutVerificationReceipt | null;
+  fatalCode?: CapcutFatalCode;
+  unsettledProofs: UnsettledTaskProof[];
+}
+
+export type UiLane = 'foreground' | 'editor';
+
+export type UiSchedulerEvent =
+  | { type: 'queued'; lane: UiLane; sessionAlias: string; label: string; at: number }
+  | { type: 'started'; lane: UiLane; sessionAlias: string; label: string; waitMs: number; at: number }
+  | { type: 'finished'; lane: UiLane; sessionAlias: string; label: string; holdMs: number; at: number }
+  | { type: 'quarantined'; sessionAlias: string; label: string; code: 'DOM_READ_TIMEOUT' | 'ACTIVE_ABORT'; at: number }
+  | { type: 'profile-stopped'; sessionAlias: string; at: number }
+  | { type: 'late-settled'; sessionAlias: string; label: string; outcome: 'resolved' | 'rejected'; at: number }
+  | { type: 'shutdown'; code: 'RESOURCE_CLEANUP_FAILED' | 'RUN_ABORTED'; at: number };
+
+export interface UiSessionIdentity {
+  sessionAlias: string;
+  signal: AbortSignal;
 }

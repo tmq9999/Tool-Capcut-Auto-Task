@@ -25,6 +25,9 @@ import type { BrowserContext, Locator, Page } from 'playwright-core';
 
 import { dump, StepError } from './diag';
 import { skipOnboardingSurvey } from './overlays';
+import type { AccountUiInteraction } from './types';
+import { foregroundPage } from './human';
+import { createDirectUiInteraction } from './uiInteractionScheduler';
 
 /**
  * Thông tin đăng nhập tối thiểu mà engine cần. Bản gốc là `Credentials` trong
@@ -34,6 +37,11 @@ import { skipOnboardingSurvey } from './overlays';
 export interface CapcutCredentials {
   email: string;
   password: string;
+}
+
+export interface LoginOptions {
+  ui?: AccountUiInteraction;
+  signal?: AbortSignal;
 }
 
 /** Kênh log được inject — engine không được `console.log`. */
@@ -65,11 +73,20 @@ async function fillVerified(
 }
 
 /** Bấm trigger nhiều lần cho tới khi target hiện ra (UI CapCut hay lag khi load) */
-async function clickUntilVisible(trigger: Locator, target: Locator, attempts = 60): Promise<void> {
+async function clickUntilVisible(
+  trigger: Locator,
+  target: Locator,
+  ui: AccountUiInteraction,
+  signal: AbortSignal,
+  attempts = 60
+): Promise<void> {
   await trigger.waitFor({ state: 'visible', timeout: 20000 });
 
   for (let i = 0; i < attempts; i++) {
-    await trigger.click({ timeout: 3000 }).catch(() => {});
+    signal.throwIfAborted();
+    await foregroundPage(trigger.page(), { signal, stage: 'login:open-email-form', ui }, async () => {
+      await trigger.click({ timeout: 3000 }).catch(() => {});
+    });
     if (await target.isVisible({ timeout: 600 }).catch(() => false)) return;
   }
   // Không có hiện trường thì lỗi này chỉ là một câu chữ: CHANGELOG đã ghi một
@@ -114,8 +131,12 @@ export async function loginCapcut(
   page: Page,
   _context: BrowserContext,
   creds: CapcutCredentials,
-  log: LogFn
+  log: LogFn,
+  options?: LoginOptions
 ): Promise<void> {
+  const signal = options?.signal ?? new AbortController().signal;
+  const ui = options?.ui ?? createDirectUiInteraction(signal);
+
   log('\n============================================================');
   log('🔐 ĐĂNG NHẬP CAPCUT WEB');
   log('============================================================');
@@ -132,7 +153,7 @@ export async function loginCapcut(
   // --- Bước 1: mở form email ---
   const continueEmail = page.getByText(/^(Continue with email|Tiếp tục bằng email)$/);
   const inputEmail = page.locator('input[type="email"]');
-  await clickUntilVisible(continueEmail, inputEmail);
+  await clickUntilVisible(continueEmail, inputEmail, ui, signal);
   log('   → Đã mở form email');
 
   // --- Bước 2: điền email và Continue ---
@@ -140,7 +161,9 @@ export async function loginCapcut(
 
   const continueBtn = page.getByRole('button', { name: /^(Continue|Tiếp tục)$/ });
   await continueBtn.waitFor({ state: 'visible', timeout: 20000 });
-  await continueBtn.click({ timeout: 20000 });
+  await foregroundPage(page, { signal, stage: 'login:continue-email', ui }, () =>
+    continueBtn.click({ timeout: 20000 })
+  );
   log('   → Đã bấm Continue');
 
   // --- Bước 3: xác định trạng thái tài khoản ---
@@ -177,7 +200,9 @@ export async function loginCapcut(
     .getByRole('button', { name: /^(Sign in|Log in|Continue|Đăng nhập|Tiếp tục)$/ })
     .first();
   await signInBtn.waitFor({ state: 'visible', timeout: 20000 });
-  await signInBtn.click({ timeout: 20000 });
+  await foregroundPage(page, { signal, stage: 'login:sign-in', ui }, () =>
+    signInBtn.click({ timeout: 20000 })
+  );
   log('   → Đã bấm đăng nhập, chờ chuyển trang...');
 
   // --- Bước 5: chờ vào app ---
@@ -187,14 +212,16 @@ export async function loginCapcut(
   await page.waitForTimeout(5000);
 
   // Bỏ khảo sát onboarding — và kiểm modal đã tắt thật (xem `onboarding.ts`)
-  await skipOnboardingSurvey(page, log);
+  await skipOnboardingSurvey(page, log, ui, signal);
 
   // Đóng modal quảng cáo / onboarding nếu che UI
   const closeModal = page
     .locator('button[aria-label="Close"], div[aria-label="Close"], .semi-modal-close')
     .first();
   if (await closeModal.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await closeModal.click({ timeout: 5000 }).catch(() => {});
+    await foregroundPage(page, { signal, stage: 'login:close-modal', ui }, async () => {
+      await closeModal.click({ timeout: 5000 }).catch(() => {});
+    });
     await page.waitForTimeout(1500);
   }
 
