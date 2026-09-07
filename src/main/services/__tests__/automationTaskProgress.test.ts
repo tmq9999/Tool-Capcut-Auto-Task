@@ -25,8 +25,10 @@ import {
 import { toTaskProgressRows } from '../CapcutEngineService';
 import type { BrowserLauncher, LaunchedProfile } from '../capcut/launcher';
 import type { TaskSnapshotSummary } from '../capcut/runTasks';
-import type { TaskOutcome } from '../capcut/types';
+import type { TaskOutcome, CapcutVerificationReceipt } from '../capcut/types';
 import { LogBus, type ILogSink } from '../LogBus';
+import { AutomationTerminalError } from '../AutomationTerminalError';
+import { createTaskProgressSink } from '../../runtime/providerStack';
 import {
   AutomationRunConfigSchema,
   type AutomationRunConfigDTO
@@ -81,10 +83,12 @@ class StubBrowserRuntime implements IBrowserRuntimeApi {
 
 class StubAccounts implements IAccountSink {
   public updates: Array<{ id: string; data: Record<string, unknown> }> = [];
+  public createdCount = 0;
   private counter = 0;
 
   create(): { id: string } {
     this.counter += 1;
+    this.createdCount += 1;
     return { id: 'acc-' + this.counter };
   }
 
@@ -119,33 +123,64 @@ class StubLauncher implements BrowserLauncher {
   }
 }
 
+import type { CapcutUiAccountResult } from '../capcut/types';
+
 type RunAccountInput = Parameters<CapcutTaskRunner['runAccount']>[0];
 
 class StubCapcutRunner implements CapcutTaskRunner {
   public calls = 0;
   /** Giữ lại input để kiểm chỗ nối cấu hình Dashboard → engine. */
   public lastInput: RunAccountInput | null = null;
-  constructor(private readonly result: CapcutAccountResult) {}
+  constructor(private readonly result: CapcutUiAccountResult) {}
 
-  async runAccount(input: RunAccountInput): Promise<CapcutAccountResult> {
+  async runAccount(input: RunAccountInput): Promise<CapcutUiAccountResult> {
     this.calls += 1;
     this.lastInput = input;
+    if (input.onTaskCheckpoint && this.result.verification && !this.result.skipped && this.result.tasks.length > 0) {
+      await input.onTaskCheckpoint({
+        rows: this.result.tasks,
+        receipt: this.result.verification
+      });
+    }
     return this.result;
   }
 }
 
 class RecordingProgressSink implements ICapcutTaskProgressSink {
-  public calls: Array<{ accountId: string; rows: CapcutAccountResult['tasks'] }> = [];
-  record(accountId: string, rows: CapcutAccountResult['tasks']): void {
-    this.calls.push({ accountId, rows });
+  public calls: Array<{
+    accountId: string;
+    rows: CapcutAccountResult['tasks'];
+    receipt?: CapcutVerificationReceipt;
+  }> = [];
+
+  async record(accountId: string, checkpoint: {
+    rows: CapcutAccountResult['tasks'];
+    receipt: CapcutVerificationReceipt;
+  }): Promise<void> {
+    this.calls.push({
+      accountId,
+      rows: checkpoint.rows,
+      receipt: checkpoint.receipt
+    });
+  }
+
+  recordLegacy(accountId: string, rows: CapcutAccountResult['tasks']): void {
+    this.calls.push({
+      accountId,
+      rows
+    });
   }
 }
 
 class ThrowingProgressSink implements ICapcutTaskProgressSink {
   public calls = 0;
-  record(): void {
+  async record(): Promise<void> {
     this.calls += 1;
-    throw new Error('database is locked');
+    throw new AutomationTerminalError(
+      'failed',
+      { code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED' },
+      'Không lưu được checkpoint nhiệm vụ.'
+    );
   }
 }
 
@@ -161,14 +196,30 @@ const TASKS: CapcutAccountResult['tasks'] = [
   { key: 'capcut_web_video_studio_export', title: 'Export a video', reward: 120, status: 1 }
 ];
 
-function fullResult(overrides: Partial<CapcutAccountResult> = {}): CapcutAccountResult {
+function fullResult(overrides: Partial<CapcutUiAccountResult> = {}): CapcutUiAccountResult {
+  const missing = overrides.missing ?? ['capcut_web_video_studio_export'];
+  const done = overrides.done ?? (missing.length === 0 ? 2 : 1);
+  const total = overrides.total ?? 2;
   return {
-    done: 1,
-    total: 2,
+    authenticated: true,
+    done,
+    total,
     credits: 30,
     creditsTotal: 150,
-    missing: ['capcut_web_video_studio_export'],
+    missing,
     tasks: TASKS,
+    verification: {
+      runId: 'run-1',
+      sessionAlias: 'session-1',
+      observedAt: '2026-09-08T00:00:00.000Z',
+      requiredAfter: '2026-09-08T00:00:00.000Z',
+      fresh: true,
+      final: missing.length === 0,
+      serverTotal: total,
+      serverDone: done,
+      complete: done === total && missing.length === 0
+    },
+    unsettledProofs: [],
     ...overrides
   };
 }
@@ -201,7 +252,8 @@ let sink: CollectingSink;
 
 function createService(
   capcut: CapcutTaskRunner | undefined,
-  taskProgress?: ICapcutTaskProgressSink
+  taskProgress?: ICapcutTaskProgressSink,
+  customLauncher?: BrowserLauncher
 ): AutomationRunService {
   return new AutomationRunService(
     {
@@ -211,7 +263,7 @@ function createService(
       browser: new StubBrowserRuntime(),
       accounts,
       logBus,
-      launcher: () => launcher,
+      launcher: () => customLauncher ?? launcher,
       capcut,
       taskProgress
     },
@@ -246,12 +298,68 @@ describe('toTaskProgressRows', () => {
   ];
 
   const snapshot: TaskSnapshotSummary = {
+    observedAt: 100,
+    requiredAfter: 50,
+    tasks: [],
+    fresh: true,
+    final: true,
     total: 2,
     done: 1,
     credits: 30,
     creditsTotal: 150,
     missing: ['capcut_web_video_studio_export']
   };
+
+  it('never maps an absent snapshot key to task status 4', () => {
+    const outcomes: TaskOutcome[] = [
+      { key: 'task-a', title: 'Task A', reward: 10, done: true, attempts: 1 }
+    ];
+    const summary: TaskSnapshotSummary = {
+      observedAt: 100,
+      requiredAfter: 50,
+      tasks: [{ key: 'task-b', title: 'Task B', reward: 20, status: 1 }],
+      total: 1,
+      done: 0,
+      credits: 0,
+      creditsTotal: 20,
+      missing: ['task-b'],
+      fresh: true,
+      final: true
+    };
+    expect(toTaskProgressRows(outcomes, summary)).toEqual([
+      expect.objectContaining({ key: 'task-b', status: 1 })
+    ]);
+    expect(toTaskProgressRows(outcomes, summary).some((row) => row.key === 'task-a')).toBe(false);
+  });
+
+  it('preserves exact non-complete server statuses', () => {
+    const outcomes: TaskOutcome[] = [
+      { key: 'task-a', title: 'Task A', reward: 10, done: false, attempts: 1 },
+      { key: 'task-b', title: 'Task B', reward: 20, done: false, attempts: 1 },
+      { key: 'task-c', title: 'Task C', reward: 30, done: true, attempts: 1 }
+    ];
+    const summary: TaskSnapshotSummary = {
+      observedAt: 100,
+      requiredAfter: 50,
+      tasks: [
+        { key: 'task-a', title: 'Task A', reward: 10, status: 1 },
+        { key: 'task-b', title: 'Task B', reward: 20, status: 2 },
+        { key: 'task-c', title: 'Task C', reward: 30, status: 4 }
+      ],
+      total: 3,
+      done: 1,
+      credits: 30,
+      creditsTotal: 60,
+      missing: ['task-a', 'task-b'],
+      fresh: true,
+      final: true
+    };
+    expect(toTaskProgressRows(outcomes, summary)).toEqual([
+      expect.objectContaining({ key: 'task-a', status: 1 }),
+      expect.objectContaining({ key: 'task-b', status: 2 }),
+      expect.objectContaining({ key: 'task-c', status: 4 })
+    ]);
+  });
 
   it('lấy status từ snapshot của CapCut: trong missing là 1, còn lại là 4', () => {
     const rows = toTaskProgressRows(outcomes, snapshot);
@@ -295,10 +403,10 @@ describe('toTaskProgressRows', () => {
    * `do_action err_no=0`. Ghi status 1 cho chúng là XOÁ tiến độ thật khỏi DB,
    * và lượt sau sẽ làm lại từ đầu.
    *
-   * `do_action err_no=0` là đúng bằng chứng mà AGENTS.md §30 công nhận; khi tab
-   * đã chết thì không còn cách nào đọc lại `task_status` nữa.
+   * Proof vẫn được lưu để chẩn đoán/retry, nhưng không tự lật trạng thái task
+   * khi không còn snapshot xác nhận.
    */
-  it('nhiệm vụ có do_action err_no=0 vẫn là 4 dù snapshot cuối bị cũ', () => {
+  it('retains proof without marking a missing task done when the snapshot is stale', () => {
     const rows = toTaskProgressRows(outcomes, {
       ...snapshot,
       done: 0,
@@ -309,7 +417,9 @@ describe('toTaskProgressRows', () => {
 
     const install = rows.find((row) => row.key === 'capcut_web_pwa_install');
     const exportRow = rows.find((row) => row.key === 'capcut_web_video_studio_export');
-    expect(install?.status).toBe(4);
+    expect(install?.status).toBe(1);
+    expect(install?.opId).toBe('capcut_web_pwa_install_7_2026-09-03');
+    expect(install?.provedAt).toBe('2026-09-03T01:00:00.000Z');
     // Nhiệm vụ KHÔNG có proof vẫn phải là 1 — không suy diễn hộ CapCut.
     expect(exportRow?.status).toBe(1);
   });
@@ -357,6 +467,16 @@ describe('toTaskProgressRows', () => {
 });
 
 describe('AutomationRunService ghi tiến độ nhiệm vụ', () => {
+  it('persists partial progress but counts a fatal renderer error once', async () => {
+    const progress = new RecordingProgressSink();
+    const result = { ...fullResult({ missing: [] }), fatalError: 'DOM_READ_TIMEOUT: canvas-area:mouse-move' };
+    const service = createService(new StubCapcutRunner(result), progress);
+    await service.start(baseConfig());
+    const summary = await service.waitForCompletion();
+    expect(progress.calls[0].rows).toEqual(result.tasks);
+    expect(summary).toMatchObject({ accountsFailed: 1, accountsCompleted: 0, workersActive: 0 });
+    expect(accounts.updates.some(e => e.data.credit === result.credits)).toBe(true);
+  });
   it('gọi record với đúng accountId và đúng rows engine trả về', async () => {
     const progress = new RecordingProgressSink();
     const service = createService(new StubCapcutRunner(fullResult()), progress);
@@ -475,6 +595,28 @@ describe('AutomationRunService ghi tiến độ nhiệm vụ', () => {
 
     expect(progress.calls).toEqual([]);
   });
+
+  it('keeps the shared HTTP-only result contract unchanged', async () => {
+    const httpOnlyResult: CapcutAccountResult = {
+      total: 12,
+      done: 12,
+      credits: 670,
+      creditsTotal: 670,
+      missing: [],
+      tasks: TASKS
+    };
+    const progress = new RecordingProgressSink();
+    class HttpOnlyRunner {
+      async runAccount(): Promise<CapcutAccountResult> {
+        return httpOnlyResult;
+      }
+    }
+    const service = createService(new HttpOnlyRunner() as unknown as CapcutTaskRunner, progress);
+    await service.start(baseConfig());
+    const summary = await service.waitForCompletion();
+    expect(summary.accountsCompleted).toBe(1);
+    expect(progress.calls[0].rows).toEqual(TASKS);
+  });
 });
 
 describe('AutomationRunService truyền cờ "bỏ qua nếu không có trial"', () => {
@@ -545,44 +687,47 @@ describe('AutomationRunService truyền nhịp Dashboard xuống engine', () => 
 });
 
 describe('AutomationRunService khi ghi tiến độ thất bại', () => {
-  it('vẫn kết thúc luồng và tắt profile', async () => {
+  it('throws checkpoint persistence failures to the caller', async () => {
+    const failingRepo = {
+      recordCheckpoint: () => {
+        throw new Error('SQLITE_BUSY: database is locked');
+      },
+      upsertMany: () => {}
+    };
+    const sink = createTaskProgressSink(failingRepo);
+
+    await expect(
+      sink.record('acc-1', {
+        rows: TASKS,
+        receipt: fullResult().verification!
+      })
+    ).rejects.toThrow(AutomationTerminalError);
+
+    try {
+      await sink.record('acc-1', {
+        rows: TASKS,
+        receipt: fullResult().verification!
+      });
+    } catch (err: unknown) {
+      expect(err).toBeInstanceOf(AutomationTerminalError);
+      const termErr = err as AutomationTerminalError;
+      expect(termErr.state).toBe('failed');
+      expect(termErr.reason.code).toBe('TASK_CHECKPOINT_PERSISTENCE_FAILED');
+      expect(termErr.message).toBe('Không lưu được checkpoint nhiệm vụ.');
+      expect(termErr.message).not.toContain('SQLITE');
+      expect(termErr.message).not.toContain('acc-1');
+    }
+  });
+
+  it('chuyển run thành failed với terminalReason TASK_CHECKPOINT_PERSISTENCE_FAILED và tắt profile', async () => {
     const service = createService(new StubCapcutRunner(fullResult({ missing: [] })), new ThrowingProgressSink());
 
     await service.start(baseConfig());
     const summary = await service.waitForCompletion();
 
-    expect(summary.state).toBe('completed');
-    expect(summary.accountsAccepted).toBe(1);
+    expect(summary.state).toBe('failed');
+    expect(summary.terminalReason?.code).toBe('TASK_CHECKPOINT_PERSISTENCE_FAILED');
     expect(launcher.stopped).toEqual(['profile-1']);
-  });
-
-  it('vẫn cập nhật kết quả nhiệm vụ lên account', async () => {
-    const service = createService(new StubCapcutRunner(fullResult({ missing: [] })), new ThrowingProgressSink());
-
-    await service.start(baseConfig());
-    await service.waitForCompletion();
-
-    // Lỗi ghi DB không được biến thành trạng thái error của account.
-    expect(accounts.updates.some((entry) => entry.data.status === 'error')).toBe(false);
-    expect(accounts.updates.some((entry) => entry.data.credit === 30)).toBe(true);
-  });
-
-  it('chỉ ghi một dòng WARNING, không phải ERROR', async () => {
-    const failing = new ThrowingProgressSink();
-    const service = createService(new StubCapcutRunner(fullResult()), failing);
-
-    await service.start(baseConfig());
-    await service.waitForCompletion();
-    logBus.flush();
-
-    const rows = sink.rows as Array<{ status: string; message: string; accountId?: string }>;
-    const warning = rows.find((row) => row.message.includes('Không lưu được tiến độ nhiệm vụ'));
-
-    expect(failing.calls).toBe(1);
-    expect(warning?.status).toBe('WARNING');
-    expect(warning?.message).toContain('database is locked');
-    expect(warning?.accountId).toBe('acc-1');
-    expect(rows.some((row) => row.status === 'ERROR')).toBe(false);
   });
 });
 
@@ -622,7 +767,7 @@ describe('AutomationRunService từ chối module chưa implement', () => {
 });
 
 class RejectingCapcutRunner implements CapcutTaskRunner {
-  async runAccount(): Promise<CapcutAccountResult> {
+  async runAccount(): Promise<CapcutUiAccountResult> {
     throw new Error('signup failed');
   }
 }
@@ -655,5 +800,358 @@ describe('AutomationRunService task progress workload failures and incomplete re
     expect(summary.accountsFailed).toBe(1);
     expect(summary.accountsCompleted).toBe(0);
     expect(progress.calls[0].rows.some((row) => row.status === 4)).toBe(true);
+  });
+});
+
+class SequencedCapcutRunner implements CapcutTaskRunner {
+  public calls: RunAccountInput[] = [];
+  constructor(private readonly sequence: Array<(input: RunAccountInput) => Promise<CapcutUiAccountResult>>) {}
+
+  async runAccount(input: RunAccountInput): Promise<CapcutUiAccountResult> {
+    this.calls.push(input);
+    const fn = this.sequence.shift();
+    if (!fn) throw new Error('SequencedCapcutRunner ran out of steps');
+    return fn(input);
+  }
+}
+
+class SequencedLauncher implements BrowserLauncher {
+  public readonly name = 'xcli' as const;
+  public launched: Array<{ profileId: string; page: Page; context: BrowserContext }> = [];
+  public stopped: string[] = [];
+  public stopHooks: Array<(profileId: string) => Promise<void>> = [];
+  public onLaunch?: (profileId: string) => void;
+  public failStopProfileId?: string;
+
+  async launch(): Promise<LaunchedProfile> {
+    const id = 'profile-' + (this.launched.length + 1);
+    const page = { id: 'page-' + id } as unknown as Page;
+    const context = { id: 'context-' + id } as unknown as BrowserContext;
+    this.launched.push({ profileId: id, page, context });
+    this.onLaunch?.(id);
+    return {
+      page,
+      context,
+      port: 60000 + this.launched.length,
+      profileId: id
+    };
+  }
+
+  async stop(profileId: string): Promise<void> {
+    this.stopped.push(profileId);
+    if (this.failStopProfileId === profileId) {
+      throw new Error(`Failed to stop ${profileId}`);
+    }
+    const hook = this.stopHooks.shift();
+    if (hook) await hook(profileId);
+  }
+}
+
+function fullCompleteResult(overrides: Partial<CapcutUiAccountResult> = {}): CapcutUiAccountResult {
+  const completeTasks = TASKS.map((t) => ({ ...t, status: 4 as const }));
+  return {
+    ...fullResult({ missing: [], done: 2, total: 2, tasks: completeTasks }),
+    ...overrides
+  };
+}
+
+describe('Task 8: Recovery state machine and single-recycle resume', () => {
+  it('awaits the engine-owned partial checkpoint before launching a replacement session', async () => {
+    let checkpointHeld = true;
+    let releaseCheckpoint: () => void = () => {};
+    const checkpointPromise = new Promise<void>((resolve) => {
+      releaseCheckpoint = () => {
+        checkpointHeld = false;
+        resolve();
+      };
+    });
+
+    const events: string[] = [];
+    const customLauncher = new SequencedLauncher();
+    customLauncher.onLaunch = (id) => events.push('launch:' + id);
+
+    const runner = new SequencedCapcutRunner([
+      async (input) => {
+        events.push('engine:session-1');
+        const cp = input.onTaskCheckpoint({
+          rows: TASKS,
+          receipt: { ...fullResult().verification!, complete: false, final: false }
+        });
+        events.push('checkpoint:started');
+        await checkpointPromise;
+        await cp;
+        events.push('checkpoint:committed');
+        return {
+          ...fullResult(),
+          fatalCode: 'DOM_READ_TIMEOUT',
+          fatalError: 'DOM_READ_TIMEOUT: canvas-area:mouse-move'
+        };
+      },
+      async (_input) => {
+        events.push('engine:session-2');
+        return fullCompleteResult();
+      }
+    ]);
+
+    const progress = new RecordingProgressSink();
+    const originalRecord = progress.record.bind(progress);
+    progress.record = async (accId, cp) => {
+      expect(customLauncher.launched).toHaveLength(1);
+      expect(customLauncher.stopped).toHaveLength(0);
+      return originalRecord(accId, cp);
+    };
+
+    const service = createService(runner, progress, customLauncher);
+    const startPromise = service.start(baseConfig());
+
+    await new Promise((r) => setTimeout(r, 20));
+    expect(checkpointHeld).toBe(true);
+    releaseCheckpoint();
+
+    await startPromise;
+    const summary = await service.waitForCompletion();
+    expect(summary.state).toBe('completed');
+    expect(events).toContain('checkpoint:committed');
+    expect(events.indexOf('checkpoint:committed')).toBeLessThan(events.indexOf('launch:profile-2'));
+  });
+
+  it('does not launch replacement when the engine checkpoint rejects', async () => {
+    const customLauncher = new SequencedLauncher();
+    const runner = new SequencedCapcutRunner([
+      async (input) => {
+        await input.onTaskCheckpoint({
+          rows: TASKS,
+          receipt: fullResult().verification!
+        });
+        return {
+          ...fullResult(),
+          fatalCode: 'DOM_READ_TIMEOUT',
+          fatalError: 'DOM_READ_TIMEOUT'
+        };
+      }
+    ]);
+    const throwingProgress = new ThrowingProgressSink();
+    const service = createService(runner, throwingProgress, customLauncher);
+
+    await service.start(baseConfig());
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('failed');
+    expect(summary.terminalReason?.code).toBe('TASK_CHECKPOINT_PERSISTENCE_FAILED');
+    expect(customLauncher.launched).toHaveLength(1);
+    expect(customLauncher.stopped).toEqual(['profile-1']);
+  });
+
+  it('reuses account password and proxy while creating no second account or mailbox', async () => {
+    const customLauncher = new SequencedLauncher();
+    const runner = new SequencedCapcutRunner([
+      async () => ({
+        ...fullResult(),
+        fatalCode: 'DOM_READ_TIMEOUT',
+        fatalError: 'DOM_READ_TIMEOUT'
+      }),
+      async () => fullCompleteResult()
+    ]);
+    const service = createService(runner, undefined, customLauncher);
+    await service.start(baseConfig());
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('completed');
+    expect(runner.calls).toHaveLength(2);
+    expect(runner.calls[0].accountId).toBe(runner.calls[1].accountId);
+    expect(runner.calls[0].email).toBe(runner.calls[1].email);
+    expect(runner.calls[0].password).toBe(runner.calls[1].password);
+    expect(accounts.createdCount).toBe(1);
+  });
+
+  it('runs the replacement with existing-only auth and a fresh page/context', async () => {
+    const customLauncher = new SequencedLauncher();
+    const runner = new SequencedCapcutRunner([
+      async () => ({
+        ...fullResult(),
+        fatalCode: 'DOM_READ_TIMEOUT',
+        fatalError: 'DOM_READ_TIMEOUT'
+      }),
+      async () => fullCompleteResult()
+    ]);
+    const service = createService(runner, undefined, customLauncher);
+    await service.start(baseConfig());
+    await service.waitForCompletion();
+
+    expect(runner.calls).toHaveLength(2);
+    expect(runner.calls[0].authAttempt ?? 'initial').toBe('initial');
+    expect(runner.calls[1].authAttempt).toBe('existing-only');
+    expect(runner.calls[0].page).not.toBe(runner.calls[1].page);
+    expect(runner.calls[0].context).not.toBe(runner.calls[1].context);
+    expect(runner.calls[1].page).toBe(customLauncher.launched[1].page);
+    expect(runner.calls[1].context).toBe(customLauncher.launched[1].context);
+  });
+
+  it('stops old profile before replacement launch starts', async () => {
+    const events: string[] = [];
+    const customLauncher = new SequencedLauncher();
+    const originalLaunch = customLauncher.launch.bind(customLauncher);
+    customLauncher.launch = async () => {
+      const res = await originalLaunch();
+      events.push('launch:' + res.profileId);
+      return res;
+    };
+    customLauncher.stopHooks.push(async (id) => {
+      events.push('stop:' + id);
+    });
+
+    const runner = new SequencedCapcutRunner([
+      async (input) => {
+        events.push('engine:session-1');
+        await input.onTaskCheckpoint({ rows: TASKS, receipt: { ...fullResult().verification!, complete: false, final: false } });
+        events.push('checkpoint:partial');
+        return {
+          ...fullResult(),
+          fatalCode: 'DOM_READ_TIMEOUT',
+          fatalError: 'DOM_READ_TIMEOUT',
+          unsettledProofs: [{ key: 'task_1', proof: { actionKey: 'task_1', opId: 'op_1', errNo: 0, errTips: '', at: 100 } }]
+        };
+      },
+      async (input) => {
+        events.push('engine:session-2');
+        if (input.unsettledProofs && input.unsettledProofs.length > 0) {
+          events.push('reconcile:unsettled-proofs');
+        }
+        await input.onTaskCheckpoint({ rows: TASKS, receipt: { ...fullResult({ missing: [] }).verification!, complete: true, final: true } });
+        events.push('checkpoint:final');
+        return fullCompleteResult();
+      }
+    ]);
+
+    const service = createService(runner, undefined, customLauncher);
+    await service.start(baseConfig());
+    const summary = await service.waitForCompletion();
+
+    events.push('stop:' + customLauncher.stopped[1]);
+    expect(summary.state).toBe('completed');
+    expect(events).toEqual([
+      'launch:profile-1',
+      'engine:session-1',
+      'checkpoint:partial',
+      'stop:profile-1',
+      'launch:profile-2',
+      'engine:session-2',
+      'reconcile:unsettled-proofs',
+      'checkpoint:final',
+      'stop:profile-2'
+    ]);
+  });
+
+  it('does not launch a replacement when old profile stop fails', async () => {
+    const customLauncher = new SequencedLauncher();
+    customLauncher.failStopProfileId = 'profile-1';
+
+    const runner = new SequencedCapcutRunner([
+      async () => ({
+        ...fullResult(),
+        fatalCode: 'DOM_READ_TIMEOUT',
+        fatalError: 'DOM_READ_TIMEOUT'
+      }),
+      async () => fullCompleteResult()
+    ]);
+
+    const service = createService(runner, undefined, customLauncher);
+    await service.start(baseConfig());
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('failed');
+    expect(summary.terminalReason?.code).toBe('RESOURCE_CLEANUP_FAILED');
+    expect(customLauncher.launched).toHaveLength(1);
+    expect(runner.calls).toHaveLength(1);
+  });
+
+  it('allows exactly one recycle then fails after a second DOM timeout', async () => {
+    const customLauncher = new SequencedLauncher();
+    const runner = new SequencedCapcutRunner([
+      async () => ({
+        ...fullResult(),
+        fatalCode: 'DOM_READ_TIMEOUT',
+        fatalError: 'DOM_READ_TIMEOUT: 1'
+      }),
+      async () => ({
+        ...fullResult(),
+        fatalCode: 'DOM_READ_TIMEOUT',
+        fatalError: 'DOM_READ_TIMEOUT: 2'
+      })
+    ]);
+
+    const service = createService(runner, undefined, customLauncher);
+    await service.start(baseConfig());
+    const summary = await service.waitForCompletion();
+
+    expect(summary.accountsFailed).toBe(1);
+    expect(summary.accountsCompleted).toBe(0);
+    expect(customLauncher.launched).toHaveLength(2);
+    expect(runner.calls).toHaveLength(2);
+    expect(customLauncher.stopped).toEqual(['profile-1', 'profile-2']);
+  });
+
+  it('does not recycle an unclassified mission error', async () => {
+    const customLauncher = new SequencedLauncher();
+    const runner = new SequencedCapcutRunner([
+      async () => ({
+        ...fullResult(),
+        fatalError: 'SOME_RANDOM_CRASH'
+      })
+    ]);
+
+    const service = createService(runner, undefined, customLauncher);
+    await service.start(baseConfig());
+    const summary = await service.waitForCompletion();
+
+    expect(summary.accountsFailed).toBe(1);
+    expect(customLauncher.launched).toHaveLength(1);
+    expect(runner.calls).toHaveLength(1);
+    expect(customLauncher.stopped).toEqual(['profile-1']);
+  });
+
+  it('does not launch replacement when Stop arrives after old stop', async () => {
+    const customLauncher = new SequencedLauncher();
+    const runner = new SequencedCapcutRunner([
+      async () => ({
+        ...fullResult(),
+        fatalCode: 'DOM_READ_TIMEOUT',
+        fatalError: 'DOM_READ_TIMEOUT'
+      }),
+      async () => fullCompleteResult()
+    ]);
+
+    const service = createService(runner, undefined, customLauncher);
+    customLauncher.stopHooks.push(async () => {
+      void service.stop();
+    });
+
+    await service.start(baseConfig());
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('stopped');
+    expect(customLauncher.launched).toHaveLength(1);
+    expect(runner.calls).toHaveLength(1);
+  });
+
+  it('stops both old and replacement profiles exactly once on success', async () => {
+    const customLauncher = new SequencedLauncher();
+    const runner = new SequencedCapcutRunner([
+      async () => ({
+        ...fullResult(),
+        fatalCode: 'DOM_READ_TIMEOUT',
+        fatalError: 'DOM_READ_TIMEOUT'
+      }),
+      async () => fullCompleteResult()
+    ]);
+
+    const service = createService(runner, undefined, customLauncher);
+    await service.start(baseConfig());
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('completed');
+    expect(summary.accountsCompleted).toBe(1);
+    expect(customLauncher.launched).toHaveLength(2);
+    expect(customLauncher.stopped).toEqual(['profile-1', 'profile-2']);
   });
 });

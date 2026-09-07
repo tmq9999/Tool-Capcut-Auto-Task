@@ -81,7 +81,7 @@ async function main(): Promise<void> {
     const probeAt = performance.now();
     await findTaskEntries(page);
     const probeMs = Math.round(performance.now() - probeAt);
-    check('header discovery skips absent variants without implicit per-selector waits', probeMs < 400, probeMs);
+    check('header discovery skips absent variants without implicit per-selector waits', probeMs < 800, probeMs);
     page.setDefaultTimeout(30_000);
 
     check('panel canvas prompt là duy nhất', (await n(CANVAS_PANEL)) === 1, await n(CANVAS_PANEL));

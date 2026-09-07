@@ -12,6 +12,7 @@ import {
 } from './capcut/uiInteractionScheduler';
 import type {
   AccountUiInteraction,
+  CapcutAuthAttempt,
   CapcutUiAccountResult,
   CapcutVerificationReceipt,
   UnsettledTaskProof
@@ -153,6 +154,10 @@ export interface CapcutTaskRunner {
      * CHƯA tồn tại trên CapCut và phải đi thẳng đường ĐĂNG KÝ.
      */
     isNewAccount: boolean;
+    authAttempt?: CapcutAuthAttempt;
+    runId?: string;
+    sessionAlias?: string;
+    sessionStartedAt?: number;
     signal: AbortSignal;
     ui?: AccountUiInteraction;
     /** Nguồn OTP của riêng luồng này; chỉ đường ĐĂNG KÝ cần. */
@@ -226,6 +231,7 @@ export interface AutomationRunCollaborators {
 
 export const SESSION_LAUNCH_STOP_GRACE_MS = 30_000;
 export const PROFILE_STOP_TIMEOUT_MS = 60_000;
+export const MAX_UI_SESSION_RECYCLES = 1;
 
 export interface AutomationRunDeps {
   sleep?: (ms: number) => Promise<void>;
@@ -1029,6 +1035,165 @@ export class AutomationRunService {
     }
   }
 
+  private async launchThreadSession(
+    thread: ThreadRuntime,
+    config: AutomationRunConfigDTO,
+    signal: AbortSignal
+  ): Promise<BrowserSessionRuntime> {
+    const alias = `${thread.workerAlias}-session-${++thread.sessionSequence}`;
+    const session: BrowserSessionRuntime = {
+      alias,
+      startedAt: Date.now(),
+      stopRequested: false,
+      ui: this.uiScheduler
+        ? this.uiScheduler.forSession({ sessionAlias: alias, signal })
+        : createDirectUiInteraction(signal),
+      scheduler: this.uiScheduler ?? undefined
+    };
+    thread.session = session;
+    this.activeThreads.set(thread.accountId, thread);
+
+    await measureStage(
+      'browser-launch',
+      () => this.launchSession(thread, session, config, signal),
+      (message) => this.log('INFO', thread.email, 'Timing', message, thread.accountId)
+    );
+    return session;
+  }
+
+  private async runUiSessionAttempt(
+    thread: ThreadRuntime,
+    session: BrowserSessionRuntime,
+    config: AutomationRunConfigDTO,
+    signal: AbortSignal,
+    authAttempt: CapcutAuthAttempt,
+    unsettledProofs: readonly UnsettledTaskProof[]
+  ): Promise<CapcutUiAccountResult> {
+    const uiRunner = this.deps.capcut;
+    if (!uiRunner || !session.page || !session.context) {
+      throw new Error('UI runner or browser session pages are not available');
+    }
+    const password = thread.capcutPassword;
+    if (!password) {
+      throw new Error('CapCut password is not available');
+    }
+
+    return await uiRunner.runAccount({
+      page: session.page,
+      context: session.context,
+      email: thread.email,
+      password,
+      accountId: thread.accountId,
+      isNewAccount: authAttempt === 'existing-only' ? false : thread.purchasedEmailId !== undefined,
+      authAttempt,
+      runId: thread.runId,
+      sessionAlias: session.alias,
+      sessionStartedAt: session.startedAt,
+      signal,
+      ui: session.ui,
+      getOtp: authAttempt === 'existing-only' ? undefined : this.buildOtpReader(thread, signal),
+      maxRounds: Math.max(1, Math.min(1 + config.retryCount, 4)),
+      pace: {
+        stepMinMs: config.stepDelayMinMs,
+        stepMaxMs: config.stepDelayMaxMs,
+        typeMinMs: config.typeDelayMinMs,
+        typeMaxMs: config.typeDelayMaxMs
+      },
+      skipWithoutTrial: config.skipWithoutTrial,
+      unsettledProofs,
+      onTaskCheckpoint: async (checkpoint: {
+        rows: CapcutAccountResult['tasks'];
+        receipt: CapcutVerificationReceipt;
+      }) => {
+        if (thread.session !== session) {
+          this.log(
+            'WARNING',
+            thread.email,
+            'Nhiệm vụ',
+            `Bỏ qua checkpoint muộn từ session cũ ${session.alias} (hiện tại: ${thread.session?.alias ?? 'none'}).`,
+            thread.accountId
+          );
+          return;
+        }
+        if (this.deps.taskProgress) {
+          await this.deps.taskProgress.record(thread.accountId, checkpoint);
+        }
+      },
+      log: (status: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR', step: string, message: string) =>
+        this.log(status, thread.email, step, message, thread.accountId)
+    });
+  }
+
+  private classifyUiResult(
+    thread: ThreadRuntime,
+    result: CapcutAccountResult | CapcutUiAccountResult,
+    config: AutomationRunConfigDTO
+  ): ThreadOutcome {
+    if (result.skipped) {
+      thread.outcomeStep = 'Bỏ qua — không đủ điều kiện';
+      this.deps.accounts.update(thread.accountId, {
+        automationStep: thread.outcomeStep,
+        ...(result.subscription ? { subscription: result.subscription } : {})
+      });
+      return {
+        kind: 'completed',
+        status: 'done',
+        step: thread.outcomeStep
+      };
+    }
+
+    const uiResult = result as Partial<CapcutUiAccountResult>;
+    if (uiResult.verification === undefined) {
+      this.recordTaskProgress(thread, result.tasks);
+    }
+    const full = config.missionTransport === 'http-only' || uiResult.verification === undefined
+      ? result.missing.length === 0
+      : Boolean(
+          uiResult.verification &&
+          uiResult.verification.complete &&
+          uiResult.verification.fresh &&
+          uiResult.verification.final
+        );
+    thread.outcomeStep = full
+      ? 'Đủ ' + result.done + '/' + result.total + ' nhiệm vụ'
+      : 'Còn thiếu ' + result.missing.length + ' nhiệm vụ';
+
+    this.deps.accounts.update(thread.accountId, {
+      credit: result.credits,
+      automationStep: thread.outcomeStep,
+      ...(result.subscription ? { subscription: result.subscription } : {})
+    });
+
+    this.log(
+      full ? 'SUCCESS' : 'WARNING',
+      thread.email,
+      'Nhiệm vụ',
+      'CapCut ghi nhận: ' + result.done + '/' + result.total + ' nhiệm vụ, ' +
+        result.credits + '/' + result.creditsTotal + ' credits' +
+        (full ? '' : ' — còn thiếu: ' + result.missing.join(', ')),
+      thread.accountId
+    );
+
+    if (result.fatalError) {
+      this.log('ERROR', thread.email, 'Nhiệm vụ', result.fatalError, thread.accountId);
+      return { kind: 'failed', status: 'error', step: 'Lỗi khi làm nhiệm vụ: ' + result.fatalError };
+    }
+
+    if (!full) {
+      return {
+        kind: 'failed',
+        status: 'error',
+        step: thread.outcomeStep
+      };
+    }
+
+    return {
+      kind: 'completed',
+      status: 'done',
+      step: thread.outcomeStep
+    };
+  }
+
   private async runThreadWorkload(
     thread: ThreadRuntime,
     config: AutomationRunConfigDTO,
@@ -1082,12 +1247,11 @@ export class AutomationRunService {
 
     this.deps.accounts.update(thread.accountId, { automationStep: 'Đang làm nhiệm vụ' });
     try {
-      let result: CapcutAccountResult;
       if (config.missionTransport === 'http-only') {
         const httpRunner = this.deps.httpOnlyRunner;
         if (!httpRunner) throw new Error('HTTP-only account runner ownership was lost.');
         const proxy = thread.lease ? leaseToProxySettings(thread.lease) : thread.directProxy;
-        result = await httpRunner.runAccount({
+        const result = await httpRunner.runAccount({
           email: thread.email,
           password,
           accountId: thread.accountId,
@@ -1105,102 +1269,83 @@ export class AutomationRunService {
         if (result.total <= 0 || result.tasks.length === 0) {
           throw new Error('HTTP_TASKS_UNAVAILABLE');
         }
-      } else {
-        result = await uiRunner!.runAccount({
-          page: session!.page!,
-          context: session!.context!,
-          email: thread.email,
-          password,
-          accountId: thread.accountId,
-          isNewAccount: thread.purchasedEmailId !== undefined,
-          signal: iterationSignal,
-          ui: session!.ui,
-          getOtp: this.buildOtpReader(thread, iterationSignal),
-          maxRounds: Math.max(1, Math.min(1 + config.retryCount, 4)),
-          pace: {
-            stepMinMs: config.stepDelayMinMs,
-            stepMaxMs: config.stepDelayMaxMs,
-            typeMinMs: config.typeDelayMinMs,
-            typeMaxMs: config.typeDelayMaxMs
-          },
-          skipWithoutTrial: config.skipWithoutTrial,
-          unsettledProofs: [],
-          onTaskCheckpoint: async (checkpoint: {
-            rows: CapcutAccountResult['tasks'];
-            receipt: CapcutVerificationReceipt;
-          }) => {
-            if (this.deps.taskProgress) {
-              await this.deps.taskProgress.record(thread.accountId, checkpoint);
-            }
-          },
-          log: (status: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR', step: string, message: string) =>
-            this.log(status, thread.email, step, message, thread.accountId)
-        });
+        return this.classifyUiResult(thread, result, config);
       }
 
-      if (result.skipped) {
-        thread.outcomeStep = 'Bỏ qua — không đủ điều kiện';
-        this.deps.accounts.update(thread.accountId, {
-          automationStep: thread.outcomeStep,
-          ...(result.subscription ? { subscription: result.subscription } : {})
-        });
-        return {
-          kind: 'completed',
-          status: 'done',
-          step: thread.outcomeStep
-        };
-      }
+      let authAttempt: CapcutAuthAttempt = 'initial';
+      let carriedUnsettledProofs: readonly UnsettledTaskProof[] = [];
 
-      const uiResult = result as Partial<CapcutUiAccountResult>;
-      if (uiResult.verification === undefined) {
-        this.recordTaskProgress(thread, result.tasks);
-      }
-      const full = config.missionTransport === 'http-only' || uiResult.verification === undefined
-        ? result.missing.length === 0
-        : Boolean(
-            uiResult.verification &&
-            uiResult.verification.complete &&
-            uiResult.verification.fresh &&
-            uiResult.verification.final
+      while (true) {
+        const currentSession = thread.session;
+        if (!currentSession) {
+          throw new Error('Thread session is missing during UI workload execution');
+        }
+
+        let result: CapcutUiAccountResult;
+        try {
+          result = await this.runUiSessionAttempt(
+            thread,
+            currentSession,
+            config,
+            iterationSignal,
+            authAttempt,
+            carriedUnsettledProofs
           );
-      thread.outcomeStep = full
-        ? 'Đủ ' + result.done + '/' + result.total + ' nhiệm vụ'
-        : 'Còn thiếu ' + result.missing.length + ' nhiệm vụ';
+        } catch (error: unknown) {
+          if (
+            error instanceof AutomationTerminalError &&
+            error.reason.code === 'TASK_CHECKPOINT_PERSISTENCE_FAILED'
+          ) {
+            const stopped = await this.stopSession(thread, currentSession);
+            if (stopped) {
+              this.acceptTerminalError(error);
+            }
+            return {
+              kind: 'failed',
+              status: 'error',
+              step: 'Không lưu được checkpoint nhiệm vụ'
+            };
+          }
+          throw error;
+        }
 
-      this.deps.accounts.update(thread.accountId, {
-        credit: result.credits,
-        automationStep: thread.outcomeStep,
-        ...(result.subscription ? { subscription: result.subscription } : {})
-      });
+        if (result.fatalCode === 'DOM_READ_TIMEOUT') {
+          if (thread.sessionRecycleCount < MAX_UI_SESSION_RECYCLES) {
+            thread.sessionRecycleCount += 1;
+            this.log(
+              'WARNING',
+              thread.email,
+              'Nhiệm vụ',
+              `Gặp lỗi ${result.fatalError ?? 'DOM_READ_TIMEOUT'}; dừng profile cũ và mở lại session mới (${thread.sessionRecycleCount}/${MAX_UI_SESSION_RECYCLES}).`,
+              thread.accountId
+            );
+            const stopped = await this.stopSession(thread, currentSession);
+            if (!stopped) {
+              return {
+                kind: 'failed',
+                status: 'error',
+                step: 'Không thu hồi được browser profile cũ khi phục hồi'
+              };
+            }
+            iterationSignal.throwIfAborted();
+            this.runAbort?.signal.throwIfAborted();
+            if (this.terminalIntent) {
+              return {
+                kind: 'stopped',
+                status: 'stopped',
+                step: 'Đã dừng theo yêu cầu'
+              };
+            }
 
-      this.log(
-        full ? 'SUCCESS' : 'WARNING',
-        thread.email,
-        'Nhiệm vụ',
-        'CapCut ghi nhận: ' + result.done + '/' + result.total + ' nhiệm vụ, ' +
-          result.credits + '/' + result.creditsTotal + ' credits' +
-          (full ? '' : ' — còn thiếu: ' + result.missing.join(', ')),
-        thread.accountId
-      );
+            authAttempt = 'existing-only';
+            carriedUnsettledProofs = result.unsettledProofs ?? [];
+            await this.launchThreadSession(thread, config, iterationSignal);
+            continue;
+          }
+        }
 
-      if (result.fatalError) {
-        this.log('ERROR', thread.email, 'Nhiệm vụ', result.fatalError, thread.accountId);
-        return { kind: 'failed', status: 'error', step: 'Lỗi khi làm nhiệm vụ: ' + result.fatalError };
+        return this.classifyUiResult(thread, result, config);
       }
-
-      if (!full) {
-        return {
-          kind: 'failed',
-          status: 'error',
-          step: thread.outcomeStep
-        };
-      }
-
-      return {
-        kind: 'completed',
-        status: 'done',
-        step: thread.outcomeStep
-      };
     } catch (err: unknown) {
       if (iterationSignal.aborted || this.runAbort?.signal.aborted) {
         return {
@@ -1332,24 +1477,7 @@ export class AutomationRunService {
                   automationStep: 'HTTP-only đang chạy'
                 });
               } else {
-                const alias = `${thread.workerAlias}-session-${++thread.sessionSequence}`;
-                const session: BrowserSessionRuntime = {
-                  alias,
-                  startedAt: Date.now(),
-                  stopRequested: false,
-                  ui: this.uiScheduler
-                    ? this.uiScheduler.forSession({ sessionAlias: alias, signal: iterationSignal })
-                    : createDirectUiInteraction(iterationSignal),
-                  scheduler: this.uiScheduler ?? undefined
-                };
-                thread.session = session;
-                this.activeThreads.set(thread.accountId, thread);
-
-                await measureStage(
-                  'browser-launch',
-                  () => this.launchSession(thread!, session, config, iterationSignal),
-                  (message) => this.log('INFO', thread!.email, 'Timing', message, thread!.accountId)
-                );
+                await this.launchThreadSession(thread!, config, iterationSignal);
               }
               if (firstIteration) {
                 this.releaseRunningWaiters();

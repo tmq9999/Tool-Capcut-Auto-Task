@@ -463,6 +463,49 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
     }
   };
 
+  // Passive reconciliation of carried unsettled proofs from earlier session in the same run
+  const carriedUnsettledKeys = (input.unsettledProofs ?? [])
+    .filter((u) => u.proof?.errNo === 0 && snap.byKey.get(u.key)?.status !== 4)
+    .map((u) => u.key);
+
+  if (carriedUnsettledKeys.length > 0) {
+    log(`⏳ Có ${carriedUnsettledKeys.length} nhiệm vụ có proof từ phiên trước chưa thành status=4 (${carriedUnsettledKeys.join(', ')}); chờ snapshot thụ động tối đa 30s...`);
+    const passiveDeadline = Date.now() + 30_000;
+    while (Date.now() < passiveDeadline && carriedUnsettledKeys.some((k) => snap.byKey.get(k)?.status !== 4)) {
+      input.signal.throwIfAborted();
+      const budget = Math.min(5_000, Math.max(0, passiveDeadline - Date.now()));
+      const nextSnap = await store.waitForSnapshot(snap.at, budget, input.signal).catch(() => {
+        input.signal.throwIfAborted();
+        return null;
+      });
+      if (nextSnap) {
+        snap = nextSnap;
+      } else {
+        break;
+      }
+    }
+
+    for (const [key, t] of snap.byKey) {
+      const o = outcomes.get(key);
+      if (o && t.status === 4) {
+        o.done = true;
+      }
+    }
+
+    const stillUnsettled = carriedUnsettledKeys.filter((k) => snap.byKey.get(k)?.status !== 4);
+    if (stillUnsettled.length > 0) {
+      log(`   ⚠️ Hết thời gian chờ: ${stillUnsettled.join(', ')} vẫn chưa nhận được task_status=4; không gọi mission mà trả về partial.`);
+      const partialSummary = summarize(snap, snap.at, requiredAfter);
+      partialSummary.final = false;
+      await emitCheckpoint(false);
+      return {
+        outcomes: [...outcomes.values()],
+        snapshot: partialSummary,
+        unsettledProofs: buildUnsettledProofs(outcomes.values(), partialSummary)
+      };
+    }
+  }
+
   for (let attempt = 1; attempt <= rounds; attempt++) {
     input.signal.throwIfAborted();
     // Nhận trước những nhiệm vụ đã đủ điều kiện, để chúng rụng khỏi danh sách
