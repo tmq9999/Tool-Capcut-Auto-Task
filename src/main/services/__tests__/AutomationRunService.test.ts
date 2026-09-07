@@ -11,6 +11,8 @@ import {
 } from '../AutomationRunService';
 import type { BrowserLauncher, LaunchedProfile } from '../capcut/launcher';
 import { createDirectUiInteraction, type RunUiInteractionScheduler } from '../capcut/uiInteractionScheduler';
+import { DomReadTimeoutError } from '../capcut/cancellation';
+import { runDeterministicSimulation } from './fixtures/deterministicRunHarness';
 import { LogBus, type ILogSink } from '../LogBus';
 import { ProviderError } from '../../providers/ProviderError';
 import { AutomationRunConfigSchema, type AutomationRunConfigDTO, type AutomationRunProgressDTO } from '../../../shared/schemas/automation.schema';
@@ -2717,6 +2719,816 @@ describe('session-scoped browser ownership', () => {
 
     const summary = await service.waitForCompletion();
     expect(summary.state).toBe('failed');
+  });
+
+  describe('Task 10: Deterministic 1/3/5/10-worker stress and resource invariants', () => {
+    describe.each([1, 3, 5, 10])('Worker cap %i', (count) => {
+      it(`keeps workers, profiles, proxies, reservations, and accepted accounts within cap ${count}`, async () => {
+        const { peaks, counters, final } = await runDeterministicSimulation({
+          count,
+          seed: 42
+        });
+
+        expect(peaks.workers).toBeLessThanOrEqual(count);
+        expect(peaks.profiles).toBeLessThanOrEqual(count);
+        expect(peaks.proxies).toBeLessThanOrEqual(count);
+        expect(peaks.mailReservations).toBeLessThanOrEqual(count);
+        expect(counters.accepted).toBeLessThanOrEqual(count);
+        expect(counters.completed + counters.failed + counters.stopped).toBe(counters.accepted);
+        expect(final.activeThreads).toBe(0);
+        expect(final.schedulerForegroundWaiting).toBe(0);
+        expect(final.schedulerEditorWaiting).toBe(0);
+      });
+
+      it(`settles 100 seeded completion orders without leaks at ${count} workers`, async () => {
+        for (let seed = 1; seed <= 100; seed++) {
+          const { peaks, counters, final } = await runDeterministicSimulation({
+            count,
+            seed
+          });
+
+          expect(peaks.workers, `seed ${seed} workers peak`).toBeLessThanOrEqual(count);
+          expect(peaks.profiles, `seed ${seed} profiles peak`).toBeLessThanOrEqual(count);
+          expect(peaks.proxies, `seed ${seed} proxies peak`).toBeLessThanOrEqual(count);
+          expect(peaks.mailReservations, `seed ${seed} mailReservations peak`).toBeLessThanOrEqual(count);
+          expect(counters.accepted, `seed ${seed} accepted`).toBeLessThanOrEqual(count);
+          expect(counters.completed + counters.failed + counters.stopped, `seed ${seed} terminal sum`).toBe(counters.accepted);
+          expect(final.activeThreads, `seed ${seed} activeThreads`).toBe(0);
+          expect(final.schedulerForegroundWaiting, `seed ${seed} fg waiting`).toBe(0);
+          expect(final.schedulerEditorWaiting, `seed ${seed} editor waiting`).toBe(0);
+        }
+      });
+    });
+
+    describe('Injected fault matrix', () => {
+      it('never admits another foreground action before quarantined profile stop', async () => {
+        const events: string[] = [];
+        let resolveStop1: () => void = () => {};
+        const stop1Promise = new Promise<void>((r) => { resolveStop1 = r; });
+
+        const fakeLauncher: BrowserLauncher = {
+          name: 'api-v3',
+          launch: vi.fn(async (opts) => {
+            const profileId = 'prof-' + ((fakeLauncher.launch as ReturnType<typeof vi.fn>).mock.calls.length);
+            opts.onProfileStarted?.(profileId);
+            return {
+              page: {} as unknown as LaunchedProfile['page'],
+              context: {} as unknown as LaunchedProfile['context'],
+              port: 9222,
+              profileId
+            };
+          }),
+          stop: vi.fn(async (id) => {
+            if (id === 'prof-1') {
+              await stop1Promise;
+            }
+            events.push('stop:' + id);
+          })
+        };
+
+        let acc1Attempts = 0;
+        const customCapcut: CapcutTaskRunner = {
+          runAccount: async (input) => {
+            if (input.accountId === 'acc-1') {
+              acc1Attempts++;
+              if (acc1Attempts === 1) {
+                try {
+                  await input.ui?.foreground('act-1', async () => {
+                    events.push('fg:acc-1:start');
+                    throw new DomReadTimeoutError('canvas-mouse');
+                  });
+                } catch {
+                  return {
+                    authenticated: true,
+                    done: 0,
+                    total: 1,
+                    credits: 0,
+                    creditsTotal: 10,
+                    missing: ['task-1'],
+                    tasks: [],
+                    unsettledProofs: [],
+                    verification: null,
+                    fatalCode: 'DOM_READ_TIMEOUT',
+                    fatalError: 'DOM_READ_TIMEOUT'
+                  };
+                }
+              }
+            } else {
+              await input.ui?.foreground('act-2', async () => {
+                events.push('fg:acc-2:start');
+              });
+            }
+            return {
+              authenticated: true,
+              done: 1,
+              total: 1,
+              credits: 10,
+              creditsTotal: 10,
+              missing: [],
+              tasks: [],
+              unsettledProofs: [],
+              verification: null
+            };
+          }
+        };
+
+        const service = new AutomationRunService(
+          {
+            workSources: createStubFactory(['u1@example.com|p1', 'u2@example.com|p2']),
+            emailOtp: { readOtp: async () => '123456' },
+            proxies: proxySource,
+            browser,
+            accounts,
+            logBus,
+            launcher: () => fakeLauncher,
+            capcut: customCapcut
+          },
+          {
+            sleep: async () => {},
+            nextId: () => 'run-1'
+          }
+        );
+
+        await service.start(baseConfig({ threadCount: 2, testDurationMs: 600_000 }));
+        await service.waitUntilRunning();
+
+        // Give worker 1 time to fault and quarantine
+        await new Promise((r) => setTimeout(r, 50));
+        expect(events).toContain('fg:acc-1:start');
+        expect(events).not.toContain('fg:acc-2:start');
+
+        // Now release worker 1's profile stop
+        resolveStop1();
+        await service.waitForCompletion();
+
+        expect(events).toContain('stop:prof-1');
+        expect(events).toContain('fg:acc-2:start');
+        expect(events.indexOf('stop:prof-1')).toBeLessThan(events.indexOf('fg:acc-2:start'));
+      });
+
+      it('never starts replacement after an uncertain old-profile stop', async () => {
+        let launchCount = 0;
+        const fakeLauncher: BrowserLauncher = {
+          name: 'api-v3',
+          launch: vi.fn(async (opts) => {
+            launchCount++;
+            const profileId = 'prof-' + launchCount;
+            opts.onProfileStarted?.(profileId);
+            return {
+              page: {} as unknown as LaunchedProfile['page'],
+              context: {} as unknown as LaunchedProfile['context'],
+              port: 9222,
+              profileId
+            };
+          }),
+          stop: vi.fn(async () => {
+            throw new Error('Stop failed irrevocably');
+          })
+        };
+
+        const customCapcut: CapcutTaskRunner = {
+          runAccount: async () => {
+            return {
+              authenticated: true,
+              done: 0,
+              total: 1,
+              credits: 0,
+              creditsTotal: 10,
+              missing: ['task-1'],
+              tasks: [],
+              unsettledProofs: [],
+              verification: null,
+              fatalCode: 'DOM_READ_TIMEOUT',
+              fatalError: 'DOM_READ_TIMEOUT: mouse-hang'
+            };
+          }
+        };
+
+        const service = new AutomationRunService(
+          {
+            workSources: createStubFactory(['u1@example.com|p1']),
+            emailOtp: { readOtp: async () => '123456' },
+            proxies: proxySource,
+            browser,
+            accounts,
+            logBus,
+            launcher: () => fakeLauncher,
+            capcut: customCapcut
+          },
+          {
+            sleep: async () => {},
+            nextId: () => 'run-1'
+          }
+        );
+
+        await service.start(baseConfig({ threadCount: 1, testDurationMs: 600_000 }));
+        const summary = await service.waitForCompletion();
+
+        expect(launchCount).toBe(1); // Never launched replacement
+        expect(summary.state).toBe('failed');
+        expect(summary.terminalReason?.code).toBe('RESOURCE_CLEANUP_FAILED');
+      });
+
+      it('drains every scheduler waiter after an uncertain old-profile stop', async () => {
+        let waiterRejected = false;
+        const fakeLauncher: BrowserLauncher = {
+          name: 'api-v3',
+          launch: vi.fn(async (opts) => {
+            const profileId = 'prof-' + ((fakeLauncher.launch as ReturnType<typeof vi.fn>).mock.calls.length);
+            opts.onProfileStarted?.(profileId);
+            return {
+              page: {} as unknown as LaunchedProfile['page'],
+              context: {} as unknown as LaunchedProfile['context'],
+              port: 9222,
+              profileId
+            };
+          }),
+          stop: vi.fn(async (id) => {
+            if (id === 'prof-1') throw new Error('Uncertain stop on worker 1');
+          })
+        };
+
+        const customCapcut: CapcutTaskRunner = {
+          runAccount: async (input) => {
+            if (input.accountId === 'acc-1') {
+              return {
+                authenticated: true,
+                done: 0,
+                total: 1,
+                credits: 0,
+                creditsTotal: 10,
+                missing: ['task-1'],
+                tasks: [],
+                unsettledProofs: [],
+                verification: null,
+                fatalCode: 'DOM_READ_TIMEOUT',
+                fatalError: 'DOM_READ_TIMEOUT'
+              };
+            } else {
+              // Worker 2 tries foreground which should be queued then drained
+              try {
+                await input.ui?.foreground('w2-action', async () => {
+                  await new Promise<void>((_, reject) => {
+                    if (input.signal.aborted) {
+                      reject(input.signal.reason);
+                      return;
+                    }
+                    input.signal.addEventListener('abort', () => reject(input.signal.reason));
+                  });
+                });
+              } catch {
+                waiterRejected = true;
+                throw new Error('Waiter drained');
+              }
+              return {
+                authenticated: true,
+                done: 1,
+                total: 1,
+                credits: 10,
+                creditsTotal: 10,
+                missing: [],
+                tasks: [],
+                unsettledProofs: [],
+                verification: null
+              };
+            }
+          }
+        };
+
+        const service = new AutomationRunService(
+          {
+            workSources: createStubFactory(['u1@example.com|p1', 'u2@example.com|p2']),
+            emailOtp: { readOtp: async () => '123456' },
+            proxies: proxySource,
+            browser,
+            accounts,
+            logBus,
+            launcher: () => fakeLauncher,
+            capcut: customCapcut
+          },
+          {
+            sleep: async () => {},
+            nextId: () => 'run-1'
+          }
+        );
+
+        await service.start(baseConfig({ threadCount: 2, testDurationMs: 600_000 }));
+        const summary = await service.waitForCompletion();
+
+        expect(summary.state).toBe('failed');
+        expect(summary.terminalReason?.code).toBe('RESOURCE_CLEANUP_FAILED');
+        expect(waiterRejected).toBe(true);
+      });
+
+      it('stops a profile published after a pre-id Stop', async () => {
+        const stoppedProfiles: string[] = [];
+        let engineCalls = 0;
+        const defStart = createDeferred<void>();
+
+        const fakeLauncher: BrowserLauncher = {
+          name: 'api-v3',
+          launch: vi.fn(async (opts) => {
+            await defStart.promise;
+            opts.onProfileStarted?.('late-profile-task10');
+            return {
+              page: {} as unknown as LaunchedProfile['page'],
+              context: {} as unknown as LaunchedProfile['context'],
+              port: 9222,
+              profileId: 'late-profile-task10'
+            };
+          }),
+          stop: vi.fn(async (id) => {
+            stoppedProfiles.push(id);
+          })
+        };
+
+        const customCapcut: CapcutTaskRunner = {
+          runAccount: async () => {
+            engineCalls++;
+            return {
+              authenticated: true,
+              done: 1,
+              total: 1,
+              credits: 10,
+              creditsTotal: 10,
+              missing: [],
+              tasks: [],
+              unsettledProofs: [],
+              verification: null
+            };
+          }
+        };
+
+        const service = new AutomationRunService(
+          {
+            workSources: createStubFactory(['u1@example.com|p1']),
+            emailOtp: { readOtp: async () => '123456' },
+            proxies: proxySource,
+            browser,
+            accounts,
+            logBus,
+            launcher: () => fakeLauncher,
+            capcut: customCapcut
+          },
+          {
+            sleep: async () => {},
+            nextId: () => 'run-1'
+          }
+        );
+
+        await service.start(baseConfig({ threadCount: 1, browser: 'multilogin', testDurationMs: 600_000 }));
+        await Promise.resolve();
+
+        // Stop before profile ID published
+        const stopPromise = service.stop();
+
+        // Publish profile ID
+        defStart.resolve();
+        await stopPromise;
+        await service.waitForCompletion();
+
+        expect(stoppedProfiles).toEqual(['late-profile-task10']);
+        expect(engineCalls).toBe(0);
+      });
+
+      it('never recycles after a failed durable checkpoint', async () => {
+        let launchCount = 0;
+        const fakeLauncher: BrowserLauncher = {
+          name: 'api-v3',
+          launch: vi.fn(async (opts) => {
+            launchCount++;
+            opts.onProfileStarted?.('prof-' + launchCount);
+            return {
+              page: {} as unknown as LaunchedProfile['page'],
+              context: {} as unknown as LaunchedProfile['context'],
+              port: 9222,
+              profileId: 'prof-' + launchCount
+            };
+          }),
+          stop: vi.fn(async () => {})
+        };
+
+        const customCapcut: CapcutTaskRunner = {
+          runAccount: async (input) => {
+            await input.onTaskCheckpoint?.({
+              rows: [{ key: 'task-1', title: 'Task 1', reward: 10, status: 4 }],
+              receipt: {
+                runId: input.runId ?? 'run-1',
+                sessionAlias: input.sessionAlias ?? 's1',
+                observedAt: new Date().toISOString(),
+                requiredAfter: new Date().toISOString(),
+                fresh: true,
+                final: false,
+                serverTotal: 1,
+                serverDone: 1,
+                complete: false
+              }
+            });
+            return {
+              authenticated: true,
+              done: 1,
+              total: 2,
+              credits: 10,
+              creditsTotal: 20,
+              missing: ['task-2'],
+              tasks: [],
+              unsettledProofs: [],
+              verification: null,
+              fatalCode: 'DOM_READ_TIMEOUT',
+              fatalError: 'DOM_READ_TIMEOUT'
+            };
+          }
+        };
+
+        const service = new AutomationRunService(
+          {
+            workSources: createStubFactory(['u1@example.com|p1']),
+            emailOtp: { readOtp: async () => '123456' },
+            proxies: proxySource,
+            browser,
+            accounts,
+            logBus,
+            launcher: () => fakeLauncher,
+            capcut: customCapcut,
+            taskProgress: {
+              record: vi.fn(async () => {
+                throw new AutomationTerminalError(
+                  'failed',
+                  { code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED' },
+                  'DB checkpoint failure'
+                );
+              })
+            }
+          },
+          {
+            sleep: async () => {},
+            nextId: () => 'run-1'
+          }
+        );
+
+        await service.start(baseConfig({ threadCount: 1, testDurationMs: 600_000 }));
+        const summary = await service.waitForCompletion();
+
+        expect(launchCount).toBe(1); // No second launch
+        expect(summary.state).toBe('failed');
+        expect(summary.terminalReason?.code).toBe('TASK_CHECKPOINT_PERSISTENCE_FAILED');
+      });
+
+      it('never replays an unsettled same-run action', async () => {
+        let launchCount = 0;
+        const actionsExecuted: string[] = [];
+        const fakeLauncher: BrowserLauncher = {
+          name: 'api-v3',
+          launch: vi.fn(async (opts) => {
+            launchCount++;
+            opts.onProfileStarted?.('prof-' + launchCount);
+            return {
+              page: {} as unknown as LaunchedProfile['page'],
+              context: {} as unknown as LaunchedProfile['context'],
+              port: 9222,
+              profileId: 'prof-' + launchCount
+            };
+          }),
+          stop: vi.fn(async () => {})
+        };
+
+        const customCapcut: CapcutTaskRunner = {
+          runAccount: async (input) => {
+            if (launchCount === 1) {
+              actionsExecuted.push('action:A:session-1');
+              return {
+                authenticated: true,
+                done: 0,
+                total: 1,
+                credits: 0,
+                creditsTotal: 10,
+                missing: ['task-A'],
+                tasks: [{ key: 'task-A', title: 'Task A', reward: 10, status: 1 }],
+                unsettledProofs: [{ key: 'task-A', proof: { actionKey: 'task-A', opId: 'op-1', errNo: 0, errTips: '', at: 100 } }],
+                verification: null,
+                fatalCode: 'DOM_READ_TIMEOUT',
+                fatalError: 'DOM_READ_TIMEOUT'
+              };
+            } else {
+              // Replacement session receives unsettledProofs and must NOT re-execute action A
+              if (!input.unsettledProofs || !input.unsettledProofs.some((p) => p.key === 'task-A')) {
+                actionsExecuted.push('action:A:session-2-replayed');
+              }
+              return {
+                authenticated: true,
+                done: 1,
+                total: 1,
+                credits: 10,
+                creditsTotal: 10,
+                missing: [],
+                tasks: [{ key: 'task-A', title: 'Task A', reward: 10, status: 4 }],
+                unsettledProofs: [],
+                verification: {
+                  runId: input.runId ?? 'run-1',
+                  sessionAlias: input.sessionAlias ?? 's2',
+                  observedAt: new Date().toISOString(),
+                  requiredAfter: new Date().toISOString(),
+                  fresh: true,
+                  final: true,
+                  serverTotal: 1,
+                  serverDone: 1,
+                  complete: true
+                }
+              };
+            }
+          }
+        };
+
+        const service = new AutomationRunService(
+          {
+            workSources: createStubFactory(['u1@example.com|p1']),
+            emailOtp: { readOtp: async () => '123456' },
+            proxies: proxySource,
+            browser,
+            accounts,
+            logBus,
+            launcher: () => fakeLauncher,
+            capcut: customCapcut
+          },
+          {
+            sleep: async () => {},
+            nextId: () => 'run-1'
+          }
+        );
+
+        await service.start(baseConfig({ threadCount: 1, testDurationMs: 600_000 }));
+        const summary = await service.waitForCompletion();
+
+        expect(summary.state).toBe('completed');
+        expect(launchCount).toBe(2);
+        expect(actionsExecuted).toEqual(['action:A:session-1']);
+      });
+
+      it('never acquires another mailbox during session recovery', async () => {
+        let launchCount = 0;
+        let acquiredMailboxes = 0;
+
+        const customWorkSources: AutomationWorkSourceFactory = {
+          create: () => ({
+            kind: 'finite',
+            prepare: async () => ({ workerTarget: 1 }),
+            next: async () => {
+              if (acquiredMailboxes > 0) return null;
+              acquiredMailboxes++;
+              return {
+                kind: 'new',
+                sourceId: 'src-1',
+                email: 'user1@example.com',
+                emailProvider: 'manual'
+              };
+            },
+            commit: () => {},
+            release: () => {}
+          })
+        };
+
+        const fakeLauncher: BrowserLauncher = {
+          name: 'api-v3',
+          launch: vi.fn(async (opts) => {
+            launchCount++;
+            opts.onProfileStarted?.('prof-' + launchCount);
+            return {
+              page: {} as unknown as LaunchedProfile['page'],
+              context: {} as unknown as LaunchedProfile['context'],
+              port: 9222,
+              profileId: 'prof-' + launchCount
+            };
+          }),
+          stop: vi.fn(async () => {})
+        };
+
+        const customCapcut: CapcutTaskRunner = {
+          runAccount: async (input) => {
+            if (launchCount === 1) {
+              return {
+                authenticated: true,
+                done: 0,
+                total: 1,
+                credits: 0,
+                creditsTotal: 10,
+                missing: ['task-1'],
+                tasks: [],
+                unsettledProofs: [],
+                verification: null,
+                fatalCode: 'DOM_READ_TIMEOUT',
+                fatalError: 'DOM_READ_TIMEOUT'
+              };
+            } else {
+              return {
+                authenticated: true,
+                done: 1,
+                total: 1,
+                credits: 10,
+                creditsTotal: 10,
+                missing: [],
+                tasks: [],
+                unsettledProofs: [],
+                verification: {
+                  runId: input.runId ?? 'run-1',
+                  sessionAlias: input.sessionAlias ?? 's2',
+                  observedAt: new Date().toISOString(),
+                  requiredAfter: new Date().toISOString(),
+                  fresh: true,
+                  final: true,
+                  serverTotal: 1,
+                  serverDone: 1,
+                  complete: true
+                }
+              };
+            }
+          }
+        };
+
+        const service = new AutomationRunService(
+          {
+            workSources: customWorkSources,
+            emailOtp: { readOtp: async () => '123456' },
+            proxies: proxySource,
+            browser,
+            accounts,
+            logBus,
+            launcher: () => fakeLauncher,
+            capcut: customCapcut
+          },
+          {
+            sleep: async () => {},
+            nextId: () => 'run-1'
+          }
+        );
+
+        await service.start(baseConfig({ threadCount: 1, testDurationMs: 600_000 }));
+        const summary = await service.waitForCompletion();
+
+        expect(summary.state).toBe('completed');
+        expect(launchCount).toBe(2);
+        expect(acquiredMailboxes).toBe(1); // Only 1 mailbox acquisition
+      });
+
+      it('counts one terminal outcome per accepted account under Stop races', async () => {
+        const fakeLauncher: BrowserLauncher = {
+          name: 'api-v3',
+          launch: vi.fn(async (opts) => {
+            const id = 'prof-' + ((fakeLauncher.launch as ReturnType<typeof vi.fn>).mock.calls.length);
+            opts.onProfileStarted?.(id);
+            return {
+              page: {} as unknown as LaunchedProfile['page'],
+              context: {} as unknown as LaunchedProfile['context'],
+              port: 9222,
+              profileId: id
+            };
+          }),
+          stop: vi.fn(async () => {})
+        };
+
+        const customCapcut: CapcutTaskRunner = {
+          runAccount: async (input) => {
+            if (input.accountId === 'acc-1') {
+              return {
+                authenticated: true,
+                done: 1,
+                total: 1,
+                credits: 10,
+                creditsTotal: 10,
+                missing: [],
+                tasks: [],
+                unsettledProofs: [],
+                verification: {
+                  runId: input.runId ?? 'run-1',
+                  sessionAlias: input.sessionAlias ?? 's1',
+                  observedAt: new Date().toISOString(),
+                  requiredAfter: new Date().toISOString(),
+                  fresh: true,
+                  final: true,
+                  serverTotal: 1,
+                  serverDone: 1,
+                  complete: true
+                }
+              };
+            } else {
+              await new Promise<void>((_, reject) => {
+                if (input.signal.aborted) {
+                  reject(input.signal.reason);
+                  return;
+                }
+                input.signal.addEventListener('abort', () => reject(input.signal.reason));
+              });
+              return {
+                authenticated: true,
+                done: 0,
+                total: 1,
+                credits: 0,
+                creditsTotal: 0,
+                missing: [],
+                tasks: [],
+                unsettledProofs: [],
+                verification: null
+              };
+            }
+          }
+        };
+
+        const service = new AutomationRunService(
+          {
+            workSources: createStubFactory(['u1@example.com|p1', 'u2@example.com|p2', 'u3@example.com|p3']),
+            emailOtp: { readOtp: async () => '123456' },
+            proxies: proxySource,
+            browser,
+            accounts,
+            logBus,
+            launcher: () => fakeLauncher,
+            capcut: customCapcut
+          },
+          {
+            sleep: async () => {},
+            nextId: () => 'run-1'
+          }
+        );
+
+        await service.start(baseConfig({ threadCount: 3, testDurationMs: 600_000 }));
+        await service.waitUntilRunning();
+
+        await service.stopThread('acc-2');
+        await service.stop();
+        const summary = await service.waitForCompletion();
+
+        expect(summary.accountsCompleted + summary.accountsFailed + summary.accountsStopped).toBe(summary.accountsAccepted);
+        expect(summary.accountsAccepted).toBe(3);
+        expect(summary.accountsCompleted).toBe(1);
+      });
+
+      it('fails the run when any cleanup remains uncertain', async () => {
+        const fakeLauncher: BrowserLauncher = {
+          name: 'api-v3',
+          launch: vi.fn(async (opts) => {
+            opts.onProfileStarted?.('p-clean-fail');
+            return {
+              page: {} as unknown as LaunchedProfile['page'],
+              context: {} as unknown as LaunchedProfile['context'],
+              port: 9222,
+              profileId: 'p-clean-fail'
+            };
+          }),
+          stop: vi.fn(async () => {
+            throw new Error('Profile teardown crashed unexpectedly');
+          })
+        };
+
+        const customCapcut: CapcutTaskRunner = {
+          runAccount: async (input) => {
+            return {
+              authenticated: true,
+              done: 1,
+              total: 1,
+              credits: 10,
+              creditsTotal: 10,
+              missing: [],
+              tasks: [],
+              unsettledProofs: [],
+              verification: {
+                runId: input.runId ?? 'run-1',
+                sessionAlias: input.sessionAlias ?? 's1',
+                observedAt: new Date().toISOString(),
+                requiredAfter: new Date().toISOString(),
+                fresh: true,
+                final: true,
+                serverTotal: 1,
+                serverDone: 1,
+                complete: true
+              }
+            };
+          }
+        };
+
+        const service = new AutomationRunService(
+          {
+            workSources: createStubFactory(['u1@example.com|p1']),
+            emailOtp: { readOtp: async () => '123456' },
+            proxies: proxySource,
+            browser,
+            accounts,
+            logBus,
+            launcher: () => fakeLauncher,
+            capcut: customCapcut
+          },
+          {
+            sleep: async () => {},
+            nextId: () => 'run-1'
+          }
+        );
+
+        await service.start(baseConfig({ threadCount: 1, testDurationMs: 600_000 }));
+        const summary = await service.waitForCompletion();
+
+        expect(summary.state).toBe('failed');
+        expect(summary.terminalReason?.code).toBe('RESOURCE_CLEANUP_FAILED');
+        expect((service as unknown as { cleanupFailures: number }).cleanupFailures).toBeGreaterThan(0);
+      });
+    });
   });
 });
 
