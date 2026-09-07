@@ -12,7 +12,7 @@
  * =============================================================================
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { BrowserContext, Page } from 'playwright-core';
 
 const ensureInApp = vi.fn();
@@ -21,6 +21,9 @@ const isEligible = vi.fn();
 const ensureSampleImage = vi.fn();
 const runAllTasks = vi.fn();
 const setDumpDir = vi.fn();
+const capture = vi.hoisted(() => ({ mark: vi.fn(), stop: vi.fn(async () => ({ requests: 0, ioErrors: 0 })) }));
+vi.mock('../capcut/httpCapture', () => ({ attachRedactedHttpCapture: vi.fn(() => capture) }));
+afterEach(() => vi.unstubAllEnvs());
 
 vi.mock('../capcut/auth', () => ({
   ensureInApp: (...args: unknown[]) => ensureInApp(...args)
@@ -90,6 +93,36 @@ beforeEach(() => {
 });
 
 describe('CapcutEngineService.runAccount', () => {
+  it.each(['success', 'auth-error', 'cancel', 'skipped'])('awaits capture flush for %s without losing account outcome', async (mode) => {
+    vi.stubEnv('CAPCUT_CAPTURE_HTTP', '1');
+    const events: string[] = [];
+    capture.mark.mockImplementation(s => { events.push(s); });
+    capture.stop.mockImplementationOnce(async () => { await Promise.resolve(); events.push('flushed'); return { requests: 0, ioErrors: 0 }; });
+    const controller = new AbortController();
+    ensureInApp.mockImplementationOnce(async () => {
+      events.push('auth');
+      if (mode === 'auth-error') throw new Error('auth failure');
+      if (mode === 'cancel') controller.abort(new Error('Stop'));
+      return { mode: 'signup', created: true };
+    });
+    if (mode === 'skipped') isEligible.mockReturnValue(false);
+    const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
+    const result = engine.runAccount(runInput({ signal: controller.signal, skipWithoutTrial: mode === 'skipped' }));
+    if (['auth-error','cancel'].includes(mode)) await expect(result).rejects.toThrow();
+    else await result;
+    expect(events.indexOf('signup')).toBeLessThan(events.indexOf('auth'));
+    expect(events.at(-1)).toBe('flushed');
+    if (mode === 'success') expect(runAllTasks.mock.calls[0][0].captureStage).toBeTypeOf('function');
+  });
+  it('returns observed partial progress with a fatal error instead of discarding it', async () => {
+    runAllTasks.mockResolvedValueOnce({
+      outcomes: [{ key: 'pwa', title: 'Install', reward: 70, done: true, attempts: 1 }],
+      snapshot: { total: 2, done: 1, credits: 70, creditsTotal: 110, missing: ['canvas'] },
+      fatalError: new Error('DOM_READ_TIMEOUT: canvas-area:mouse-move')
+    });
+    const result = await new CapcutEngineService({ userDataDir: 'C:/tmp/userData' }).runAccount(runInput());
+    expect(result).toMatchObject({ credits: 70, fatalError: 'DOM_READ_TIMEOUT: canvas-area:mouse-move', tasks: [{ key: 'pwa', status: 4 }] });
+  });
   it('does not recover another page or start trial after Stop during authentication', async () => {
     const controller = new AbortController();
     ensureInApp.mockImplementationOnce(async () => {
@@ -196,5 +229,67 @@ describe('CapcutEngineService.runAccount', () => {
         /^stage=trial-check elapsedMs=\d+ outcome=success$/
       )
     ]));
+  });
+
+  it('initial newly-purchased account preserves signup-first behavior', async () => {
+    const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
+    const getOtp = vi.fn(async () => '123456');
+
+    await engine.runAccount(runInput({
+      authAttempt: 'initial',
+      isNewAccount: true,
+      getOtp
+    }));
+
+    const options = lastAuthOptions() as {
+      forceSignup?: boolean;
+      allowSignupFallback?: boolean;
+      getOtp?: (email: string) => Promise<string>;
+    };
+    expect(options.forceSignup).toBe(true);
+    expect(options.allowSignupFallback).toBe(true);
+    expect(options.getOtp).toBeDefined();
+  });
+
+  it('engine returns authenticated true for a mission-level fatal result', async () => {
+    runAllTasks.mockResolvedValueOnce({
+      outcomes: [{ key: 'pwa', title: 'Install', reward: 70, done: true, attempts: 1 }],
+      snapshot: { total: 2, done: 1, credits: 70, creditsTotal: 110, missing: ['canvas'] },
+      fatalError: new Error('DOM_READ_TIMEOUT: canvas-area:mouse-move')
+    });
+    const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
+    const result = await engine.runAccount(runInput());
+    expect(result.authenticated).toBe(true);
+    expect(result.verification).toBeDefined();
+    expect(result.verification?.complete).toBe(false);
+    expect(result.tasks).toEqual(expect.arrayContaining([expect.objectContaining({ key: 'pwa' })]));
+  });
+
+  it('engine exposes DOM_READ_TIMEOUT as a typed fatalCode', async () => {
+    const { DomReadTimeoutError } = await import('../capcut/cancellation');
+    runAllTasks.mockResolvedValueOnce({
+      outcomes: [{ key: 'pwa', title: 'Install', reward: 70, done: true, attempts: 1 }],
+      snapshot: { total: 2, done: 1, credits: 70, creditsTotal: 110, missing: ['canvas'] },
+      fatalError: new DomReadTimeoutError('canvas-area:mouse-move')
+    });
+    const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
+    const result = await engine.runAccount(runInput());
+    expect(result.authenticated).toBe(true);
+    expect(result.fatalCode).toBe('DOM_READ_TIMEOUT');
+  });
+
+  it('discovery and trial-skip UI returns are explicitly unverified', async () => {
+    vi.stubEnv('CAPCUT_HTTP_DISCOVERY_ONLY', '1');
+    const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
+    const discoveryResult = await engine.runAccount(runInput());
+    expect(discoveryResult.authenticated).toBe(true);
+    expect(discoveryResult.verification).toBeNull();
+
+    vi.unstubAllEnvs();
+    isEligible.mockReturnValue(false);
+    const skipResult = await engine.runAccount(runInput({ skipWithoutTrial: true }));
+    expect(skipResult.authenticated).toBe(true);
+    expect(skipResult.skipped).toBe(true);
+    expect(skipResult.verification).toBeNull();
   });
 });

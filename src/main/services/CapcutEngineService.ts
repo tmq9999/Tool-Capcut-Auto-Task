@@ -34,6 +34,7 @@ import type {
   TaskOutcome,
   CapcutPace,
   CapcutFatalCode,
+  CapcutAuthAttempt,
   CapcutUiAccountResult,
   CapcutVerificationReceipt,
   TaskCheckpoint,
@@ -130,6 +131,7 @@ export class CapcutEngineService implements CapcutTaskRunner {
      * đăng ký — mất ~60 giây và in một dòng lỗi giả cho mỗi account mới.
      */
     isNewAccount: boolean;
+    authAttempt?: CapcutAuthAttempt;
     getOtp?: () => Promise<string>;
     /**
      * `retryCount` của Dashboard. Engine quét lại toàn bộ nhiệm vụ còn thiếu theo
@@ -188,10 +190,14 @@ export class CapcutEngineService implements CapcutTaskRunner {
     let page = await resolver.resolve('authentication');
     input.signal.throwIfAborted();
 
+    const authAttempt = input.authAttempt ?? 'initial';
     // OTP của riêng luồng này (đường đăng ký) ưu tiên hơn nguồn cấu hình chung.
-    const getOtp = input.getOtp
-      ? async (_email: string): Promise<string> => (input.getOtp as () => Promise<string>)()
-      : this.options.getOtp;
+    // Đối với existing-only recovery, OTP callback không được truyền.
+    const getOtp = authAttempt === 'existing-only'
+      ? undefined
+      : (input.getOtp
+        ? async (_email: string): Promise<string> => (input.getOtp as () => Promise<string>)()
+        : this.options.getOtp);
 
     const auth = await measureStage(
       'authentication-otp',
@@ -203,7 +209,8 @@ export class CapcutEngineService implements CapcutTaskRunner {
           {
             // `source: 'db'` giữ nguyên để nhánh fallback (đăng ký → email đã tồn tại
             // → đăng nhập) không đổi; `forceSignup` mới là thứ chọn đường ĐI TRƯỚC.
-            forceSignup: input.isNewAccount,
+            forceSignup: authAttempt === 'initial' && input.isNewAccount,
+            allowSignupFallback: authAttempt !== 'existing-only',
             log: (m) => log('INFO', 'Đăng nhập', m),
             getOtp,
             ui: input.ui,

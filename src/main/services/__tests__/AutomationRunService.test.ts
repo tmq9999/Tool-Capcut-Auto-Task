@@ -1,12 +1,16 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   AutomationRunService,
   type IAccountSink,
   type IBrowserRuntimeApi,
   type IProxyLeaseSource,
-  type StartedProfile
+  type StartedProfile,
+  type HttpOnlyAccountRunner,
+  type CapcutTaskRunner,
+  type BrowserSessionRuntime
 } from '../AutomationRunService';
 import type { BrowserLauncher, LaunchedProfile } from '../capcut/launcher';
+import { createDirectUiInteraction, type RunUiInteractionScheduler } from '../capcut/uiInteractionScheduler';
 import { LogBus, type ILogSink } from '../LogBus';
 import { ProviderError } from '../../providers/ProviderError';
 import { AutomationRunConfigSchema, type AutomationRunConfigDTO, type AutomationRunProgressDTO } from '../../../shared/schemas/automation.schema';
@@ -21,6 +25,8 @@ import type {
   WorkSourceKind
 } from '../AutomationWorkSource';
 import type { RunningThreadInfo } from '../AutomationRunService';
+import { headlessWorkerStaggerMs } from '../AutomationRunService';
+import { createAutomationWorkSourceFactory } from '../AutomationWorkSource';
 
 class CollectingSink implements ILogSink {
   public rows: unknown[] = [];
@@ -190,6 +196,8 @@ let sink: CollectingSink;
 let sleepCalls: number[];
 let progressEvents: AutomationRunProgressDTO[];
 let idCounter: number;
+let workSourceCreateCalls: number;
+let workSourcePrepareCalls: number;
 
 function baseConfig(overrides: Partial<AutomationRunConfigDTO> = {}): AutomationRunConfigDTO {
   return AutomationRunConfigSchema.parse({
@@ -210,9 +218,14 @@ function baseConfig(overrides: Partial<AutomationRunConfigDTO> = {}): Automation
   });
 }
 
-function createService(launcher?: BrowserLauncher): AutomationRunService {
+function createService(
+  launcher?: BrowserLauncher,
+  httpOnlyRunner?: HttpOnlyAccountRunner,
+  capcut?: CapcutTaskRunner
+): AutomationRunService {
   const workSources: AutomationWorkSourceFactory = {
     create: (config) => {
+      workSourceCreateCalls += 1;
       if (config.emailSource.mode === 'manual') {
         const items: AutomationWorkItem[] = config.emailSource.entries.flatMap((entry, i) => {
           const trimmed = entry.trim();
@@ -228,6 +241,7 @@ function createService(launcher?: BrowserLauncher): AutomationRunService {
         return {
           kind: 'finite',
           prepare: async (c) => {
+            workSourcePrepareCalls += 1;
             if (items.length === 0) {
               throw new ProviderError('CONFIG_ERROR', 'Danh sách email thủ công đang trống.');
             }
@@ -258,6 +272,7 @@ function createService(launcher?: BrowserLauncher): AutomationRunService {
       return {
         kind: 'finite',
         prepare: async (c) => {
+          workSourcePrepareCalls += 1;
           if (emailSource.available === 0 && emailSource.failures.length > 0) {
             throw new ProviderError('CONFIG_ERROR', emailSource.failures[0]);
           }
@@ -289,7 +304,9 @@ function createService(launcher?: BrowserLauncher): AutomationRunService {
       browser,
       accounts,
       logBus,
-      ...(launcher ? { launcher: () => launcher } : {})
+      ...(launcher ? { launcher: () => launcher } : {}),
+      ...(httpOnlyRunner ? { httpOnlyRunner } : {}),
+      ...(capcut ? { capcut } : {})
     },
     {
       // A long hold blocks until the test asks the run to stop, so tests can
@@ -318,6 +335,78 @@ beforeEach(() => {
   sleepCalls = [];
   progressEvents = [];
   idCounter = 0;
+  workSourceCreateCalls = 0;
+  workSourcePrepareCalls = 0;
+});
+
+describe('headless worker startup scheduling', () => {
+  afterEach(() => vi.useRealTimers());
+  it('stagger runs only once per worker, including refills', async () => {
+    vi.useFakeTimers();
+    emailSource.available = 8;
+    const launch = browser.startProfile.bind(browser);
+    vi.spyOn(browser, 'startProfile').mockImplementation(async params => {
+      await new Promise(resolve => setTimeout(resolve, 10000));
+      return launch(params);
+    });
+    const logs: string[] = [];
+    const unsubscribe = logBus.subscribe(entry => logs.push(entry.message));
+    const service = createService();
+    await service.start(baseConfig({ threadCount: 3, headless: true }));
+    await vi.runAllTimersAsync();
+    const result = await service.waitForCompletion();
+    unsubscribe();
+    expect(result.accountsAccepted).toBe(8);
+    expect(logs.filter(m => m.includes('Headless stagger:'))).toHaveLength(2);
+    expect(browser.stopped).toHaveLength(8);
+  });
+
+  it('Stop cancels delayed workers before they acquire a proxy', async () => {
+    vi.useFakeTimers();
+    emailSource.available = 3;
+    const service = createService();
+    await service.start(baseConfig({ threadCount: 3, headless: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    await service.stop();
+    await vi.runAllTimersAsync();
+    expect(proxySource.acquired).toHaveLength(1);
+    expect(browser.startCalls).toHaveLength(1);
+    expect((await service.waitForCompletion()).state).toBe('stopped');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it('staggers headless profiles while headed startup stays immediate', () => {
+    expect(headlessWorkerStaggerMs(false, 'worker-1')).toBe(0);
+    expect(headlessWorkerStaggerMs(true, 'worker-1')).toBe(0);
+    expect(headlessWorkerStaggerMs(true, 'worker-2')).toBe(4_000);
+    expect(headlessWorkerStaggerMs(true, 'worker-3')).toBe(8_000);
+  });
+});
+
+describe('mail-limited runs with the real source factory', () => {
+  it.each([3, 2])('drains %i accounts, closes every profile, and never refills past the limit', async (limit) => {
+    let orders = 0;
+    const factory = createAutomationWorkSourceFactory({
+      openAcquisitionSession: async () => ({
+        acquireOne: async () => ({ purchasedEmail: purchasedRow(++orders), reservationId: 'r-' + orders }),
+        commit: () => {}, release: () => {}
+      })
+    });
+    proxySource.keyCount = limit;
+    const service = new AutomationRunService({
+      workSources: factory, emailOtp: { readOtp: async () => null },
+      proxies: proxySource, browser, accounts, logBus
+    }, { sleep: async () => {}, nextId: () => 'limited-run' });
+    await service.start(baseConfig({ threadCount: 3, mailLimit: limit }));
+    const summary = await service.waitForCompletion();
+    expect(summary).toMatchObject({
+      state: 'completed', workerTarget: limit, workersActive: 0, accountsAccepted: limit,
+      terminalReason: { code: 'MAIL_LIMIT_REACHED' }
+    });
+    expect(orders).toBe(limit);
+    expect(browser.stopped).toHaveLength(limit);
+    expect(proxySource.acquired).toHaveLength(limit);
+    expect(proxySource.released).toHaveLength(limit);
+  });
 });
 
 describe('AutomationRunService.start with an API email source', () => {
@@ -332,14 +421,17 @@ describe('AutomationRunService.start with an API email source', () => {
   });
 
   it('launches exactly one browser per thread with the configured headless flag', async () => {
+    vi.useFakeTimers();
     emailSource.available = 3;
     const service = createService();
 
     await service.start(baseConfig({ threadCount: 3, headless: true }));
+    await vi.runAllTimersAsync();
     await service.waitForCompletion();
 
     expect(browser.startCalls).toHaveLength(3);
     expect(browser.startCalls.every((call) => call.headless)).toBe(true);
+    vi.useRealTimers();
   });
 
   it('gives every thread its own proxy endpoint', async () => {
@@ -566,6 +658,310 @@ describe('AutomationRunService chặn cấu hình chắc chắn hỏng TRƯỚC 
   });
 });
 
+describe('AutomationRunService HTTP-only mission transport', () => {
+  it('fails closed before source preparation, mailbox purchase, proxy lease, or browser launch when the runner is missing', async () => {
+    emailSource.available = 1;
+    const service = createService();
+
+    await expect(service.start(baseConfig({
+      missionTransport: 'http-only',
+      browser: 'gologin',
+      emailSource: { mode: 'api', provider: 'gmail94' }
+    }))).rejects.toMatchObject({ reason: { code: 'PROVIDER_CONFIG_ERROR' } });
+
+    expect(emailSource.purchaseCalls).toHaveLength(0);
+    expect(workSourceCreateCalls).toBe(0);
+    expect(workSourcePrepareCalls).toBe(0);
+    expect(proxySource.acquired).toHaveLength(0);
+    expect(browser.startCalls).toHaveLength(0);
+  });
+
+  it('fails closed when HTTP preflight rejects, before source preparation', async () => {
+    const runner: HttpOnlyAccountRunner = {
+      preflight: async () => { throw new Error('contracts unavailable token=secret-session'); },
+      runAccount: async () => { throw new Error('must not run'); }
+    };
+    const service = createService(undefined, runner);
+
+    const error = await service.start(baseConfig({ missionTransport: 'http-only' }))
+      .then(() => null, (caught: unknown) => caught);
+    expect(error).toMatchObject({ reason: { code: 'PROVIDER_CONFIG_ERROR' } });
+    expect((error as Error).message).not.toContain('secret-session');
+
+    expect(workSourceCreateCalls).toBe(0);
+    expect(workSourcePrepareCalls).toBe(0);
+    expect(emailSource.purchaseCalls).toHaveLength(0);
+    expect(proxySource.acquired).toHaveLength(0);
+    expect(browser.startCalls).toHaveLength(0);
+  });
+
+  it('rejects HTTP-only direct proxy mode without a route before mailbox purchase', async () => {
+    const runner: HttpOnlyAccountRunner = {
+      preflight: async () => {},
+      runAccount: async () => { throw new Error('must not run'); }
+    };
+    const service = createService(undefined, runner);
+
+    await expect(service.start(baseConfig({
+      missionTransport: 'http-only',
+      proxy: { mode: 'direct', entries: [] }
+    }))).rejects.toMatchObject({ reason: { code: 'PROVIDER_CONFIG_ERROR' } });
+
+    expect(workSourceCreateCalls).toBe(0);
+    expect(emailSource.purchaseCalls).toHaveLength(0);
+    expect(browser.startCalls).toHaveLength(0);
+  });
+
+  it('keeps source, mailbox, proxy, account persistence, and counters owned by the service', async () => {
+    emailSource.available = 1;
+    const preflight = vi.fn(async () => {});
+    const runAccount = vi.fn(async () => ({
+      done: 1,
+      total: 1,
+      credits: 10,
+      creditsTotal: 10,
+      missing: [],
+      tasks: [{ key: 'http-task', title: 'HTTP task', reward: 10, status: 4 }]
+    }));
+    const runner: HttpOnlyAccountRunner = { preflight, runAccount };
+    const launch = vi.fn(async () => { throw new Error('HTTP-only must not launch'); });
+    const launcher = {
+      name: 'api-v3' as const,
+      launch,
+      stop: async () => {}
+    } as BrowserLauncher;
+    const legacyRunAccount = vi.fn();
+    const legacyRunner = { runAccount: legacyRunAccount } as unknown as CapcutTaskRunner;
+    const service = createService(launcher, runner, legacyRunner);
+
+    await service.start(baseConfig({
+      missionTransport: 'http-only',
+      browser: 'gologin',
+      threadCount: 1,
+      emailSource: { mode: 'api', provider: 'gmail94' }
+    }));
+    const summary = await service.waitForCompletion();
+
+    expect(preflight).toHaveBeenCalledTimes(1);
+    expect(runAccount).toHaveBeenCalledTimes(1);
+    expect(runAccount).toHaveBeenCalledWith(expect.objectContaining({
+      email: 'mail1@gmail.com',
+      accountId: 'acc-1',
+      isNewAccount: true,
+      proxy: expect.objectContaining({ server: 'http://10.0.0.1:20001' })
+    }));
+    expect(summary).toMatchObject({
+      runId: 'id-1',
+      accountsAccepted: 1,
+      accountsCompleted: 1,
+      accountsFailed: 0,
+      startedProfiles: []
+    });
+    expect(emailSource.purchaseCalls).toHaveLength(1);
+    expect(emailSource.consumed).toEqual([{ id: 'pe-1', accountId: 'acc-1' }]);
+    expect(workSourceCreateCalls).toBe(1);
+    expect(workSourcePrepareCalls).toBe(1);
+    expect(proxySource.acquired).toEqual(['10.0.0.1']);
+    expect(proxySource.released).toEqual(['10.0.0.1']);
+    expect(accounts.updates).toContainEqual(expect.objectContaining({
+      id: 'acc-1',
+      data: expect.objectContaining({ credit: 10 })
+    }));
+    expect(launch).not.toHaveBeenCalled();
+    expect(browser.startCalls).toHaveLength(0);
+    expect(legacyRunAccount).not.toHaveBeenCalled();
+  });
+
+  it('global Stop aborts in-flight HTTP account work without touching a browser', async () => {
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const runner: HttpOnlyAccountRunner = {
+      preflight: async () => {},
+      runAccount: async ({ signal }) => {
+        entered();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+        throw new Error('unreachable');
+      }
+    };
+    const service = createService(undefined, runner);
+
+    await service.start(baseConfig({
+      missionTransport: 'http-only',
+      threadCount: 1,
+      emailSource: { mode: 'manual', entries: ['existing@x.com|mail-pass'] },
+      proxy: { mode: 'direct', entries: ['1.1.1.1:8080'] }
+    }));
+    await started;
+    await service.stop();
+
+    expect((await service.waitForCompletion()).state).toBe('stopped');
+    expect(browser.startCalls).toHaveLength(0);
+  });
+
+  it('treats an empty HTTP task snapshot as unavailable instead of complete', async () => {
+    const runner: HttpOnlyAccountRunner = {
+      preflight: async () => {},
+      runAccount: async () => ({
+        done: 0,
+        total: 0,
+        credits: 0,
+        creditsTotal: 0,
+        missing: [],
+        tasks: []
+      })
+    };
+    const service = createService(undefined, runner);
+
+    await service.start(baseConfig({
+      missionTransport: 'http-only',
+      threadCount: 1,
+      emailSource: { mode: 'manual', entries: ['existing@x.com|mail-pass'] },
+      proxy: { mode: 'direct', entries: ['1.1.1.1:8080'] }
+    }));
+    const summary = await service.waitForCompletion();
+
+    expect(summary.accountsCompleted).toBe(0);
+    expect(summary.accountsFailed).toBe(1);
+    expect(accounts.updates).toContainEqual(expect.objectContaining({
+      id: 'acc-1',
+      data: expect.objectContaining({ status: 'error' })
+    }));
+  });
+
+  it('stopThread aborts one in-flight HTTP account without a browser profile', async () => {
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const runner: HttpOnlyAccountRunner = {
+      preflight: async () => {},
+      runAccount: async ({ signal }) => {
+        entered();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+        throw new Error('unreachable');
+      }
+    };
+    const service = createService(undefined, runner);
+
+    await service.start(baseConfig({
+      missionTransport: 'http-only',
+      threadCount: 1,
+      emailSource: { mode: 'manual', entries: ['existing@x.com|mail-pass'] },
+      proxy: { mode: 'direct', entries: ['1.1.1.1:8080'] }
+    }));
+    await started;
+
+    expect(service.getRunningThreads()).toEqual([{
+      accountId: 'acc-1',
+      email: 'existing@x.com',
+      transport: 'http-only'
+    }]);
+    expect(await service.stopThread('acc-1')).toBe(true);
+    const summary = await service.waitForCompletion();
+    expect(summary.accountsStopped).toBe(1);
+    expect(browser.startCalls).toHaveLength(0);
+  });
+
+  it('persists bound partial HTTP evidence before a later fatal result', async () => {
+    const recorded: Array<{ accountId: string; rows: unknown[] }> = [];
+    let available = true;
+    const runner: HttpOnlyAccountRunner = {
+      preflight: async () => {},
+      runAccount: async ({ onTaskProgress }) => {
+        onTaskProgress([{ key: 'partial', title: 'Partial', reward: 5, status: 4 }]);
+        throw new Error('fatal after checkpoint');
+      }
+    };
+    const service = new AutomationRunService({
+      workSources: {
+        create: () => ({
+          kind: 'finite',
+          prepare: async () => ({ workerTarget: 1 }),
+          next: async () => {
+            if (!available) return null;
+            available = false;
+            return { sourceId: 'm-1', email: 'bound@x.com', emailProvider: 'manual' };
+          },
+          commit: () => {},
+          release: () => {}
+        })
+      },
+      emailOtp: { readOtp: async () => null }, proxies: proxySource, browser, accounts, logBus,
+      httpOnlyRunner: runner,
+      taskProgress: {
+        record: async () => {},
+        recordLegacy: (accountId, rows) => { recorded.push({ accountId, rows }); }
+      }
+    }, { sleep: async () => {}, nextId: () => 'checkpoint-run' });
+
+    await service.start(baseConfig({
+      missionTransport: 'http-only', threadCount: 1,
+      emailSource: { mode: 'manual', entries: ['bound@x.com'] },
+      proxy: { mode: 'direct', entries: ['1.1.1.1:8080'] }
+    }));
+    const summary = await service.waitForCompletion();
+
+    expect(summary.accountsFailed).toBe(1);
+    expect(recorded).toEqual([{
+      accountId: 'acc-1',
+      rows: [{ key: 'partial', title: 'Partial', reward: 5, status: 4 }]
+    }]);
+  });
+
+  it('retains partial HTTP evidence emitted before global Stop', async () => {
+    const recorded: Array<{ accountId: string; rows: unknown[] }> = [];
+    let checkpointed!: () => void;
+    const checkpoint = new Promise<void>((resolve) => { checkpointed = resolve; });
+    let available = true;
+    const runner: HttpOnlyAccountRunner = {
+      preflight: async () => {},
+      runAccount: async ({ signal, onTaskProgress }) => {
+        onTaskProgress([{ key: 'partial-stop', title: 'Before stop', reward: 3, status: 2 }]);
+        checkpointed();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+        throw new Error('unreachable');
+      }
+    };
+    const service = new AutomationRunService({
+      workSources: {
+        create: () => ({
+          kind: 'finite', prepare: async () => ({ workerTarget: 1 }),
+          next: async () => {
+            if (!available) return null;
+            available = false;
+            return { sourceId: 'm-1', email: 'stop@x.com', emailProvider: 'manual' };
+          },
+          commit: () => {}, release: () => {}
+        })
+      },
+      emailOtp: { readOtp: async () => null }, proxies: proxySource, browser, accounts, logBus,
+      httpOnlyRunner: runner,
+      taskProgress: {
+        record: async () => {},
+        recordLegacy: (accountId, rows) => { recorded.push({ accountId, rows }); }
+      }
+    }, { sleep: async () => {}, nextId: () => 'stop-checkpoint-run' });
+
+    await service.start(baseConfig({
+      missionTransport: 'http-only', threadCount: 1,
+      emailSource: { mode: 'manual', entries: ['stop@x.com'] },
+      proxy: { mode: 'direct', entries: ['1.1.1.1:8080'] }
+    }));
+    await checkpoint;
+    await service.stop();
+
+    expect(recorded).toEqual([{
+      accountId: 'acc-1',
+      rows: [{ key: 'partial-stop', title: 'Before stop', reward: 3, status: 2 }]
+    }]);
+    expect((await service.waitForCompletion()).accountsStopped).toBe(1);
+  });
+});
+
 /**
  * `xcli` là launcher MẶC ĐỊNH và nó từ chối proxy có user/pass
  * (`XcliLauncher.ts:139`), trong khi placeholder trên Dashboard lại mời dán đúng
@@ -650,6 +1046,17 @@ describe('AutomationRunService chặn tổ hợp xcli + proxy user/pass', () => 
       proxy: { mode: 'direct', entries: ['1.1.1.1:8080'] }
     }));
     await service.waitForCompletion();
+  });
+
+  it('xcli + headless bị chặn trước khi bắt đầu work source', async () => {
+    const service = serviceWithLauncher('xcli');
+    await expect(service.start(baseConfig({
+      threadCount: 1,
+      headless: true,
+      emailSource: { mode: 'manual', entries: ['a@x.com|p'] },
+      proxy: { mode: 'direct', entries: ['1.1.1.1:8080'] }
+    }))).rejects.toThrow(/api-v3|headless/i);
+    expect(emailSource.purchaseCalls).toHaveLength(0);
   });
 
   it('api-v3 thì proxy có user/pass là hợp lệ', async () => {
@@ -1677,9 +2084,9 @@ describe('AutomationRunService continuous cancellable worker lifecycle', () => {
 
     expect(summary.accountsCompleted).toBe(1);
     expect(summary.accountsFailed).toBe(0);
-    expect(summary.state).toBe('completed');
+    expect(summary.state).toBe('failed');
     expect(summary.terminalReason).toMatchObject({
-      code: 'MANUAL_EXHAUSTED',
+      code: 'RESOURCE_CLEANUP_FAILED',
       details: { cleanupFailures: 1 }
     });
     expect(harness.accounts.updates.at(-1)?.data.status).toBe('done');
@@ -1816,3 +2223,500 @@ describe('AutomationRunService continuous cancellable worker lifecycle', () => {
     expect(browserTiming).not.toContain('launcher refused');
   });
 });
+
+describe('session-scoped browser ownership', () => {
+  interface InternalThreadSessionRef {
+    accountId: string;
+    session?: BrowserSessionRuntime;
+  }
+
+  interface ServiceOwnershipAccessor {
+    activeThreads: Map<string, InternalThreadSessionRef>;
+    stopSession(thread: InternalThreadSessionRef, session: BrowserSessionRuntime): Promise<boolean>;
+  }
+
+  function createDeferred<T>() {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function createStubFactory(entries: string[] = ['user@example.com|pass']): AutomationWorkSourceFactory {
+    return {
+      create: () => {
+        const items = entries.map((entry, idx) => ({
+          sourceId: 'man-' + (idx + 1),
+          email: entry.split('|')[0],
+          emailProvider: 'manual'
+        }));
+        return {
+          kind: 'finite' as const,
+          prepare: async (c: number) => ({ workerTarget: Math.min(c, items.length) }),
+          next: async () => items.shift() ?? null,
+          commit: () => {},
+          release: () => {}
+        };
+      }
+    };
+  }
+
+  it('stops the exact session once when Stop races final cleanup', async () => {
+    emailSource.available = 1;
+    const defStop = createDeferred<void>();
+    const stoppedProfiles: string[] = [];
+
+    const customBrowser = new StubBrowserRuntime();
+    customBrowser.stopProfile = vi.fn(async (id: string) => {
+      stoppedProfiles.push(id);
+      await defStop.promise;
+    });
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser: customBrowser,
+        accounts,
+        logBus
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-1'
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, testDurationMs: 600_000 }));
+    await service.waitUntilRunning();
+
+    const thread = (service as unknown as ServiceOwnershipAccessor).activeThreads.get('acc-1');
+    expect(thread).toBeDefined();
+    const session = thread!.session;
+    expect(session).toBeDefined();
+
+    // Race global stop and direct stopSession
+    const stop1 = service.stopThread('acc-1');
+    const stop2 = (service as unknown as ServiceOwnershipAccessor).stopSession(thread!, session!);
+
+    expect(stoppedProfiles).toEqual(['profile-1']);
+
+    defStop.resolve();
+    const [res1, res2] = await Promise.all([stop1, stop2]);
+    expect(res1).toBe(true);
+    expect(res2).toBe(true);
+    expect(stoppedProfiles).toEqual(['profile-1']);
+
+    await service.stop();
+    await service.waitForCompletion();
+  });
+
+  it('does not reuse the old stop promise for a replacement session', async () => {
+    emailSource.available = 1;
+    const stoppedProfiles: string[] = [];
+    const customBrowser = new StubBrowserRuntime();
+    customBrowser.stopProfile = vi.fn(async (id: string) => {
+      stoppedProfiles.push(id);
+    });
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['user@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser: customBrowser,
+        accounts,
+        logBus
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-1'
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, testDurationMs: 600_000 }));
+    await service.waitUntilRunning();
+
+    const thread = (service as unknown as ServiceOwnershipAccessor).activeThreads.get('acc-1');
+    expect(thread).toBeDefined();
+    const sessionA = thread!.session;
+    expect(sessionA).toBeDefined();
+    expect(sessionA!.profileId).toBe('profile-1');
+
+    // Stop session A
+    await (service as unknown as ServiceOwnershipAccessor).stopSession(thread!, sessionA!);
+    expect(stoppedProfiles).toEqual(['profile-1']);
+
+    // Install replacement session B
+    const sessionB: BrowserSessionRuntime = {
+      alias: 'worker-1-session-2',
+      startedAt: Date.now(),
+      stopRequested: false,
+      profileId: 'profile-2',
+      ui: createDirectUiInteraction(new AbortController().signal)
+    };
+    thread!.session = sessionB;
+
+    // Final cleanup / stop session B
+    await (service as unknown as ServiceOwnershipAccessor).stopSession(thread!, sessionB);
+    expect(stoppedProfiles).toEqual(['profile-1', 'profile-2']);
+
+    await service.stop();
+    await service.waitForCompletion();
+  });
+
+  it('retains ownership when profile id is published before attach rejects', async () => {
+    const stoppedProfiles: string[] = [];
+    const fakeLauncher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async (opts) => {
+        opts.onProfileStarted?.('profile-attached-fails');
+        throw new Error('CDP attachment failed');
+      }),
+      stop: vi.fn(async (id) => {
+        stoppedProfiles.push(id);
+      })
+    };
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['user@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser,
+        accounts,
+        logBus,
+        launcher: () => fakeLauncher
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-1'
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, browser: 'multilogin' }));
+    await service.waitForCompletion();
+
+    expect(stoppedProfiles).toEqual(['profile-attached-fails']);
+    expect(service.getRunningThreads()).toHaveLength(0);
+  });
+
+  it('removes a session only after its profile stop succeeds', async () => {
+    emailSource.available = 1;
+    const defStop = createDeferred<void>();
+    const customBrowser = new StubBrowserRuntime();
+    customBrowser.stopProfile = vi.fn(async () => defStop.promise);
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['user@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser: customBrowser,
+        accounts,
+        logBus
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-1'
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, testDurationMs: 600_000 }));
+    await service.waitUntilRunning();
+
+    const thread = (service as unknown as ServiceOwnershipAccessor).activeThreads.get('acc-1');
+    expect(thread).toBeDefined();
+    const session = thread!.session;
+    expect(session).toBeDefined();
+
+    const stopPromise = (service as unknown as ServiceOwnershipAccessor).stopSession(thread!, session!);
+    await Promise.resolve();
+
+    // Session must still be present on thread while stop is in flight
+    expect(thread!.session).toBe(session);
+
+    defStop.resolve();
+    await stopPromise;
+
+    // Session is cleared after success
+    expect(thread!.session).toBeUndefined();
+
+    await service.stop();
+    await service.waitForCompletion();
+  });
+
+  it('keeps a failed-stop session addressable and does not confirm scheduler cleanup', async () => {
+    emailSource.available = 1;
+    let schedulerConfirmed = 0;
+    let stopCallCount = 0;
+
+    const customBrowser = new StubBrowserRuntime();
+    customBrowser.stopProfile = vi.fn(async () => {
+      stopCallCount++;
+      throw new Error('CDP stop crashed');
+    });
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['user@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser: customBrowser,
+        accounts,
+        logBus
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-1'
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, testDurationMs: 600_000 }));
+    await service.waitUntilRunning();
+
+    const thread = (service as unknown as ServiceOwnershipAccessor).activeThreads.get('acc-1');
+    expect(thread).toBeDefined();
+    const session = thread!.session;
+    expect(session).toBeDefined();
+    session!.scheduler = {
+      confirmProfileStopped: () => { schedulerConfirmed++; },
+      shutdown: () => {}
+    } as unknown as RunUiInteractionScheduler;
+
+    const stopped = await (service as unknown as ServiceOwnershipAccessor).stopSession(thread!, session!);
+    expect(stopped).toBe(false);
+
+    // Remains addressable
+    expect(thread!.session).toBe(session);
+    expect(session!.stopFailed).toBe(true);
+    expect(schedulerConfirmed).toBe(0);
+
+    // No second automated stop call
+    await (service as unknown as ServiceOwnershipAccessor).stopSession(thread!, session!);
+    expect(stopCallCount).toBe(1);
+
+    await service.stop();
+    await service.waitForCompletion();
+  });
+
+  it('defers Stop requested before profile id and stops the late profile exactly once', async () => {
+    const stoppedProfiles: string[] = [];
+    const defStart = createDeferred<void>();
+
+    const fakeLauncher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async (opts) => {
+        await defStart.promise;
+        opts.onProfileStarted?.('late-profile-a');
+        return {
+          page: {} as unknown as LaunchedProfile['page'],
+          context: {} as unknown as LaunchedProfile['context'],
+          port: 9222,
+          profileId: 'late-profile-a'
+        };
+      }),
+      stop: vi.fn(async (id) => {
+        stoppedProfiles.push(id);
+      })
+    };
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['user@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser,
+        accounts,
+        logBus,
+        launcher: () => fakeLauncher
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-1'
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, browser: 'multilogin', testDurationMs: 600_000 }));
+    await Promise.resolve();
+
+    // Stop before profile ID
+    const stopPromise = service.stop();
+
+    // Now profile is published late
+    defStart.resolve();
+    await stopPromise;
+    await service.waitForCompletion();
+
+    expect(stoppedProfiles).toEqual(['late-profile-a']);
+  });
+
+  it('settles pre-id Stop when launch fails without creating a profile', async () => {
+    const stoppedProfiles: string[] = [];
+    const defStart = createDeferred<void>();
+
+    const fakeLauncher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async () => {
+        await defStart.promise;
+        throw new Error('Quick profile API rejected before ID');
+      }),
+      stop: vi.fn(async (id) => {
+        stoppedProfiles.push(id);
+      })
+    };
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['user@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser,
+        accounts,
+        logBus,
+        launcher: () => fakeLauncher
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-1'
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, browser: 'multilogin', testDurationMs: 600_000 }));
+    await Promise.resolve();
+
+    const stopPromise = service.stop();
+    defStart.resolve();
+
+    await stopPromise;
+    await service.waitForCompletion();
+
+    expect(stoppedProfiles).toHaveLength(0);
+  });
+
+  it('fails closed when pre-id launch never settles after Stop', async () => {
+    const fakeLauncher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async () => new Promise<never>(() => {})), // Never settles
+      stop: vi.fn(async () => {})
+    };
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['user@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser,
+        accounts,
+        logBus,
+        launcher: () => fakeLauncher
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-1',
+        sessionLaunchStopGraceMs: 20
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, browser: 'multilogin', testDurationMs: 600_000 }));
+    await Promise.resolve();
+
+    const stopPromise = service.stop();
+    await stopPromise;
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('failed');
+    expect(summary.terminalReason?.code).toBe('RESOURCE_CLEANUP_FAILED');
+  });
+
+  it('fails closed when the exact profile stop never settles', async () => {
+    const fakeLauncher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async (opts) => {
+        opts.onProfileStarted?.('hang-stop-profile');
+        return {
+          page: {} as unknown as LaunchedProfile['page'],
+          context: {} as unknown as LaunchedProfile['context'],
+          port: 9222,
+          profileId: 'hang-stop-profile'
+        };
+      }),
+      stop: vi.fn(async () => new Promise<never>(() => {})) // Never settles
+    };
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['user@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser,
+        accounts,
+        logBus,
+        launcher: () => fakeLauncher
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-1',
+        profileStopTimeoutMs: 20
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, browser: 'multilogin', testDurationMs: 600_000 }));
+    await service.waitUntilRunning();
+
+    await service.stop();
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('failed');
+    expect(summary.terminalReason?.code).toBe('RESOURCE_CLEANUP_FAILED');
+  });
+
+  it('turns failed profile stop into run-terminal scheduler shutdown', async () => {
+    let shutdownReason: { reason: { code?: string } } | undefined;
+    const customBrowser = new StubBrowserRuntime();
+    customBrowser.stopProfile = vi.fn(async () => {
+      throw new Error('teardown broken');
+    });
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['u1@example.com|p1', 'u2@example.com|p2']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser: customBrowser,
+        accounts,
+        logBus
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-1'
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 2, testDurationMs: 600_000 }));
+    await service.waitUntilRunning();
+
+    const thread1 = (service as unknown as ServiceOwnershipAccessor).activeThreads.get('acc-1');
+    expect(thread1).toBeDefined();
+    const session1 = thread1!.session;
+    expect(session1).toBeDefined();
+
+    // Attach mock scheduler
+    session1!.scheduler = {
+      confirmProfileStopped: () => {},
+      shutdown: (reason: unknown) => { shutdownReason = reason as { reason: { code?: string } }; }
+    } as unknown as RunUiInteractionScheduler;
+
+    await (service as unknown as ServiceOwnershipAccessor).stopSession(thread1!, session1!);
+
+    expect(shutdownReason).toBeDefined();
+    expect(shutdownReason!.reason.code).toBe('RESOURCE_CLEANUP_FAILED');
+
+    const summary = await service.waitForCompletion();
+    expect(summary.state).toBe('failed');
+  });
+});
+

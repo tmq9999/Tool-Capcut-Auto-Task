@@ -79,6 +79,7 @@ export interface TaskOutcome {
 }
 
 export type CapcutFatalCode = 'DOM_READ_TIMEOUT';
+export type CapcutAuthAttempt = 'initial' | 'existing-only';
 
 export interface SnapshotTaskSummary {
   key: string;

@@ -82,6 +82,21 @@ function looksExisting(account: AuthAccount): boolean {
   );
 }
 
+export class RecoveryLoginError extends Error {
+  readonly code = 'RECOVERY_LOGIN_FAILED' as const;
+  constructor(message = 'Recovery login failed: cannot enter CapCut and signup fallback is disabled') {
+    super(message);
+    this.name = 'RecoveryLoginError';
+  }
+}
+
+export function isRecoveryLoginError(err: unknown): err is RecoveryLoginError {
+  return (
+    err instanceof RecoveryLoginError ||
+    (err instanceof Error && (err as { code?: string }).code === 'RECOVERY_LOGIN_FAILED')
+  );
+}
+
 export async function ensureInApp(
   page: Page,
   context: BrowserContext,
@@ -120,6 +135,10 @@ export async function ensureInApp(
     log(`Đăng nhập thất bại: ${(e as Error).message}`);
   });
   if (await isLoggedIn(page)) return { mode: 'login', created: false };
+
+  if (opts.allowSignupFallback === false) {
+    throw new RecoveryLoginError(`Recovery login failed for ${account.email} (URL: ${page.url()})`);
+  }
 
   // Không vào được: có thể email chưa từng được tạo trên CapCut.
   log('Đăng nhập không vào được app → thử đăng ký');

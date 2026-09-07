@@ -32,7 +32,7 @@ vi.mock('../signup', () => ({
 
 const { ensureInApp } = await import('../auth');
 
-const page = {} as unknown as Page;
+const page = { url: () => 'https://www.capcut.com/login' } as unknown as Page;
 const context = {} as unknown as BrowserContext;
 const account = { email: 'mail1@gmail.com', password: 'Str0ngPass', source: 'db' as const };
 
@@ -112,5 +112,39 @@ describe('ensureInApp khi profile đã có session', () => {
     expect(signupCapcut).not.toHaveBeenCalled();
     expect(loginCapcut).not.toHaveBeenCalled();
     expect(result).toEqual({ mode: 'already', created: false });
+  });
+});
+
+describe('ensureInApp với allowSignupFallback=false (recovery login)', () => {
+  it('recovery login never calls signup when login does not enter the app', async () => {
+    isLoggedIn.mockResolvedValue(false);
+
+    await expect(
+      ensureInApp(page, context, account, {
+        log,
+        allowSignupFallback: false
+      })
+    ).rejects.toThrow(/recovery/i);
+
+    expect(signupCapcut).not.toHaveBeenCalled();
+    expect(loginCapcut).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovery login never invokes the signup OTP callback', async () => {
+    isLoggedIn.mockResolvedValue(false);
+    const getOtp = vi.fn().mockImplementation(() => {
+      throw new Error('signup OTP called during recovery');
+    });
+
+    await expect(
+      ensureInApp(page, context, account, {
+        log,
+        allowSignupFallback: false,
+        getOtp
+      })
+    ).rejects.toThrow();
+
+    expect(getOtp).not.toHaveBeenCalled();
+    expect(signupCapcut).not.toHaveBeenCalled();
   });
 });

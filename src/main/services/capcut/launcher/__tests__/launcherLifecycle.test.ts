@@ -3,6 +3,8 @@ import type { Browser } from 'playwright-core';
 import { ApiV3Launcher } from '../ApiV3Launcher';
 import { XcliLauncher } from '../XcliLauncher';
 import { attachOverCdp } from '../BrowserLauncher';
+import { checkRendererHealth } from '../../rendererHealth';
+vi.mock('../../rendererHealth', () => ({ checkRendererHealth: vi.fn(async () => ({})) }));
 
 const child = vi.hoisted(() => ({ execute: vi.fn() }));
 vi.mock('../BrowserLauncher', async (original) => ({
@@ -38,7 +40,58 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 
+import { RunUiInteractionScheduler } from '../../uiInteractionScheduler';
+
 describe('launcher stop ownership', () => {
+  it('runs the renderer health gate for headed API-v3 and xcli sessions', async () => {
+    cdpFixture();
+    vi.mocked(checkRendererHealth).mockClear();
+    const apiLauncher = new ApiV3Launcher({ getAccessToken: async () => 'test-token' }, apiFixture());
+    await apiLauncher.launch({ headless: false });
+    expect(checkRendererHealth).toHaveBeenCalledTimes(1);
+
+    vi.mocked(checkRendererHealth).mockClear();
+    cdpFixture();
+    const xcliLauncher = new XcliLauncher({ bootWaitMs: 0 });
+    await xcliLauncher.launch({ headless: false });
+    expect(checkRendererHealth).toHaveBeenCalledTimes(1);
+  });
+
+  it('quarantines and tears down an owned headed profile when mouse move never settles', async () => {
+    const api = apiFixture();
+    cdpFixture();
+    const scheduler = new RunUiInteractionScheduler();
+    const controller = new AbortController();
+    const ui = scheduler.forSession({ sessionAlias: 'session-1', signal: controller.signal });
+    const { DomReadTimeoutError } = await import('../../cancellation');
+    vi.mocked(checkRendererHealth).mockImplementationOnce(async () => {
+      return ui.foreground('renderer-health:mouse', async () => {
+        throw new DomReadTimeoutError('renderer-mouse');
+      });
+    });
+    const launcher = new ApiV3Launcher({ getAccessToken: async () => 'test-token' }, api);
+    const owned: string[] = [];
+    const launchPromise = launcher.launch({
+      headless: false,
+      ui,
+      onProfileStarted: (id) => owned.push(id)
+    });
+    await expect(launchPromise).rejects.toMatchObject({ code: 'DOM_READ_TIMEOUT' });
+    expect(scheduler.snapshot().quarantinedAlias).toBe('session-1');
+    expect(owned).toEqual([profileId]);
+    await launcher.stop(owned[0]);
+    expect(api.stopProfile).toHaveBeenCalledTimes(1);
+  });
+  it('keeps the attached handle available to the owner when a headless probe fails', async () => {
+    const api = apiFixture(); const browser = cdpFixture();
+    vi.mocked(checkRendererHealth).mockRejectedValueOnce(new Error('Probe failed'));
+    const launcher = new ApiV3Launcher({ getAccessToken: async () => 'test-token' }, api);
+    await expect(launcher.launch({ headless: true, onProfileStarted: () => {} })).rejects.toThrow('Probe failed');
+    expect(api.stopProfile).not.toHaveBeenCalled();
+    await launcher.stop(profileId);
+    expect(api.stopProfile).toHaveBeenCalledWith('test-token', profileId, 10000);
+    expect(browser.close).toHaveBeenCalledTimes(1);
+  });
   it('does not disconnect CDP before the vendor stop request settles', async () => {
     const api = apiFixture();
     const browser = cdpFixture();
@@ -125,6 +178,7 @@ describe('launcher stop ownership', () => {
     cdpFixture();
     const launcher = new XcliLauncher({ bootWaitMs: 0 });
     await launcher.launch({ signal: new AbortController().signal });
+    expect(attachOverCdp).toHaveBeenCalledWith(45678, expect.objectContaining({ headless: false }));
     await launcher.stop(profileId);
   });
 

@@ -30,6 +30,7 @@ import type { Browser } from 'playwright-core';
 import { ProviderError } from '../../../providers/ProviderError';
 import { MULTILOGIN_SERVICE_NAME } from '../../../providers/MultiloginProvider';
 import { seedPreferences } from '../prefs';
+import { checkRendererHealth } from '../rendererHealth';
 import {
   attachOverCdp,
   connectOverCdpWithRetry,
@@ -232,6 +233,7 @@ export class XcliLauncher implements BrowserLauncher {
         ui: opts.ui
       });
       this.attached.set(profileId, attachment.browser);
+      await checkRendererHealth(attachment.page, { signal: opts.signal, log: this.log, ui: opts.ui });
 
       this.log(`   ✅ Session sẵn sàng — port ${port}, profile ${profileId}`);
       return { page: attachment.page, context: attachment.context, port, profileId };

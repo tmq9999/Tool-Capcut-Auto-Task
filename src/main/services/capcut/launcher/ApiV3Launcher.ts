@@ -212,9 +212,7 @@ export class ApiV3Launcher implements BrowserLauncher {
         ui: opts.ui
       });
       this.attached.set(profileId, attachment.browser);
-      if (opts.headless) {
-        await checkRendererHealth(attachment.page, { signal: opts.signal, log: this.log, ui: opts.ui });
-      }
+      await checkRendererHealth(attachment.page, { signal: opts.signal, log: this.log, ui: opts.ui });
 
       this.log(`   ✅ Session sẵn sàng — port ${port}, profile ${profileId}`);
       return { page: attachment.page, context: attachment.context, port, profileId };
