@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   AutomationRunConfigSchema,
   AutomationRunProgressSchema,
-  DEFAULT_TEST_RUN_DURATION_MS
+  DEFAULT_TEST_RUN_DURATION_MS,
+  RunningThreadInfoSchema
 } from '../automation.schema';
 import { SanitizedDiagnosticResultSchema } from '../diagnostics.schema';
 import { AccountStatusEnum } from '../account.schema';
@@ -24,6 +25,20 @@ const baseConfig = {
 };
 
 describe('automation.schema', () => {
+  it('defaults mission transport to the existing UI policy', () => {
+    expect(AutomationRunConfigSchema.parse(baseConfig).missionTransport).toBeUndefined();
+    expect(AutomationRunConfigSchema.parse({ ...baseConfig, missionTransport: 'http-only' }).missionTransport).toBe('http-only');
+    expect(AutomationRunConfigSchema.safeParse({ ...baseConfig, missionTransport: 'hybrid' }).success).toBe(false);
+  });
+  it('accepts old configs and validates explicit mailbox caps', () => {
+    expect(AutomationRunConfigSchema.safeParse(baseConfig).success).toBe(true);
+    for (const mailLimit of [0, 1, 3, 200]) {
+      expect(AutomationRunConfigSchema.parse({ ...baseConfig, mailLimit }).mailLimit).toBe(mailLimit);
+    }
+    for (const mailLimit of [-1, 201, 1.5, '3', null]) {
+      expect(AutomationRunConfigSchema.safeParse({ ...baseConfig, mailLimit }).success).toBe(false);
+    }
+  });
   it('defaults the connectivity test duration to 10 seconds', () => {
     const parsed = AutomationRunConfigSchema.parse(baseConfig);
     expect(parsed.testDurationMs).toBe(DEFAULT_TEST_RUN_DURATION_MS);
@@ -139,6 +154,22 @@ describe('automation.schema', () => {
   it('accepts stopped as an account status', () => {
     expect(AccountStatusEnum.parse('stopped')).toBe('stopped');
   });
+
+  it('accepts both legacy UI threads and profile-free HTTP-only threads', () => {
+    expect(RunningThreadInfoSchema.parse({
+      accountId: 'ui-1', email: 'ui@x.com', profileId: 'profile-1'
+    })).toEqual({ accountId: 'ui-1', email: 'ui@x.com', profileId: 'profile-1' });
+    expect(RunningThreadInfoSchema.parse({
+      accountId: 'http-1', email: 'http@x.com', transport: 'http-only'
+    })).toEqual({ accountId: 'http-1', email: 'http@x.com', transport: 'http-only' });
+  });
+
+  it('accepts TASK_CHECKPOINT_PERSISTENCE_FAILED and RESOURCE_CLEANUP_FAILED in terminal reasons', async () => {
+    const { AutomationTerminalCodeEnum } = await import('../automation.schema');
+    expect(AutomationTerminalCodeEnum.parse('TASK_CHECKPOINT_PERSISTENCE_FAILED')).toBe('TASK_CHECKPOINT_PERSISTENCE_FAILED');
+    expect(AutomationTerminalCodeEnum.parse('RESOURCE_CLEANUP_FAILED')).toBe('RESOURCE_CLEANUP_FAILED');
+    expect(AutomationTerminalCodeEnum.safeParse('UNKNOWN_CODE').success).toBe(false);
+  });
 });
 
 describe('chọn riêng proxy key để chạy', () => {
@@ -190,3 +221,93 @@ describe('chọn riêng proxy key để chạy', () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe('AutomationEvidenceEventSchema', () => {
+  it('validates strictly formatted evidence events and rejects unknown fields', async () => {
+    const { AutomationEvidenceEventSchema } = await import('../automation-evidence.schema');
+
+    const validRunStart = {
+      schemaVersion: 1,
+      runId: 'run-12345678-abcd-1234-abcd-123456789abc',
+      at: '2026-09-08T00:00:00.000Z',
+      type: 'run-start',
+      mode: 'new',
+      headed: true,
+      stage: 1,
+      workerTarget: 3,
+      maxBillablePurchases: 5
+    };
+
+    expect(AutomationEvidenceEventSchema.safeParse(validRunStart).success).toBe(true);
+
+    // Reject unknown fields
+    expect(
+      AutomationEvidenceEventSchema.safeParse({
+        ...validRunStart,
+        extraSecret: 'forbidden'
+      }).success
+    ).toBe(false);
+  });
+
+  it('rejects duplicate task keys in task-checkpoint', async () => {
+    const { AutomationEvidenceEventSchema } = await import('../automation-evidence.schema');
+
+    const checkpoint = {
+      schemaVersion: 1,
+      runId: 'run-12345678-abcd-1234-abcd-123456789abc',
+      at: '2026-09-08T00:00:00.000Z',
+      type: 'task-checkpoint',
+      fresh: true,
+      final: false,
+      observedAt: '2026-09-08T00:00:00.000Z',
+      requiredAfter: '2026-09-08T00:00:00.000Z',
+      serverTotal: 2,
+      serverDone: 1,
+      tasks: [
+        { key: 'dup-key', status: 1 },
+        { key: 'dup-key', status: 4, errNo: 0 }
+      ]
+    };
+
+    expect(AutomationEvidenceEventSchema.safeParse(checkpoint).success).toBe(false);
+  });
+
+  it('enforces monotonic purchase counters where confirmed + ambiguous <= attempted <= budget', async () => {
+    const { AutomationEvidenceEventSchema } = await import('../automation-evidence.schema');
+
+    const validPurchase = {
+      schemaVersion: 1,
+      runId: 'run-12345678-abcd-1234-abcd-123456789abc',
+      at: '2026-09-08T00:00:00.000Z',
+      type: 'purchase',
+      provider: 'gmail94',
+      outcome: 'confirmed',
+      attempted: 2,
+      confirmed: 1,
+      ambiguous: 1,
+      budget: 5
+    };
+
+    expect(AutomationEvidenceEventSchema.safeParse(validPurchase).success).toBe(true);
+
+    // confirmed + ambiguous (3) > attempted (2) -> invalid
+    expect(
+      AutomationEvidenceEventSchema.safeParse({
+        ...validPurchase,
+        attempted: 2,
+        confirmed: 2,
+        ambiguous: 1
+      }).success
+    ).toBe(false);
+
+    // attempted (6) > budget (5) -> invalid
+    expect(
+      AutomationEvidenceEventSchema.safeParse({
+        ...validPurchase,
+        attempted: 6,
+        budget: 5
+      }).success
+    ).toBe(false);
+  });
+});
+

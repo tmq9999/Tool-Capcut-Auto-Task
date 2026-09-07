@@ -18,7 +18,10 @@ export const SanitizedDiagnosticResultSchema = z.object({
     'RATE_LIMITED',
     'CONFIG_ERROR',
     'PROVIDER_NOT_IMPLEMENTED',
-    'INSUFFICIENT_FUNDS'
+    'INSUFFICIENT_FUNDS',
+    'PURCHASE_OUTCOME_UNKNOWN',
+    'RESOURCE_CLEANUP_FAILED',
+    'TASK_CHECKPOINT_PERSISTENCE_FAILED'
   ]),
   message: z.string().min(1),
   timestamp: z.string().datetime(),

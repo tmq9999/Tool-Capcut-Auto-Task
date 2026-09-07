@@ -8,8 +8,11 @@ import type { BrowserLauncher, LauncherProxy } from './capcut/launcher';
 import { abortableDelay } from './capcut/cancellation';
 import {
   RunUiInteractionScheduler,
-  createDirectUiInteraction
+  createDirectUiInteraction,
+  mapUiSchedulerEventToEvidence
 } from './capcut/uiInteractionScheduler';
+import { createRunTelemetry, type RunTelemetry } from './capcut/runTelemetry';
+import type { AutomationEvidenceTerminalEvent } from '../../shared/schemas/automation-evidence.schema';
 import type {
   AccountUiInteraction,
   CapcutAuthAttempt,
@@ -238,6 +241,8 @@ export interface AutomationRunDeps {
   nextId?: () => string;
   sessionLaunchStopGraceMs?: number;
   profileStopTimeoutMs?: number;
+  userDataDir?: string;
+  createTelemetry?: (runId: string) => RunTelemetry;
 }
 
 type ThreadOutcome =
@@ -420,6 +425,7 @@ export class AutomationRunService {
   private readonly sessionLaunchStopGraceMs: number;
   private readonly profileStopTimeoutMs: number;
   private uiScheduler: RunUiInteractionScheduler | null = null;
+  private telemetry: RunTelemetry | null = null;
   private readonly listeners = new Set<(progress: AutomationRunProgressDTO) => void>();
 
   private progress: AutomationRunProgressDTO = {
@@ -451,12 +457,16 @@ export class AutomationRunService {
 
   constructor(
     private readonly deps: AutomationRunCollaborators,
-    runtime: AutomationRunDeps = {}
+    private readonly runtime: AutomationRunDeps = {}
   ) {
     this.sleep = runtime.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.nextId = runtime.nextId ?? (() => crypto.randomUUID());
     this.sessionLaunchStopGraceMs = runtime.sessionLaunchStopGraceMs ?? SESSION_LAUNCH_STOP_GRACE_MS;
     this.profileStopTimeoutMs = runtime.profileStopTimeoutMs ?? PROFILE_STOP_TIMEOUT_MS;
+  }
+
+  getTelemetry(): RunTelemetry | null {
+    return this.telemetry;
   }
 
   subscribe(listener: (progress: AutomationRunProgressDTO) => void): () => void {
@@ -698,6 +708,19 @@ export class AutomationRunService {
     if (stopSuccess) {
       session.stopFailed = false;
       session.scheduler?.confirmProfileStopped(session.alias);
+      try {
+        this.telemetry?.record({
+          schemaVersion: 1,
+          runId: thread.runId,
+          workerAlias: thread.workerAlias,
+          sessionAlias: session.alias,
+          at: new Date().toISOString(),
+          type: 'profile-stop',
+          outcome: 'confirmed'
+        });
+      } catch {
+        // Telemetry error ignored
+      }
       if (thread.session === session) {
         thread.session = undefined;
       }
@@ -718,6 +741,20 @@ export class AutomationRunService {
   ): boolean {
     session.stopFailed = true;
     this.noteCleanupFailure(thread, 'browser-profile');
+    try {
+      this.telemetry?.record({
+        schemaVersion: 1,
+        runId: thread.runId,
+        workerAlias: thread.workerAlias,
+        sessionAlias: session.alias,
+        at: new Date().toISOString(),
+        type: 'profile-stop',
+        outcome: 'failed',
+        code: 'RESOURCE_CLEANUP_FAILED'
+      });
+    } catch {
+      // Telemetry error ignored
+    }
 
     const terminalError = new AutomationTerminalError(
       'failed',
@@ -1115,6 +1152,31 @@ export class AutomationRunService {
           );
           return;
         }
+
+        const uniqueTasks = new Map<string, { key: string; status: number }>();
+        for (const r of checkpoint.rows) {
+          uniqueTasks.set(r.key, { key: r.key, status: r.status });
+        }
+        try {
+          this.telemetry?.record({
+            schemaVersion: 1,
+            runId: thread.runId,
+            workerAlias: thread.workerAlias,
+            sessionAlias: session.alias,
+            at: new Date().toISOString(),
+            type: 'task-checkpoint',
+            fresh: checkpoint.receipt.fresh,
+            final: checkpoint.receipt.final,
+            observedAt: checkpoint.receipt.observedAt,
+            requiredAfter: checkpoint.receipt.requiredAfter,
+            serverTotal: checkpoint.receipt.serverTotal,
+            serverDone: checkpoint.receipt.serverDone,
+            tasks: Array.from(uniqueTasks.values())
+          });
+        } catch {
+          // Telemetry error ignored
+        }
+
         if (this.deps.taskProgress) {
           await this.deps.taskProgress.record(thread.accountId, checkpoint);
         }
@@ -1296,6 +1358,19 @@ export class AutomationRunService {
             error instanceof AutomationTerminalError &&
             error.reason.code === 'TASK_CHECKPOINT_PERSISTENCE_FAILED'
           ) {
+            try {
+              this.telemetry?.record({
+                schemaVersion: 1,
+                runId: thread.runId,
+                workerAlias: thread.workerAlias,
+                sessionAlias: currentSession.alias,
+                at: new Date().toISOString(),
+                type: 'persistence-failure',
+                code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED'
+              });
+            } catch {
+              // Telemetry error ignored
+            }
             const stopped = await this.stopSession(thread, currentSession);
             if (stopped) {
               this.acceptTerminalError(error);
@@ -1574,10 +1649,35 @@ export class AutomationRunService {
   ): Promise<AutomationRunSummary> {
     const missionTransport = config.missionTransport ?? 'ui';
     this.uiScheduler = missionTransport !== 'http-only' && !config.headless
-      ? new RunUiInteractionScheduler({ editorLaneLimit: 1 })
+      ? new RunUiInteractionScheduler({
+          editorLaneLimit: 1,
+          onEvent: (event) => {
+            try {
+              this.telemetry?.record(mapUiSchedulerEventToEvidence(this.progress.runId, event));
+            } catch {
+              // Telemetry error ignored
+            }
+          }
+        })
       : null;
 
     try {
+      try {
+        this.telemetry?.record({
+          schemaVersion: 1,
+          runId: this.progress.runId,
+          at: new Date().toISOString(),
+          type: 'run-start',
+          mode: 'new',
+          headed: true,
+          stage: 1,
+          workerTarget: readiness.workerTarget,
+          maxBillablePurchases: config.mailLimit ?? 0
+        });
+      } catch {
+        // Telemetry record error ignored
+      }
+
       const workerTarget = readiness.workerTarget;
       const initialWave = source.kind === 'continuous' ? new InitialWaveBarrier(workerTarget) : null;
       const acquisitionSignal = this.acquisitionAbort!.signal;
@@ -1668,6 +1768,44 @@ export class AutomationRunService {
       return { ...this.progress, startedProfiles: [...this.startedProfiles] };
     } finally {
       this.uiScheduler = null;
+      if (this.telemetry) {
+        const finalState: 'completed' | 'failed' | 'stopped' | 'blocked' =
+          this.progress.state === 'completed' || this.progress.state === 'failed' ||
+          this.progress.state === 'stopped' || this.progress.state === 'blocked'
+            ? this.progress.state
+            : (this.terminalState ?? 'failed');
+
+        const terminalCode: AutomationTerminalCode =
+          this.terminalIntent?.code ?? (
+            this.cleanupFailures > 0
+              ? 'RESOURCE_CLEANUP_FAILED'
+              : finalState === 'stopped'
+                ? 'USER_STOP'
+                : finalState === 'completed'
+                  ? 'MAIL_LIMIT_REACHED'
+                  : 'INTERNAL_ERROR'
+          );
+
+        const terminalEvent: AutomationEvidenceTerminalEvent = {
+          schemaVersion: 1,
+          runId: this.progress.runId,
+          at: new Date().toISOString(),
+          type: 'terminal',
+          state: finalState,
+          code: terminalCode,
+          accepted: this.progress.accountsAccepted,
+          completed: this.progress.accountsCompleted,
+          failed: this.progress.accountsFailed,
+          stopped: this.progress.accountsStopped,
+          skipped: 0,
+          cleanupFailures: this.cleanupFailures,
+          purchaseAttempted: 0,
+          purchaseConfirmed: 0,
+          purchaseAmbiguous: 0
+        };
+
+        await this.telemetry.close(terminalEvent).catch(() => {});
+      }
     }
   }
 
@@ -1713,6 +1851,11 @@ export class AutomationRunService {
     }
     this.uiScheduler = null;
     const runId = this.nextId();
+    this.telemetry = this.runtime.createTelemetry?.(runId) ?? (
+      this.runtime.userDataDir
+        ? createRunTelemetry({ userDataDir: this.runtime.userDataDir, runId })
+        : null
+    );
     this.runAbort = new AbortController();
     this.acquisitionAbort = new AbortController();
     this.terminalIntent = null;
@@ -1729,6 +1872,25 @@ export class AutomationRunService {
         if (!runSignal.aborted) throw error;
         this.publish('stopped', 'Đã dừng trước khi khởi chạy.', { terminalReason: this.terminalIntent ?? { code: 'USER_STOP' } });
         this.lastSummary = { ...this.progress, startedProfiles: [...this.startedProfiles] };
+        if (this.telemetry) {
+          await this.telemetry.close({
+            schemaVersion: 1,
+            runId,
+            at: new Date().toISOString(),
+            type: 'terminal',
+            state: 'stopped',
+            code: 'USER_STOP',
+            accepted: 0,
+            completed: 0,
+            failed: 0,
+            stopped: 0,
+            skipped: 0,
+            cleanupFailures: 0,
+            purchaseAttempted: 0,
+            purchaseConfirmed: 0,
+            purchaseAmbiguous: 0
+          }).catch(() => {});
+        }
         return { runId };
       } finally {
         this.starting = null;
