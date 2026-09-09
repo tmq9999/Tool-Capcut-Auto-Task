@@ -109,6 +109,32 @@ describe('migration 004 — bảng tiến độ nhiệm vụ', () => {
 });
 
 describe('AccountTaskRepository.upsertMany', () => {
+  it('persists an unsettled proof omitted from the receipt without inventing a status row', () => {
+    const repo = new AccountTaskRepository(db);
+    repo.recordCheckpoint('proof-account', {
+      rows: [{ key: 'visible-task', title: 'Visible', reward: 1, status: 1 }],
+      unsettledProofs: [{ key: 'omitted-task', proof: { actionKey: 'omitted-task', opId: 'offline-op', errNo: 0, at: 100 } }],
+      receipt: { runId: 'run-proof', sessionAlias: 'worker-1-session-1', observedAt: '2026-09-08T01:00:00.000Z',
+        requiredAfter: '2026-09-08T00:59:00.000Z', serverTotal: 1, serverDone: 0, isFresh: true, isFinal: false }
+    });
+    expect(repo.listByAccount('proof-account').map((row) => row.taskKey)).toEqual(['visible-task']);
+    expect(repo.getLatestReceipt('proof-account')?.items.map((item) => item.taskKey)).toEqual(['visible-task']);
+    expect(repo.listUnsettledProofs('proof-account', 'run-proof')).toEqual([
+      { key: 'omitted-task', opId: 'offline-op', provedAt: new Date(100).toISOString() }
+    ]);
+    expect(repo.listUnsettledProofs('proof-account', 'run-other')).toEqual([]);
+    expect(() => repo.recordCheckpoint('proof-account', {
+      rows: [{ key: 'changed-task', title: 'Changed', reward: 2, status: 4 }],
+      unsettledProofs: [{ key: 'wrong-key', proof: { actionKey: 'different', opId: 'bad', errNo: 0, at: 200 } }],
+      receipt: { runId: 'run-bad', sessionAlias: 'worker-1-session-2', observedAt: '2026-09-08T02:00:00.000Z',
+        requiredAfter: '2026-09-08T01:59:00.000Z', serverTotal: 1, serverDone: 1, isFresh: true, isFinal: false }
+    })).toThrow('INVALID_UNSETTLED_PROOF');
+    expect(repo.getLatestReceipt('proof-account')?.receipt.runId).toBe('run-proof');
+    expect(repo.listByAccount('proof-account').map((row) => row.taskKey)).toEqual(['visible-task']);
+    expect(repo.listUnsettledProofs('proof-account', 'run-proof')).toHaveLength(1);
+    repo.deleteByAccount('proof-account');
+    expect(repo.listUnsettledProofs('proof-account', 'run-proof')).toEqual([]);
+  });
   it('ghi cả lượt chạy và giữ đúng status của CapCut, không phải cờ nội bộ', () => {
     const repo = new AccountTaskRepository(db);
     repo.upsertMany('acc-1', [
@@ -217,5 +243,167 @@ describe('AccountTaskRepository đọc và dọn', () => {
     expect(repo.deleteByAccount('acc-1')).toBe(2);
     expect(repo.listByAccount('acc-1')).toEqual([]);
     expect(repo.listByAccount('acc-2')).toHaveLength(1);
+  });
+});
+
+describe('AccountTaskRepository.recordCheckpoint', () => {
+  it('records task rows and their exact receipt set in one transaction', () => {
+    const repo = new AccountTaskRepository(db);
+    repo.recordCheckpoint('acc-1', {
+      rows: [
+        { key: 'A', title: 'Task A', reward: 10, status: 4 },
+        { key: 'B', title: 'Task B', reward: 20, status: 1 }
+      ],
+      receipt: {
+        runId: 'run-1',
+        sessionAlias: 'session-1',
+        observedAt: '2026-09-08T01:00:00.000Z',
+        requiredAfter: '2026-09-08T00:59:00.000Z',
+        serverTotal: 2,
+        serverDone: 1,
+        isFresh: true,
+        isFinal: false
+      }
+    });
+
+    const rows = repo.listByAccount('acc-1');
+    expect(rows.map((r) => r.taskKey)).toEqual(['A', 'B']);
+
+    const receiptData = repo.getLatestReceipt('acc-1');
+    expect(receiptData).not.toBeNull();
+    expect(receiptData?.receipt.runId).toBe('run-1');
+    expect(receiptData?.receipt.serverTotal).toBe(2);
+    expect(receiptData?.receipt.serverDone).toBe(1);
+    expect(receiptData?.receipt.isFresh).toBe(true);
+    expect(receiptData?.receipt.isFinal).toBe(false);
+    expect(receiptData?.items.map((i) => ({ key: i.taskKey, status: i.status }))).toEqual([
+      { key: 'A', status: 4 },
+      { key: 'B', status: 1 }
+    ]);
+  });
+
+  it('transactionally replaces the prior receipt item set', () => {
+    const repo = new AccountTaskRepository(db);
+    repo.recordCheckpoint('acc-1', {
+      rows: [
+        { key: 'A', title: 'Task A', reward: 10, status: 4 },
+        { key: 'B', title: 'Task B', reward: 20, status: 1 }
+      ],
+      receipt: {
+        runId: 'run-1',
+        sessionAlias: 'session-1',
+        observedAt: '2026-09-08T01:00:00.000Z',
+        requiredAfter: '2026-09-08T00:59:00.000Z',
+        serverTotal: 2,
+        serverDone: 1,
+        isFresh: true,
+        isFinal: false
+      }
+    });
+
+    repo.recordCheckpoint('acc-1', {
+      rows: [
+        { key: 'A', title: 'Task A', reward: 10, status: 4 },
+        { key: 'C', title: 'Task C', reward: 30, status: 2 }
+      ],
+      receipt: {
+        runId: 'run-2',
+        sessionAlias: 'session-2',
+        observedAt: '2026-09-08T01:05:00.000Z',
+        requiredAfter: '2026-09-08T01:04:00.000Z',
+        serverTotal: 2,
+        serverDone: 1,
+        isFresh: true,
+        isFinal: false
+      }
+    });
+
+    const receiptData = repo.getLatestReceipt('acc-1');
+    expect(receiptData?.items.map((i) => ({ key: i.taskKey, status: i.status }))).toEqual([
+      { key: 'A', status: 4 },
+      { key: 'C', status: 2 }
+    ]);
+
+    const allRows = repo.listByAccount('acc-1');
+    expect(allRows.map((r) => r.taskKey)).toContain('B');
+  });
+
+  it('keeps prior opId and provedAt when a later snapshot has no new proof', () => {
+    const repo = new AccountTaskRepository(db);
+    repo.recordCheckpoint('acc-1', {
+      rows: [
+        {
+          key: 'A',
+          title: 'Task A',
+          reward: 10,
+          status: 1,
+          opId: 'op-a',
+          provedAt: '2026-09-08T01:00:00.000Z'
+        }
+      ],
+      receipt: {
+        runId: 'run-1',
+        sessionAlias: 'session-1',
+        observedAt: '2026-09-08T01:00:00.000Z',
+        requiredAfter: '2026-09-08T00:59:00.000Z',
+        serverTotal: 1,
+        serverDone: 0,
+        isFresh: true,
+        isFinal: false
+      }
+    });
+
+    repo.recordCheckpoint('acc-1', {
+      rows: [
+        {
+          key: 'A',
+          title: 'Task A',
+          reward: 10,
+          status: 4
+        }
+      ],
+      receipt: {
+        runId: 'run-2',
+        sessionAlias: 'session-1',
+        observedAt: '2026-09-08T01:02:00.000Z',
+        requiredAfter: '2026-09-08T01:01:00.000Z',
+        serverTotal: 1,
+        serverDone: 1,
+        isFresh: true,
+        isFinal: true
+      }
+    });
+
+    const rows = repo.listByAccount('acc-1');
+    expect(rows[0].status).toBe(4);
+    expect(rows[0].opId).toBe('op-a');
+    expect(rows[0].provedAt).toBe('2026-09-08T01:00:00.000Z');
+  });
+
+  it('rolls back rows receipt and receipt items when any write fails', () => {
+    const repo = new AccountTaskRepository(db);
+    expect(() =>
+      repo.recordCheckpoint('acc-1', {
+        rows: [
+          { key: 'A', title: 'Task A', reward: 10, status: 4 },
+          { key: 'B', title: null as unknown as string, reward: 20, status: 1 }
+        ],
+        receipt: {
+          runId: 'run-1',
+          sessionAlias: 'session-1',
+          observedAt: '2026-09-08T01:00:00.000Z',
+          requiredAfter: '2026-09-08T00:59:00.000Z',
+          serverTotal: 2,
+          serverDone: 1,
+          isFresh: true,
+          isFinal: false
+        }
+      })
+    ).toThrow();
+
+    expect(repo.listByAccount('acc-1')).toHaveLength(0);
+    expect(repo.getLatestReceipt('acc-1')).toBeNull();
+    const itemCount = db.prepare('SELECT COUNT(*) as count FROM account_task_receipt_items').get() as { count: number };
+    expect(itemCount.count).toBe(0);
   });
 });

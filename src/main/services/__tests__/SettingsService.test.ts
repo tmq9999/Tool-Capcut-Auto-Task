@@ -112,6 +112,7 @@ describe('SettingsService & ServiceConnectionManager Suite (Task 2.1.1 RED)', ()
       retention: '30',
     },
     automation: {
+      maxBillablePurchases: 0,
       threadCount: 10,
       browser: 'multilogin',
       headless: false,
@@ -231,6 +232,7 @@ describe('SettingsService & ServiceConnectionManager Suite (Task 2.1.1 RED)', ()
           patchright: { headless: false },
         },
         automation: {
+          maxBillablePurchases: 0,
           threadCount: 10,
           browser: 'multilogin',
           headless: false,
@@ -295,6 +297,7 @@ describe('SettingsService & ServiceConnectionManager Suite (Task 2.1.1 RED)', ()
           patchright: { headless: false },
         },
         automation: {
+          maxBillablePurchases: 0,
           threadCount: 10,
           browser: 'multilogin',
           headless: false,

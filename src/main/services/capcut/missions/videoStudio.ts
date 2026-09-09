@@ -52,7 +52,7 @@ async function openStudio(env: CapcutMissionEnv): Promise<Page> {
     await sp.goto(URLS.videoStudio, { waitUntil: 'domcontentloaded', timeout: 60000 });
   }
   await foregroundPage(sp, { signal: env.signal, stage: 'creator:studio-focus', ui: env.ui }, async () => {
-    await sp.bringToFront();
+    // foregroundPage focuses after admission.
   });
   await sp.waitForTimeout(rand(7000, 10000));
   return sp;
@@ -479,8 +479,6 @@ export const videoStudioGroup: MissionGroup = {
     if (downloaded) env.log(`Đã tải file: ${downloaded}`);
     await sp.waitForTimeout(rand(2000, 3000));
 
-    await foregroundPage(env.page, { signal: env.signal, stage: 'creator:restore-focus', ui: env.ui }, async () => {
-      await env.page.bringToFront().catch(() => {});
-    }).catch(() => {});
+    await foregroundPage(env.page, { signal: env.signal, stage: 'creator:restore-focus', ui: env.ui }, async () => {});
   },
 };

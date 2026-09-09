@@ -9,6 +9,7 @@ import {
   createAutomationWorkSourceFactory,
   type AutomationWorkItem
 } from '../AutomationWorkSource';
+import type { ObservationIdentity, ObservationScope } from '../../providers/ObservedHttpClient';
 
 const CONFIG = AutomationRunConfigSchema.parse({
   threadCount: 2,
@@ -34,15 +35,21 @@ const CONFIG = AutomationRunConfigSchema.parse({
 
 class FakeAcquisitionSession implements EmailAcquisitionSession {
   public acquireCalls: string[] = [];
+  public identities: unknown[] = [];
+  public bound: Array<{ reservationId: string; accountId: string }> = [];
   public committed: Array<{ reservationId: string; accountId: string }> = [];
   public released: string[] = [];
   private counter = 0;
 
+  purchaseStats() { return { budget: 20, attempted: 0, confirmed: 0, ambiguous: 0 }; }
+
   async acquireOne(
     workerId: string,
-    _signal: AbortSignal
+    _signal: AbortSignal,
+    identity?: unknown
   ): Promise<ReservedEmail> {
     this.acquireCalls.push(workerId);
+    this.identities.push(identity);
     this.counter += 1;
     return {
       reservationId: 'reservation-' + this.counter,
@@ -58,6 +65,10 @@ class FakeAcquisitionSession implements EmailAcquisitionSession {
         consumedAt: null
       }
     };
+  }
+
+  bindAccount(reservation: ReservedEmail, accountId: string): void {
+    this.bound.push({ reservationId: reservation.reservationId, accountId });
   }
 
   commit(reservation: ReservedEmail, accountId: string): void {
@@ -97,13 +108,46 @@ beforeEach(() => {
 });
 
 describe('AutomationWorkSource', () => {
+  it('binds acquisition to the real run and worker while account ownership is unassigned', async () => {
+    const identities: Readonly<ObservationIdentity>[] = [];
+    const observation: ObservationScope = {
+      withObservationScope: async (identity, operation) => {
+        identities.push(identity);
+        return operation();
+      }
+    };
+    const source = createAutomationWorkSourceFactory(
+      fakeEmailService,
+      undefined,
+      observation
+    ).create({
+      ...CONFIG,
+      threadCount: 1,
+      maxBillablePurchases: 1,
+      emailSource: { mode: 'api', provider: 'gmail94', service: 'capcut' }
+    }, 'run-owned');
+    const signal = new AbortController().signal;
+
+    await source.prepare(1, signal);
+    await source.next('worker-1', signal);
+
+    expect(identities).toEqual([{
+      runId: 'run-owned',
+      workerAlias: 'worker-1',
+      acquisitionAlias: 'run-owned:worker-1:1',
+      accountAlias: 'unassigned',
+      sessionAlias: 'unassigned',
+      authorityRef: 'email:gmail94'
+    }]);
+  });
+
   it('does not refill a failed billable acquisition slot', async () => {
     fakeSession.acquireOne = async (id) => {
       fakeSession.acquireCalls.push(id);
       throw new Error('ambiguous purchase');
     };
     const source = createAutomationWorkSourceFactory(fakeEmailService).create({
-      ...CONFIG, mailLimit: 1, emailSource: { mode: 'api', provider: 'gmail94' }
+      ...CONFIG, mailLimit: 1, maxBillablePurchases: 20, emailSource: { mode: 'api', provider: 'gmail94' }
     }, 'failed-slot');
     const signal = new AbortController().signal;
     await source.prepare(1, signal);
@@ -153,7 +197,7 @@ describe('AutomationWorkSource', () => {
     const source = createAutomationWorkSourceFactory(fakeEmailService).create({
       ...CONFIG,
       threadCount: 1,
-      emailSource: { mode: 'api', provider: 'gmail94', service: 'capcut' }
+      maxBillablePurchases: 20, emailSource: { mode: 'api', provider: 'gmail94', service: 'capcut' }
     }, 'run-2');
     const signal = new AbortController().signal;
 
@@ -169,12 +213,31 @@ describe('AutomationWorkSource', () => {
     expect(fakeSession.committed).toEqual([{ reservationId: 'reservation-1', accountId: 'account-1' }]);
   });
 
+  it('carries one caller-allocated owner through reservation and account binding', async () => {
+    const source = createAutomationWorkSourceFactory(fakeEmailService).create({
+      ...CONFIG, threadCount: 1, maxBillablePurchases: 1,
+      emailSource: { mode: 'api', provider: 'gmail94', service: 'capcut' }
+    }, 'run-stable');
+    const signal = new AbortController().signal;
+    await source.prepare(1, signal);
+
+    const item = await source.next('worker-1', signal, {
+      ownerRef: 'stable-owner', runId: 'run-stable', stepAttemptId: 'stable-attempt'
+    });
+    source.bind?.(item!, 'account-1');
+
+    expect(fakeSession.identities).toEqual([{
+      ownerRef: 'stable-owner', runId: 'run-stable', stepAttemptId: 'stable-attempt'
+    }]);
+    expect(fakeSession.bound).toEqual([{ reservationId: 'reservation-1', accountId: 'account-1' }]);
+  });
+
   it('continuous source stops at mailLimit and never acquires a fourth mailbox', async () => {
     const source = createAutomationWorkSourceFactory(fakeEmailService).create({
       ...CONFIG,
       threadCount: 3,
       mailLimit: 3,
-      emailSource: { mode: 'api', provider: 'gmail94', service: 'capcut' }
+      maxBillablePurchases: 20, emailSource: { mode: 'api', provider: 'gmail94', service: 'capcut' }
     }, 'run-limit');
     const signal = new AbortController().signal;
 
@@ -188,7 +251,7 @@ describe('AutomationWorkSource', () => {
 
   it('reserves the limit before concurrent acquisition awaits', async () => {
     const source = createAutomationWorkSourceFactory(fakeEmailService).create({
-      ...CONFIG, mailLimit: 3, emailSource: { mode: 'api', provider: 'gmail94' }
+      ...CONFIG, mailLimit: 3, maxBillablePurchases: 20, emailSource: { mode: 'api', provider: 'gmail94' }
     }, 'race');
     const signal = new AbortController().signal;
     await source.prepare(3, signal);
@@ -201,7 +264,7 @@ describe('AutomationWorkSource', () => {
 
   it('preflights only the limited initial wave', async () => {
     const source = createAutomationWorkSourceFactory(fakeEmailService).create({
-      ...CONFIG, mailLimit: 2, emailSource: { mode: 'api', provider: 'gmail94' }
+      ...CONFIG, mailLimit: 2, maxBillablePurchases: 20, emailSource: { mode: 'api', provider: 'gmail94' }
     }, 'small');
     expect((await source.prepare(10, new AbortController().signal)).workerTarget).toBe(2);
     expect(fakeEmailService.openCalls[0].initialConcurrency).toBe(2);
@@ -209,7 +272,7 @@ describe('AutomationWorkSource', () => {
 
   it('does not acquire after Stop', async () => {
     const source = createAutomationWorkSourceFactory(fakeEmailService).create({
-      ...CONFIG, mailLimit: 3, emailSource: { mode: 'api', provider: 'gmail94' }
+      ...CONFIG, mailLimit: 3, maxBillablePurchases: 20, emailSource: { mode: 'api', provider: 'gmail94' }
     }, 'stop');
     const controller = new AbortController();
     await source.prepare(3, controller.signal);
@@ -233,7 +296,7 @@ describe('AutomationWorkSource', () => {
     const source = createAutomationWorkSourceFactory(fakeEmailService).create({
       ...CONFIG,
       threadCount: 1,
-      emailSource: { mode: 'api', provider: 'gmail94', service: 'capcut' }
+      maxBillablePurchases: 20, emailSource: { mode: 'api', provider: 'gmail94', service: 'capcut' }
     }, 'run-rel');
     const signal = new AbortController().signal;
 
@@ -367,4 +430,3 @@ describe('AutomationWorkSource', () => {
     await expect(source2.prepare(1, new AbortController().signal)).rejects.toThrow();
   });
 });
-

@@ -7,6 +7,7 @@ import {
   MULTILOGIN_TOKEN_REFRESH_SKEW_MS,
   type MultiloginTokens
 } from '../providers/MultiloginProvider';
+import type { ObservationScope } from '../providers/ObservedHttpClient';
 
 /** The slice of MultiloginProvider this service depends on. */
 export interface IMultiloginAuthApi {
@@ -50,8 +51,21 @@ export class MultiloginAuthService {
     private readonly credRepo: CredentialRepository,
     private readonly vault: ICredentialVault,
     private readonly api: IMultiloginAuthApi,
-    private readonly clock: ClockProvider = { now: () => Date.now() }
+    private readonly clock: ClockProvider = { now: () => Date.now() },
+    private readonly observation?: ObservationScope
   ) {}
+
+  private observeShared<T>(operation: 'sign-in' | 'token-refresh', action: () => Promise<T>): Promise<T> {
+    const identity = {
+      provider: 'multilogin',
+      operation,
+      workerAlias: null,
+      acquisitionAlias: null,
+      accountAlias: null,
+      sessionAlias: null
+    } as const;
+    return this.observation?.withObservationScope(identity, action) ?? action();
+  }
 
   private readBlob(): StoredAuthBlob {
     const record = this.credRepo.getCredential(MULTILOGIN_SERVICE_NAME);
@@ -118,7 +132,8 @@ export class MultiloginAuthService {
     const existingRefreshToken = session?.refreshToken;
     if (existingRefreshToken) {
       try {
-        const rotated = await this.api.refreshTokens(email, existingRefreshToken, blob.workspaceId);
+        const rotated = await this.observeShared('token-refresh', () =>
+          this.api.refreshTokens(email, existingRefreshToken, blob.workspaceId));
         this.persistSession(blob, {
           jwtToken: rotated.token,
           refreshToken: rotated.refreshToken,
@@ -138,7 +153,7 @@ export class MultiloginAuthService {
       throw configError('Thiếu mật khẩu Multilogin, không thể đăng nhập lại.');
     }
 
-    const signedIn = await this.api.signIn(email, password);
+    const signedIn = await this.observeShared('sign-in', () => this.api.signIn(email, password));
     this.persistSession(blob, {
       jwtToken: signedIn.token,
       refreshToken: signedIn.refreshToken,
@@ -150,8 +165,25 @@ export class MultiloginAuthService {
   /**
    * Returns a usable bearer token, signing in or refreshing as needed.
    * Concurrent callers share one in-flight authentication.
+   * When a draft payload is provided, test against the draft directly.
    */
-  async getAccessToken(): Promise<string> {
+  async getAccessToken(draft?: unknown): Promise<string> {
+    if (typeof draft === 'object' && draft !== null && 'mode' in draft) {
+      const d = draft as { mode: 'token' | 'credentials'; automationToken?: string; email?: string; password?: string };
+      if (d.mode === 'token') {
+        const token = d.automationToken?.trim();
+        if (!token) throw configError('Automation token của Multilogin đang trống.');
+        return token;
+      }
+      if (d.mode === 'credentials') {
+        const email = d.email?.trim();
+        const password = d.password?.trim();
+        if (!email || !password) throw configError('Thiếu email hoặc mật khẩu Multilogin.');
+        const signedIn = await this.observeShared('sign-in', () => this.api.signIn(email, password));
+        return signedIn.token;
+      }
+    }
+
     if (this.inFlight) {
       return this.inFlight;
     }

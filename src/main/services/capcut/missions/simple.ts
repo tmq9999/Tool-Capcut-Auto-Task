@@ -18,7 +18,7 @@ import { clickIfVisible, foregroundPage, rand } from '../human';
 import { findTaskRow, withTaskPopover, type MissionGroup } from '../missionRunner';
 import type { CapcutMissionEnv } from '../types';
 import { URLS } from '../urls';
-import { abortable, abortableDelay } from '../cancellation';
+import { abortable, abortableDelay, isDomReadTimeout } from '../cancellation';
 
 /** Bấm nút "Go" của đúng dòng nhiệm vụ rồi đóng popover lại. */
 /**
@@ -101,6 +101,7 @@ export const notificationsGroup: MissionGroup = {
       .catch((e: unknown) => env.log(`Không cấp được quyền notifications: ${(e as Error).message}`));
 
     const page = await env.context.newPage();
+    let pendingError: unknown;
     try {
       env.signal.throwIfAborted();
       await abortable(page.goto(URLS.tasks, { waitUntil: 'domcontentloaded', timeout: 20_000 }), env.signal);
@@ -195,11 +196,14 @@ export const notificationsGroup: MissionGroup = {
 
       // do_action bắn ~1 giây sau; chờ rồi mới đóng tab để không huỷ request.
       await abortableDelay(rand(8000, 10000), env.signal);
+    } catch (error) {
+      pendingError = error;
+      throw error;
     } finally {
       await page.close().catch(() => {});
-      await foregroundPage(env.page, { signal: env.signal, stage: 'notifications:restore-focus', ui: env.ui }, async () => {
-        await env.page.bringToFront().catch(() => {});
-      }).catch(() => {});
+      if (!env.signal.aborted && !isDomReadTimeout(pendingError)) {
+        await foregroundPage(env.page, { signal: env.signal, stage: 'notifications:restore-focus', ui: env.ui }, async () => {});
+      }
     }
   },
 };

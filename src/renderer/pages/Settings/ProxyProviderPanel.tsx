@@ -76,7 +76,7 @@ export const ProxyProviderPanel: React.FC<ProxyProviderPanelProps> = ({
               onChange={(e) =>
                 onSetSimpleDraft('kiotproxy', { action: 'replace', value: e.target.value })
               }
-              placeholder={status?.isConfigured ? 'Đã lưu: ••••••••' : 'Chưa thiết lập'}
+              placeholder={status?.isConfigured ? 'Đã lưu: •••••••• (nhập để thay đổi)' : 'Dán token KiotProxy vào đây...'}
               fontMono
             />
             {status?.isConfigured && drafts.kiotproxy.action !== 'clear' && (
@@ -107,6 +107,20 @@ export const ProxyProviderPanel: React.FC<ProxyProviderPanelProps> = ({
             </Button>
             {renderStatusBadge()}
           </div>
+
+          {drafts.kiotproxy.action === 'replace' ? (
+            <span className="text-warning text-xs font-label-xs block">
+              Đang nhập token mới (chưa lưu). Bấm &quot;Kiểm tra API&quot; để test trực tiếp token này.
+            </span>
+          ) : status?.isConfigured ? (
+            <span className="text-on-surface-variant text-[11px] font-label-xs block">
+              Hệ thống đang lưu token: <span className="text-primary font-mono font-semibold">{status.metadata.maskedHint}</span>. Bấm &quot;Kiểm tra API&quot; để test token đã lưu này.
+            </span>
+          ) : (
+            <span className="text-on-surface-variant text-[11px] font-label-xs block">
+              Chưa có token trong máy. Vui lòng nhập token rồi bấm &quot;Lưu cài đặt&quot;.
+            </span>
+          )}
 
           <p className="font-body-sm text-[11px] text-on-surface-variant">
             Mỗi luồng chiếm một proxy key và luôn xin IP mới (đối chiếu với IP hiện tại của key). Số key quyết định số luồng chạy song song.

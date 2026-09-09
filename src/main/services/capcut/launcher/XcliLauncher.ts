@@ -233,7 +233,11 @@ export class XcliLauncher implements BrowserLauncher {
         ui: opts.ui
       });
       this.attached.set(profileId, attachment.browser);
-      await checkRendererHealth(attachment.page, { signal: opts.signal, log: this.log, ui: opts.ui });
+      await checkRendererHealth(attachment.page, {
+        signal: attachment.signal,
+        log: this.log,
+        ui: attachment.ui
+      });
 
       this.log(`   ✅ Session sẵn sàng — port ${port}, profile ${profileId}`);
       return { page: attachment.page, context: attachment.context, port, profileId };

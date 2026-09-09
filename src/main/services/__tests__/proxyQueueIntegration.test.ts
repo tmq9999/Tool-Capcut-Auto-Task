@@ -3,12 +3,13 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import type Database from 'better-sqlite3';
+import type { Page, BrowserContext } from 'playwright-core';
 import { createDatabaseConnection } from '../../database/connection';
 import { runMigrations } from '../../database/migrator';
 import { ProxyLeaseRepository } from '../../repositories/ProxyLeaseRepository';
 import { ProxyLeaseManager, type IKiotProxyLeaseApi } from '../ProxyLeaseManager';
 import { ProxyKeyUnavailableError, type KiotProxyKeySummary, type KiotProxyLease } from '../../providers/KiotProxyProvider';
-import { AutomationRunService, type IAccountSink, type IBrowserRuntimeApi, type StartedProfile } from '../AutomationRunService';
+import { AutomationRunService, type CapcutTaskRunner, type IAccountSink, type IBrowserRuntimeApi, type StartedProfile } from '../AutomationRunService';
 import { LogBus, type ILogSink } from '../LogBus';
 import { AutomationRunConfigSchema } from '../../../shared/schemas/automation.schema';
 import type { AutomationWorkItem, AutomationWorkSourceFactory } from '../AutomationWorkSource';
@@ -72,6 +73,7 @@ const stubWorkSources: AutomationWorkSourceFactory = {
       : [];
     return {
       kind: 'finite',
+      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
       prepare: async (c) => ({ workerTarget: Math.min(c, items.length) }),
       next: async () => items.shift() ?? null,
       commit: () => {},
@@ -111,9 +113,10 @@ class PeakTrackingBrowser implements IBrowserRuntimeApi {
 
   async startProfile(): Promise<StartedProfile> {
     this.startCalls += 1;
+    const call = this.startCalls;
     this.peakActiveLeases = Math.max(this.peakActiveLeases, leaseRepo.listActive().length);
     await new Promise((resolve) => setTimeout(resolve, 5));
-    return { profileId: 'profile-' + this.startCalls, port: 50000 + this.startCalls, browserType: 'mimic' };
+    return { profileId: 'profile-' + call, port: 50000 + call, browserType: 'mimic' };
   }
 
   async stopProfile(profileId: string): Promise<void> {
@@ -171,12 +174,36 @@ function buildStack(keys: string[]) {
   );
   const browser = new PeakTrackingBrowser();
   const accounts = new StubAccounts();
+  const capcut: CapcutTaskRunner = {
+    async runAccount(input) {
+      await input.ui.foreground('auth', async () => {});
+      const tasks = [{ key: 'capcut_web_newbie_register', title: 'Register', reward: 10, status: 4 }];
+      const verification = {
+        runId: input.runId!, sessionAlias: input.sessionAlias!,
+        observedAt: new Date(Date.now() + 1).toISOString(),
+        requiredAfter: new Date(input.sessionStartedAt!).toISOString(),
+        fresh: true, final: true, complete: true, serverTotal: 1, serverDone: 1
+      };
+      await input.onTaskCheckpoint({ rows: tasks, receipt: verification, unsettledProofs: [] });
+      return { tasks, verification, authenticated: true, unsettledProofs: [], total: 1, done: 1,
+        missing: [], credits: 10, creditsTotal: 10 };
+    }
+  };
   const service = new AutomationRunService(
     {
       workSources: stubWorkSources,
       emailOtp: { readOtp: async () => null },
       proxies,
       browser,
+      launcher: () => ({
+        name: 'api-v3',
+        launch: async () => {
+          const started = await browser.startProfile();
+          return { ...started, port: started.port!, page: {} as Page, context: {} as BrowserContext };
+        },
+        stop: (id: string) => browser.stopProfile(id)
+      }),
+      capcut,
       accounts,
       logBus: new LogBus(new CollectingSink())
     },

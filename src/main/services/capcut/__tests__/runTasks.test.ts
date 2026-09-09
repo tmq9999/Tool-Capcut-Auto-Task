@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { BrowserContext, Page } from 'playwright-core';
 import fs from 'node:fs';
-import { runGroup } from '../missionRunner';
+import { claimIfPending, runGroup } from '../missionRunner';
 import { DomReadTimeoutError } from '../cancellation';
+import { createDirectUiInteraction } from '../uiInteractionScheduler';
 
 import type { CapcutMissionEnv, MissionGroup, TaskCheckpoint } from '../types';
+import type { RunTasksInput } from '../runTasks';
 
 vi.mock('../diag', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../diag')>();
@@ -14,6 +16,7 @@ vi.mock('../diag', async (importOriginal) => {
 import type { TaskStore } from '../taskApi';
 
 let latestTaskStore: TaskStore | null = null;
+const taskMonitorDispose = vi.fn();
 
 vi.mock('../taskApi', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../taskApi')>();
@@ -30,6 +33,7 @@ vi.mock('../taskApi', async (importOriginal) => {
     ) => {
       latestTaskStore = store;
       store.pushTaskList(initialJson, 100);
+      return taskMonitorDispose;
     }
   };
 });
@@ -38,7 +42,7 @@ vi.mock('../missionRunner', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../missionRunner')>();
   return {
     ...actual,
-    claimIfPending: vi.fn(async () => false),
+    claimIfPending: vi.fn(async () => ({ claimed: false, actionSettledAt: null })),
     closeTaskPopover: vi.fn(async () => true),
     findTaskEntry: vi.fn(async () => null),
     withTaskPopover: vi.fn(async (_page: Page, fn: () => Promise<unknown>) => fn()),
@@ -71,18 +75,198 @@ vi.mock('../missionRunner', async (importOriginal) => {
   };
 });
 
-const { runAllTasks } = await import('../runTasks');
+const { runAllTasks: runAllTasksProduction } = await import('../runTasks');
 const {
   FINAL_SNAPSHOT_WAIT_MS,
   INTER_ROUND_WAIT_MS,
   needsFinalSnapshotRefresh
 } = await import('../runTasks');
 
+type TestRunTasksInput = Omit<RunTasksInput, 'ui'> & Partial<Pick<RunTasksInput, 'ui'>>;
+
+function runAllTasks(input: TestRunTasksInput) {
+  return runAllTasksProduction({
+    ...input,
+    ui: input.ui ?? createDirectUiInteraction(input.signal)
+  });
+}
+
 afterEach(() => {
   vi.useRealTimers();
+  taskMonitorDispose.mockClear();
 });
 
 describe('runTasks orchestration with proof memory', () => {
+  it('does not dispatch Claim or certify a status-2 task under strict verification', async () => {
+    vi.useFakeTimers();
+    vi.mocked(claimIfPending).mockClear();
+    const act = vi.fn(async () => {});
+    const run = runAllTasks({
+      page: { goto: async () => null, isClosed: () => false } as unknown as Page,
+      context: {} as BrowserContext,
+      sampleImage: 'sample.png',
+      log: () => {},
+      signal: new AbortController().signal,
+      maxRounds: 1,
+      rewardVerification: {
+        runId: 'run-strict-status2',
+        sessionAlias: 'worker-1-session-1'
+      },
+      groups: [{
+        id: 'pwa-install', workspace: 'none', name: 'PWA',
+        keys: ['capcut_web_pwa_install'], proofTimeoutMs: 12_000, act
+      }]
+    });
+    const statusTwo = JSON.parse(fs.readFileSync('tools/fixtures/task-list-initial.json', 'utf8'));
+    const pending = statusTwo.data.task_list.find(
+      (item: { task_key: string }) => item.task_key === 'capcut_web_pwa_install'
+    );
+    pending.task_status = 2;
+    pending.task_view.button_text = 'Claim';
+    latestTaskStore!.pushTaskList(JSON.stringify(statusTwo), 101);
+
+    await vi.runAllTimersAsync();
+    const result = await run;
+
+    expect(claimIfPending).not.toHaveBeenCalled();
+    expect(act).not.toHaveBeenCalled();
+    expect(result.snapshot?.final).toBe(false);
+    expect(result.outcomes.find((item) => item.key === 'capcut_web_pwa_install')?.done).toBe(false);
+  });
+
+  it('disposes the task monitor when a task run completes', async () => {
+    vi.useFakeTimers();
+    const run = runAllTasks({
+      page: { goto: async () => null, isClosed: () => false } as unknown as Page,
+      context: {} as BrowserContext,
+      sampleImage: 'sample.png', log: () => {},
+      signal: new AbortController().signal,
+      groups: [], maxRounds: 0
+    });
+
+    await vi.runAllTimersAsync();
+    await run;
+
+    expect(taskMonitorDispose).toHaveBeenCalledOnce();
+  });
+
+  it('disposes the task monitor when mission execution rejects', async () => {
+    vi.useFakeTimers();
+    const failure = new Error('mission failed');
+    const run = runAllTasks({
+      page: { goto: async () => null, isClosed: () => false } as unknown as Page,
+      context: {} as BrowserContext,
+      sampleImage: 'sample.png', log: () => {},
+      signal: new AbortController().signal,
+      maxRounds: 1,
+      groups: [{
+        id: 'pwa-install', workspace: 'none', name: 'PWA',
+        keys: ['capcut_web_pwa_install'], proofTimeoutMs: 1000,
+        act: async () => { throw failure; }
+      }]
+    });
+
+    await expect(run).rejects.toBe(failure);
+
+    expect(taskMonitorDispose).toHaveBeenCalledOnce();
+  });
+
+  it('retains incoming omitted-key proof independently in checkpoint and result', async () => {
+    vi.useFakeTimers();
+    const key = 'omitted-server-key';
+    const proof = { actionKey: key, opId: 'same-run-proof', errNo: 0 as const, errTips: '', at: 90 };
+    const checkpoints: TaskCheckpoint[] = [];
+    const run = runAllTasks({
+      page: { goto: async () => null, isClosed: () => false } as unknown as Page,
+      context: {} as BrowserContext, sampleImage: 'sample.png', log: () => {},
+      signal: new AbortController().signal, groups: [], unsettledProofs: [{ key, proof }],
+      onCheckpoint: async (checkpoint) => { checkpoints.push(checkpoint); }
+    });
+    await vi.runAllTimersAsync();
+    const result = await run;
+    expect(result.unsettledProofs).toEqual([{ key, proof }]);
+    expect(checkpoints.at(-1)).toMatchObject({ unsettledProofs: [{ key, proof }] });
+    expect(result.snapshot?.tasks.some((row) => row.key === key)).toBe(false);
+    expect(result.outcomes.some((row) => row.key === key)).toBe(false);
+  });
+
+  it('carries omitted proof through another session until its key reappears as status 4', async () => {
+    vi.useFakeTimers();
+    const key = 'omitted-server-key';
+    const proof = { actionKey: key, opId: 'same-run-proof', errNo: 0 as const, errTips: '', at: 90 };
+    const act = vi.fn(async () => {});
+    const input: TestRunTasksInput = {
+      page: { goto: async () => null, isClosed: () => false } as unknown as Page,
+      context: {} as BrowserContext, sampleImage: 'sample.png', log: () => {},
+      signal: new AbortController().signal,
+      groups: [{ id: 'pwa-install', workspace: 'none', name: 'PWA', keys: [key], proofTimeoutMs: 1000, act }],
+      unsettledProofs: [{ key, proof }]
+    };
+    const firstRun = runAllTasks(input);
+    await vi.runAllTimersAsync();
+    const first = await firstRun;
+    const secondRun = runAllTasks({ ...input, unsettledProofs: first.unsettledProofs });
+    await vi.advanceTimersByTimeAsync(1);
+    const reappeared = JSON.parse(fs.readFileSync('tools/fixtures/task-list-done.json', 'utf8'));
+    reappeared.data.task_list.push({ task_key: key, task_id: 99, task_status: 1,
+      task_view: { title: 'Carried task', button_text: 'Go' }, task_reward_view: { reward_amount: 10 } });
+    latestTaskStore!.pushTaskList(JSON.stringify(reappeared), 200);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(act).not.toHaveBeenCalled();
+    reappeared.data.task_list.at(-1).task_status = 4;
+    latestTaskStore!.pushTaskList(JSON.stringify(reappeared), 300);
+    await vi.runAllTimersAsync();
+    const second = await secondRun;
+    expect(second.unsettledProofs).toEqual([]);
+    expect(second.snapshot).toMatchObject({ final: true, total: 13, done: 13 });
+    expect(act).not.toHaveBeenCalled();
+  });
+
+  it('returns the fatal Claim timeout checkpoint without selecting another mission', async () => {
+    vi.useFakeTimers();
+    const failure = new DomReadTimeoutError('popover:claim');
+    vi.mocked(claimIfPending).mockImplementationOnce(async (_page, _task, _store, _log, _signal, _ui, onSettled) => {
+      onSettled?.(200);
+      throw failure;
+    });
+    const next = vi.fn(async () => {});
+    const checkpoints: TaskCheckpoint[] = [];
+    const page = { goto: async () => null, isClosed: () => false } as unknown as Page;
+    const signal = new AbortController().signal;
+    const run = runAllTasks({
+      page,
+      context: {} as BrowserContext,
+      sampleImage: 'sample.png',
+      signal,
+      ui: createDirectUiInteraction(signal),
+      log: () => {},
+      maxRounds: 1,
+      onCheckpoint: async (checkpoint) => { checkpoints.push(checkpoint); },
+      groups: [{
+        id: 'pwa-install',
+        workspace: 'none',
+        name: 'PWA',
+        keys: ['capcut_web_pwa_install'],
+        proofTimeoutMs: 12_000,
+        act: next
+      }]
+    });
+    const statusTwo = JSON.parse(fs.readFileSync('tools/fixtures/task-list-initial.json', 'utf8'));
+    const pending = statusTwo.data.task_list.find((item: { task_key: string }) => item.task_key === 'capcut_web_pwa_install');
+    pending.task_status = 2;
+    pending.task_view.button_text = 'Claim';
+    latestTaskStore!.pushTaskList(JSON.stringify(statusTwo), 101);
+
+    await vi.runAllTimersAsync();
+    const result = await run;
+
+    expect(result.fatalError).toBe(failure);
+    expect(result.snapshot?.final).toBe(false);
+    expect(checkpoints.at(-1)?.snapshot.final).toBe(false);
+    expect(checkpoints.at(-1)?.snapshot.requiredAfter).toBe(200);
+    expect(next).not.toHaveBeenCalled();
+  });
+
   it('returns partial snapshot and fatal error without attempting the next group', async () => {
     vi.useFakeTimers();
     const failure = new DomReadTimeoutError('canvas-area:mouse-move');
@@ -317,6 +501,42 @@ describe('runTasks orchestration with proof memory', () => {
     expect(result.snapshot?.done).toBe(12);
   });
 
+  it('raises the receipt watermark to the time a Claim mutation settles', async () => {
+    vi.useFakeTimers();
+    vi.mocked(claimIfPending).mockImplementationOnce(async (_page, _task, store) => {
+      store.pushTaskList(fs.readFileSync('tools/fixtures/task-list-done.json', 'utf8'), 199);
+      setTimeout(() => {
+        store.pushTaskList(fs.readFileSync('tools/fixtures/task-list-done.json', 'utf8'), 201);
+      }, 10);
+      return { claimed: true, actionSettledAt: 200 };
+    });
+    const page = { goto: async () => null, isClosed: () => false } as unknown as Page;
+    const run = runAllTasks({
+      page,
+      context: {} as BrowserContext,
+      sampleImage: 'sample.png',
+      log: () => {},
+      signal: new AbortController().signal,
+      maxRounds: 1,
+      groups: []
+    });
+    const statusTwo = JSON.parse(fs.readFileSync('tools/fixtures/task-list-initial.json', 'utf8'));
+    const pending = statusTwo.data.task_list.find((item: { task_key: string }) => item.task_key === 'capcut_web_pwa_install');
+    pending.task_status = 2;
+    pending.task_view.button_text = 'Claim';
+    latestTaskStore!.pushTaskList(JSON.stringify(statusTwo), 101);
+
+    await vi.runAllTimersAsync();
+    const result = await run;
+
+    expect(result.snapshot).toMatchObject({
+      observedAt: 201,
+      requiredAfter: 200,
+      fresh: true,
+      final: true
+    });
+  });
+
   it('emits a non-final checkpoint before returning a fatal result', async () => {
     vi.useFakeTimers();
     const key = 'capcut_web_design_studio_ai_chat';
@@ -515,4 +735,3 @@ describe('runTasks orchestration with proof memory', () => {
     expect(act).toHaveBeenCalledTimes(1);
   });
 });
-

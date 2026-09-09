@@ -1,7 +1,6 @@
 import type { Page } from 'playwright-core';
 import { boundedDomRead } from './cancellation';
 import { foregroundPage } from './human';
-import { createDirectUiInteraction } from './uiInteractionScheduler';
 import type { AccountUiInteraction } from './types';
 
 export interface RendererHealth {
@@ -13,11 +12,14 @@ export async function checkRendererHealth(
   page: Page,
   options: {
     timeoutMs?: number;
-    signal?: AbortSignal;
+    signal: AbortSignal;
     log?: (message: string) => void;
-    ui?: AccountUiInteraction;
-  } = {}
+    ui: AccountUiInteraction;
+  }
 ): Promise<RendererHealth> {
+  if (!options.ui) throw new Error('UI_INTERACTION_REQUIRED');
+  if (!options.signal) throw new Error('ABORT_SIGNAL_REQUIRED');
+  options.signal.throwIfAborted();
   const started = Date.now();
   const timeoutMs = options.timeoutMs ?? 5000;
   const viewport = await boundedDomRead(
@@ -29,8 +31,7 @@ export async function checkRendererHealth(
     () => page.evaluate(() => document.readyState),
     'renderer-evaluate', timeoutMs, options.signal
   );
-  const signal = options.signal ?? new AbortController().signal;
-  const ui = options.ui ?? createDirectUiInteraction(signal);
+  const { signal, ui } = options;
   await foregroundPage(
     page,
     { signal, stage: 'renderer-health:mouse', ui },

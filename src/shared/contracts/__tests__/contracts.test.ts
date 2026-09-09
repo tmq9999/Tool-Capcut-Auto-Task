@@ -42,6 +42,8 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
       'RUN_STOP_THREAD',
       'RUN_THREADS',
       'RUN_PROGRESS',
+      'RUN_HEALTH',
+      'RUN_USER_DATA',
       'EMAIL_PROVIDERS',
       'EMAIL_READ_OTP'
     ]);
@@ -123,7 +125,7 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
   it('preserves ElectronBridge compile-time structure and platform/version compatibility', () => {
     const mockBridge: ElectronBridge = {
       platform: 'win32',
-      version: '2.4.0',
+      version: '3.0.0',
       ping: async () => ({
         success: true,
         data: { pong: true, timestamp: Date.now() }
@@ -144,6 +146,7 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
               },
               logs: { retention: '30' },
               automation: {
+                maxBillablePurchases: 0,
                 threadCount: 10,
                 browser: 'multilogin',
                 headless: false,
@@ -205,7 +208,18 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
         }),
         tasks: async () => ({
           success: true,
-          data: { items: [], doneCount: 0, creditsEarned: 0 }
+          data: {
+            items: [],
+            doneCount: 0,
+            creditsEarned: 0,
+            verification: {
+              state: 'missing',
+              runId: null,
+              observedAt: null,
+              serverTotal: 0,
+              serverDone: 0
+            }
+          }
         })
       },
       logs: {
@@ -215,6 +229,8 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
       },
       run: {
         start: async () => ({ success: true, data: { runId: 'run-1' } }),
+        health: async () => ({ success: true, data: { runId: 'run-health', artifactBasename: 'run-health.jsonl', attempted: 3, healthy: 3, stopped: 3, cleanupFailures: 0 } }),
+        userData: async () => ({ success: true, data: { userDataDir: 'D:/test-user-data' } }),
         stop: async () => ({ success: true, data: { success: true } }),
         stopThread: async () => ({ success: true, data: { stopped: true } }),
         threads: async () => ({ success: true, data: [] }),

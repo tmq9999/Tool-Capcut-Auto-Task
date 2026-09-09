@@ -28,6 +28,8 @@ export const IPC_CHANNELS = {
   RUN_STOP_THREAD: 'run:stop-thread',
   RUN_THREADS: 'run:threads',
   RUN_PROGRESS: 'run:progress',
+  RUN_HEALTH: 'run:health',
+  RUN_USER_DATA: 'run:user-data',
 
   EMAIL_PROVIDERS: 'email:providers',
   EMAIL_READ_OTP: 'email:read-otp'

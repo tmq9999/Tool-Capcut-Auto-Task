@@ -127,6 +127,8 @@ export interface CdpAttachment {
   browser: Browser;
   context: BrowserContext;
   page: Page;
+  signal: AbortSignal;
+  ui: AccountUiInteraction;
 }
 
 /**
@@ -208,7 +210,14 @@ export async function configureHeadedWindowUnlocked(
   context: BrowserContext,
   options: CdpAttachOptions
 ): Promise<void> {
-  await page.bringToFront().catch(() => {});
+  if (options.ui?.focusMode !== 'target') {
+    await boundedDomRead(
+      () => page.bringToFront(),
+      'headed-window-focus',
+      5000,
+      options.signal
+    );
+  }
 
   if (options.headless === false) {
     // setViewportSize only changes Playwright's emulated viewport over CDP;
@@ -364,13 +373,14 @@ export async function attachOverCdp(
 
     const page = context.pages()[0] ?? (await context.newPage());
 
-    if (options.headless === false && !options.ui) {
-      throw new Error('Headed launch requires an AccountUiInteraction session facade');
-    }
+  if (options.headless === false && !options.ui) {
+    throw new Error('Headed launch requires an AccountUiInteraction session facade');
+  }
 
-    const ui = options.ui ?? createDirectUiInteraction(options.signal ?? new AbortController().signal);
+    const signal = options.signal ?? new AbortController().signal;
+    const ui = options.ui ?? createDirectUiInteraction(signal);
     await ui.foreground('launcher:window-setup', () =>
-      configureHeadedWindowUnlocked(page, context, options)
+      configureHeadedWindowUnlocked(page, context, { ...options, signal })
     );
 
     options.signal?.throwIfAborted();
@@ -378,7 +388,7 @@ export async function attachOverCdp(
     // Cấp sẵn quyền notifications (phục vụ nhiệm vụ "Enable browser notifications")
     await context.grantPermissions(['notifications'], { origin: CAPCUT_ORIGIN }).catch(() => {});
 
-    return { browser, context, page };
+    return { browser, context, page, signal, ui };
   } catch (e) {
     await browser.close().catch(() => {});
     throw e;

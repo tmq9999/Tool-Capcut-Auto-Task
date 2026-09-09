@@ -16,6 +16,20 @@ import type { BrowserContext, Page } from 'playwright-core';
 
 import type { ActionProof } from './taskApi';
 import type { CapcutAccountResult } from '../AutomationRunService';
+import type { VerifyRewardStep } from './stepEvidence';
+
+export type {
+  EvidenceAxis,
+  EvidenceState,
+  ExpectedRewardAttempt,
+  OwnedStepResult,
+  RewardAttempt,
+  RewardStepResult,
+  StepObserver,
+  StepResult,
+  StepVerdict,
+  VerifyRewardStep,
+} from './stepEvidence';
 
 /**
  * Nhịp thao tác do người dùng đặt ở Dashboard (`stepDelay*` / `typeDelay*`).
@@ -39,6 +53,7 @@ export interface CapcutPace {
 }
 
 export interface AccountUiInteraction {
+  focusMode?: 'native' | 'target';
   foreground<T>(label: string, operation: () => Promise<T>): Promise<T>;
   editor<T>(label: string, operation: () => Promise<T>): Promise<T>;
 }
@@ -54,6 +69,9 @@ export interface CapcutMissionEnv {
   pace?: CapcutPace;
   captureStage?: (stage: string) => void;
   ui: AccountUiInteraction;
+  /** Present only when authoritative request provenance is enabled for this session. */
+  verifyRewardStep?: VerifyRewardStep;
+  rewardSessionAlias?: string;
 }
 
 export interface MissionGroup {
@@ -105,6 +123,12 @@ export interface TaskSnapshotSummary {
 export interface TaskCheckpoint {
   outcomes: TaskOutcome[];
   snapshot: TaskSnapshotSummary;
+  unsettledProofs?: readonly UnsettledTaskProof[];
+}
+
+export interface TaskClaimResult {
+  claimed: boolean;
+  actionSettledAt: number | null;
 }
 
 export interface CapcutVerificationReceipt {
@@ -136,7 +160,7 @@ export type UiLane = 'foreground' | 'editor';
 export type UiSchedulerEvent =
   | { type: 'queued'; lane: UiLane; sessionAlias: string; label: string; at: number }
   | { type: 'started'; lane: UiLane; sessionAlias: string; label: string; waitMs: number; at: number }
-  | { type: 'finished'; lane: UiLane; sessionAlias: string; label: string; holdMs: number; at: number }
+  | { type: 'finished'; lane: UiLane; sessionAlias: string; label: string; holdMs: number; outcome?: 'resolved' | 'rejected'; at: number }
   | { type: 'quarantined'; sessionAlias: string; label: string; code: 'DOM_READ_TIMEOUT' | 'ACTIVE_ABORT'; at: number }
   | { type: 'profile-stopped'; sessionAlias: string; at: number }
   | { type: 'late-settled'; sessionAlias: string; label: string; outcome: 'resolved' | 'rejected'; at: number }
@@ -145,4 +169,5 @@ export type UiSchedulerEvent =
 export interface UiSessionIdentity {
   sessionAlias: string;
   signal: AbortSignal;
+  focusMode?: 'native' | 'target';
 }

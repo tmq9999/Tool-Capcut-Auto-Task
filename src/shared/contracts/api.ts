@@ -14,6 +14,10 @@ import {
   AutomationRunConfigSchema,
   AutomationRunProgressSchema,
   RunningThreadInfoSchema,
+  RunHealthRequestSchema,
+  RunHealthResponseSchema,
+  type RunHealthRequestDTO,
+  type RunHealthResponseDTO,
   type AutomationRunConfigDTO,
   type AutomationRunProgressDTO,
   type RunningThreadInfoDTO
@@ -87,7 +91,14 @@ export const IpcContractRegistry = {
     },
     test: {
       request: z.object({
-        serviceName: z.enum(['gmail94', 'multilogin', 'kiotproxy', 'dongvanfb', 'gologin'])
+        serviceName: z.enum(['gmail94', 'multilogin', 'kiotproxy', 'dongvanfb', 'gologin']),
+        draftSecret: z.string().optional(),
+        multiloginDraft: z.object({
+          mode: z.enum(['token', 'credentials']),
+          automationToken: z.string().optional(),
+          email: z.string().optional(),
+          password: z.string().optional(),
+        }).optional(),
       }).strict(),
       response: SanitizedDiagnosticResultSchema
     }
@@ -140,8 +151,10 @@ export const IpcContractRegistry = {
   run: {
     start: {
       request: AutomationRunConfigSchema,
-      response: z.object({ runId: z.string().min(1) }).strict()
+      response: z.object({ runId: z.string().min(1), artifactBasename: z.string().min(1).optional() }).strict()
     },
+    health: { request: RunHealthRequestSchema, response: RunHealthResponseSchema },
+    userData: { request: z.void(), response: z.object({ userDataDir: z.string().min(1), rolloutHandshake: z.string().regex(/^[a-f0-9]{32,128}$/i).optional() }).strict() },
     stop: {
       request: z.void(),
       response: z.object({ success: z.boolean() }).strict()
@@ -183,7 +196,20 @@ export interface ElectronBridge {
     save(req: SettingsSaveRequestDTO): Promise<IpcEnvelope<{ success: boolean }>>;
   };
   credentials: {
-    test(serviceName: string): Promise<IpcEnvelope<SanitizedDiagnosticResult>>;
+    test(
+      request:
+        | string
+        | {
+            serviceName: 'gmail94' | 'multilogin' | 'kiotproxy' | 'dongvanfb' | 'gologin';
+            draftSecret?: string;
+            multiloginDraft?: {
+              mode: 'token' | 'credentials';
+              automationToken?: string;
+              email?: string;
+              password?: string;
+            };
+          }
+    ): Promise<IpcEnvelope<SanitizedDiagnosticResult>>;
   };
   accounts: {
     list(filter: AccountFilterDTO): Promise<IpcEnvelope<{ items: AccountListItemDTO[]; total: number }>>;
@@ -204,7 +230,9 @@ export interface ElectronBridge {
     onEntry(listener: (log: CanonicalRuntimeLog) => void): () => void;
   };
   run: {
-    start(config: AutomationRunConfigDTO): Promise<IpcEnvelope<{ runId: string }>>;
+    start(config: AutomationRunConfigDTO): Promise<IpcEnvelope<{ runId: string; artifactBasename?: string }>>;
+    health(input: RunHealthRequestDTO): Promise<IpcEnvelope<RunHealthResponseDTO>>;
+    userData(): Promise<IpcEnvelope<{ userDataDir: string; rolloutHandshake?: string }>>;
     stop(): Promise<IpcEnvelope<{ success: boolean }>>;
     stopThread(accountId: string): Promise<IpcEnvelope<{ stopped: boolean }>>;
     threads(): Promise<IpcEnvelope<RunningThreadInfoDTO[]>>;

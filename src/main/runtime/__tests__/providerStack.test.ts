@@ -8,6 +8,7 @@ import { runMigrations } from '../../database/migrator';
 import { createProviderStack, createProviderStackRepositories } from '../providerStack';
 import type { HttpClient, HttpRequest, HttpResponse } from '../../providers/HttpClient';
 import type { ICredentialVault } from '../../security/CredentialVault';
+import type { HttpObservationEvent } from '../../providers/ObservedHttpClient';
 
 class PlainVault implements ICredentialVault {
   isAvailable(): boolean { return true; }
@@ -86,6 +87,32 @@ describe('createProviderStack', () => {
     await probe?.testConnection();
 
     expect(http.requests[0].url).toContain('/profile?token=GM-KEY');
+  });
+
+  it('decorates the shared injected transport without adding metadata to its request', async () => {
+    const events: HttpObservationEvent[] = [];
+    const http = new RecordingHttp();
+    const repositories = createProviderStackRepositories(db);
+    const vault = new PlainVault();
+    repositories.credentialRepo.saveCredential('gmail94', vault.encrypt('GM-KEY'), {
+      maskedHint: '••••••••', status: 'unknown'
+    });
+    const stack = createProviderStack(repositories, vault, http, {
+      httpObserver: (event) => { events.push(event); }
+    });
+
+    await stack.providerRegistry.get('gmail94')?.testConnection();
+
+    expect(events.map((event) => event.phase)).toEqual(['request', 'response']);
+    expect(events[0]).toMatchObject({
+      routeTemplate: '/profile',
+      businessCategory: 'other',
+      identity: { scope: 'unscoped' }
+    });
+    expect(http.requests[0]).toEqual({
+      method: 'GET',
+      url: 'https://gmail94.com/api/profile?token=GM-KEY'
+    });
   });
 
   /**

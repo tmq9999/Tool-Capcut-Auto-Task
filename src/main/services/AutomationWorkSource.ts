@@ -4,10 +4,15 @@ import type {
 } from '../../shared/schemas/automation.schema';
 import type { EmailSourceProvider } from '../../shared/schemas/provider.schema';
 import { ProviderError } from '../providers/ProviderError';
+import type { ObservationScope } from '../providers/ObservedHttpClient';
 import type {
   EmailAcquisitionSession,
   EmailCapacitySnapshot,
   EmailPurchaseService,
+  AcquisitionIdentity,
+  DiagnosticMutationContext,
+  BillablePurchaseEvent,
+  BillablePurchaseStats,
   ReservedEmail
 } from './EmailPurchaseService';
 
@@ -22,6 +27,7 @@ export type AutomationWorkItem =
       emailPassword?: string;
       purchasedEmailId?: string;
       reservationId?: string;
+      ownerRef?: string;
     }
   | {
       kind: 'existing';
@@ -40,14 +46,20 @@ export interface SourceReadiness {
 export interface AutomationWorkSource {
   readonly kind: WorkSourceKind;
   prepare(initialConcurrency: number, signal: AbortSignal): Promise<SourceReadiness>;
-  next(workerId: string, signal: AbortSignal): Promise<AutomationWorkItem | null>;
+  next(workerId: string, signal: AbortSignal, identity?: AcquisitionIdentity): Promise<AutomationWorkItem | null>;
   commit(item: AutomationWorkItem, accountId: string): void;
+  bind?(item: AutomationWorkItem, accountId: string): void;
   release(item: AutomationWorkItem): void;
+  purchaseStats(): BillablePurchaseStats;
   isExhausted?(): boolean;
 }
 
 export interface AutomationWorkSourceFactory {
-  create(config: AutomationRunConfigDTO, runId: string): AutomationWorkSource;
+  create(config: AutomationRunConfigDTO, runId: string, onPurchaseEvent?: (event: BillablePurchaseEvent) => void, mutationContext?: DiagnosticMutationContext): AutomationWorkSource;
+}
+
+function noPurchases(): BillablePurchaseStats {
+  return { budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 };
 }
 
 export type AutomationCredentialReader = (accountId: string) => {
@@ -108,6 +120,8 @@ class ExistingAccountWorkSource implements AutomationWorkSource {
   commit(): void {}
   release(): void {}
 
+  purchaseStats(): BillablePurchaseStats { return noPurchases(); }
+
   isExhausted(): boolean {
     return this.queue.length === 0;
   }
@@ -157,6 +171,8 @@ class ManualWorkSource implements AutomationWorkSource {
 
   commit(): void {}
   release(): void {}
+
+  purchaseStats(): BillablePurchaseStats { return noPurchases(); }
 }
 
 class ContinuousEmailWorkSource implements AutomationWorkSource {
@@ -170,7 +186,11 @@ class ContinuousEmailWorkSource implements AutomationWorkSource {
     private readonly provider: EmailSourceProvider,
     private readonly service: string | undefined,
     private readonly runId: string,
-    private readonly limit: number
+    private readonly limit: number,
+    private readonly budget: number,
+    private readonly onPurchaseEvent?: (event: BillablePurchaseEvent) => void,
+    private readonly observation?: ObservationScope,
+    private readonly mutationContext?: DiagnosticMutationContext
   ) {}
 
   async prepare(initialConcurrency: number, signal: AbortSignal): Promise<SourceReadiness> {
@@ -178,7 +198,7 @@ class ContinuousEmailWorkSource implements AutomationWorkSource {
     this.session = await this.emailService.openAcquisitionSession(
       this.provider,
       workerTarget,
-      { service: this.service },
+      { service: this.service, maxBillablePurchases: this.budget, onPurchaseEvent: this.onPurchaseEvent },
       signal
     );
     return {
@@ -187,14 +207,30 @@ class ContinuousEmailWorkSource implements AutomationWorkSource {
     };
   }
 
-  async next(workerId: string, signal: AbortSignal): Promise<AutomationWorkItem | null> {
+  async next(workerId: string, signal: AbortSignal, providedIdentity?: AcquisitionIdentity): Promise<AutomationWorkItem | null> {
     signal.throwIfAborted();
     if (!this.session) throw new Error('Continuous source was not prepared.');
     if (this.limit > 0 && this.acquired >= this.limit) return null;
     // Reserve synchronously, including in-flight attempts. Never refill a failed
     // or released slot: its purchase may already have reached the provider.
     this.acquired += 1;
-    const reservation = await this.session.acquireOne(this.runId + ':' + workerId, signal);
+    const identity: AcquisitionIdentity = providedIdentity ?? {
+      runId: this.runId,
+      ownerRef: `${this.runId}:${workerId}:${this.acquired}`,
+      stepAttemptId: `${this.runId}:${workerId}:${this.acquired}`
+    };
+    const observationIdentity = {
+      runId: this.runId,
+      workerAlias: workerId,
+      acquisitionAlias: identity.ownerRef,
+      accountAlias: 'unassigned',
+      sessionAlias: 'unassigned',
+      authorityRef: this.mutationContext?.authorityRef ?? 'email:' + this.provider
+    } as const;
+    const acquire = () => this.session!.acquireOne(this.runId + ':' + workerId, signal, identity);
+    const reservation = this.observation
+      ? await this.observation.withObservationScope(observationIdentity, acquire)
+      : await acquire();
     this.reservations.set(reservation.reservationId, reservation);
     return {
       kind: 'new',
@@ -202,12 +238,18 @@ class ContinuousEmailWorkSource implements AutomationWorkSource {
       email: reservation.purchasedEmail.email,
       emailProvider: reservation.purchasedEmail.provider,
       purchasedEmailId: reservation.purchasedEmail.id,
-      reservationId: reservation.reservationId
+      reservationId: reservation.reservationId,
+      ownerRef: reservation.ownerRef
     };
   }
 
   isExhausted(): boolean {
     return this.limit > 0 && this.acquired >= this.limit;
+  }
+
+  purchaseStats(): BillablePurchaseStats {
+    if (!this.session) return { ...noPurchases(), budget: this.budget };
+    return { ...this.session.purchaseStats() };
   }
 
   commit(item: AutomationWorkItem, accountId: string): void {
@@ -216,6 +258,13 @@ class ContinuousEmailWorkSource implements AutomationWorkSource {
     if (!reservation) throw new Error('Email reservation ownership was lost.');
     this.session.commit(reservation, accountId);
     this.reservations.delete(item.reservationId);
+  }
+
+  bind(item: AutomationWorkItem, accountId: string): void {
+    if (item.kind !== 'new' || !this.session) return;
+    const reservation = item.reservationId ? this.reservations.get(item.reservationId) : undefined;
+    if (!reservation) throw new Error('Email reservation ownership was lost.');
+    this.session.bindAccount?.(reservation, accountId);
   }
 
   release(item: AutomationWorkItem): void {
@@ -229,10 +278,11 @@ class ContinuousEmailWorkSource implements AutomationWorkSource {
 
 export function createAutomationWorkSourceFactory(
   emailService: Pick<EmailPurchaseService, 'openAcquisitionSession'>,
-  credentialReader?: AutomationCredentialReader
+  credentialReader?: AutomationCredentialReader,
+  observation?: ObservationScope
 ): AutomationWorkSourceFactory {
   return {
-    create(config, runId) {
+    create(config, runId, onPurchaseEvent, mutationContext) {
       if (config.emailSource.mode === 'existing') {
         return new ExistingAccountWorkSource(config.emailSource.accountIds, credentialReader);
       }
@@ -246,12 +296,23 @@ export function createAutomationWorkSourceFactory(
       const service = config.emailSource.mode === 'api'
         ? config.emailSource.service
         : undefined;
+      let budget = 0;
+      if (config.emailSource.mode === 'api') {
+        if (config.maxBillablePurchases === undefined || !Number.isInteger(config.maxBillablePurchases) || config.maxBillablePurchases < 0) {
+          throw new ProviderError('CONFIG_ERROR', 'Phải chỉ định giới hạn mua hộp thư hợp lệ.');
+        }
+        budget = config.maxBillablePurchases;
+      }
       return new ContinuousEmailWorkSource(
         emailService,
         provider,
         service,
         runId,
-        config.mailLimit ?? 0
+        config.mailLimit ?? 0,
+        budget,
+        onPurchaseEvent,
+        observation,
+        mutationContext
       );
     }
   };

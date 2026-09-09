@@ -2,13 +2,14 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   AutomationEvidenceEventSchema,
+  EvidenceBaseSchema,
   TerminalEventSchema,
-  type AutomationEvidenceEvent,
+  type AutomationEvidenceNonTerminalEvent,
   type AutomationEvidenceTerminalEvent
 } from '../../../shared/schemas/automation-evidence.schema';
 
 export interface RunTelemetry {
-  record(event: AutomationEvidenceEvent): void;
+  record(event: AutomationEvidenceNonTerminalEvent): void;
   close(summary: AutomationEvidenceTerminalEvent): Promise<void>;
   filePath(): string;
   artifactBasename(): string;
@@ -22,8 +23,8 @@ export function createRunTelemetry(options: {
   const { userDataDir, runId } = options;
 
   // Reject path traversal in runId
-  if (!runId || runId.includes('..') || runId.includes('/') || runId.includes('\\') || path.basename(runId) !== runId) {
-    throw new Error(`Invalid runId with potential path traversal: ${runId}`);
+  if (!EvidenceBaseSchema.shape.runId.safeParse(runId).success || path.basename(runId) !== runId) {
+    throw new Error('INVALID_ROLLOUT_RUN_ID');
   }
 
   const evidenceDir = path.join(userDataDir, 'rollout-evidence');
@@ -33,18 +34,22 @@ export function createRunTelemetry(options: {
 
   // Ensure directory exists
   fs.mkdirSync(evidenceDir, { recursive: true });
+  fs.writeFileSync(fullFilePath, '', { encoding: 'utf8', flag: 'wx' });
 
   let isClosed = false;
   let closePromise: Promise<void> | null = null;
 
-  const record = (event: AutomationEvidenceEvent): void => {
+  const record = (event: AutomationEvidenceNonTerminalEvent): void => {
     if (isClosed) {
       // Ignore late events after close to preserve byte-identical artifact
       return;
     }
 
-    const validated = AutomationEvidenceEventSchema.parse(event);
-    const line = JSON.stringify(validated) + '\n';
+    const parsed = AutomationEvidenceEventSchema.safeParse(event);
+    if (!parsed.success || parsed.data.type === 'terminal' || parsed.data.runId !== runId) {
+      throw new Error('ROLLOUT_EVIDENCE_INVALID');
+    }
+    const line = JSON.stringify(parsed.data) + '\n';
     fs.appendFileSync(fullFilePath, line, 'utf8');
   };
 
@@ -62,8 +67,9 @@ export function createRunTelemetry(options: {
       isClosed = true;
 
       // Validate terminal summary
-      const validatedTerminal = TerminalEventSchema.parse(summary);
-      const line = JSON.stringify(validatedTerminal) + '\n';
+      const parsed = TerminalEventSchema.safeParse(summary);
+      if (!parsed.success || parsed.data.runId !== runId) throw new Error('ROLLOUT_EVIDENCE_INVALID');
+      const line = JSON.stringify(parsed.data) + '\n';
       fs.appendFileSync(fullFilePath, line, 'utf8');
 
       // Atomically write/replace last-run.json
@@ -73,8 +79,8 @@ export function createRunTelemetry(options: {
       try {
         fs.renameSync(tmpManifest, manifestPath);
       } catch {
-        // Fallback for Windows cross-lock or atomic replace
-        fs.copyFileSync(tmpManifest, manifestPath);
+        // The manifest is optional convenience, never acceptance authority.
+        // Omit its update if atomic replacement is unavailable.
         try {
           fs.unlinkSync(tmpManifest);
         } catch {

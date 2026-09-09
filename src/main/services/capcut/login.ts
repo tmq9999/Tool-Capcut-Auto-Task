@@ -27,7 +27,7 @@ import { dump, StepError } from './diag';
 import { skipOnboardingSurvey } from './overlays';
 import type { AccountUiInteraction } from './types';
 import { foregroundPage } from './human';
-import { createDirectUiInteraction } from './uiInteractionScheduler';
+import { abortableDelay, boundedDomRead, isDomReadTimeout } from './cancellation';
 
 /**
  * Thông tin đăng nhập tối thiểu mà engine cần. Bản gốc là `Credentials` trong
@@ -40,8 +40,13 @@ export interface CapcutCredentials {
 }
 
 export interface LoginOptions {
-  ui?: AccountUiInteraction;
-  signal?: AbortSignal;
+  ui: AccountUiInteraction;
+  signal: AbortSignal;
+}
+
+function rethrowInterrupted(error: unknown, signal: AbortSignal): void {
+  signal.throwIfAborted();
+  if (isDomReadTimeout(error)) throw error;
 }
 
 /** Kênh log được inject — engine không được `console.log`. */
@@ -56,18 +61,34 @@ async function fillVerified(
   value: string,
   name: string,
   log: LogFn,
+  ui: AccountUiInteraction,
+  signal: AbortSignal,
+  stage: string,
   attempts = 3
 ): Promise<void> {
   await input.waitFor({ state: 'visible', timeout: 20000 });
 
   for (let i = 0; i < attempts; i++) {
-    await input.clear();
-    await input.pressSequentially(value, { delay: 110 });
-    if ((await input.inputValue()) === value) {
+    signal.throwIfAborted();
+    const matches = await foregroundPage(
+      input.page(),
+      { signal, stage: `${stage}:attempt-${i + 1}`, ui },
+      async () => {
+        await boundedDomRead(() => input.clear(), `${stage}:clear`, 5000, signal);
+        await boundedDomRead(
+          () => input.pressSequentially(value, { delay: 110 }),
+          `${stage}:type`,
+          Math.max(5000, value.length * 110 + 5000),
+          signal
+        );
+        return boundedDomRead(() => input.inputValue(), `${stage}:validate`, 2000, signal);
+      }
+    );
+    if (matches === value) {
       log(`   ✅ Đã điền ${name}`);
       return;
     }
-    await input.page().waitForTimeout(500);
+    await abortableDelay(500, signal);
   }
   throw new Error(`Không điền được ${name} sau ${attempts} lần thử`);
 }
@@ -85,7 +106,9 @@ async function clickUntilVisible(
   for (let i = 0; i < attempts; i++) {
     signal.throwIfAborted();
     await foregroundPage(trigger.page(), { signal, stage: 'login:open-email-form', ui }, async () => {
-      await trigger.click({ timeout: 3000 }).catch(() => {});
+      await trigger.click({ timeout: 3000 }).catch((error: unknown) => {
+        rethrowInterrupted(error, signal);
+      });
     });
     if (await target.isVisible({ timeout: 600 }).catch(() => false)) return;
   }
@@ -132,10 +155,12 @@ export async function loginCapcut(
   _context: BrowserContext,
   creds: CapcutCredentials,
   log: LogFn,
-  options?: LoginOptions
+  options: LoginOptions
 ): Promise<void> {
-  const signal = options?.signal ?? new AbortController().signal;
-  const ui = options?.ui ?? createDirectUiInteraction(signal);
+  if (!options.ui) throw new Error('UI_INTERACTION_REQUIRED');
+  if (!options.signal) throw new Error('ABORT_SIGNAL_REQUIRED');
+  const { signal, ui } = options;
+  signal.throwIfAborted();
 
   log('\n============================================================');
   log('🔐 ĐĂNG NHẬP CAPCUT WEB');
@@ -157,7 +182,7 @@ export async function loginCapcut(
   log('   → Đã mở form email');
 
   // --- Bước 2: điền email và Continue ---
-  await fillVerified(inputEmail, creds.email, 'Email', log);
+  await fillVerified(inputEmail, creds.email, 'Email', log, ui, signal, 'login:fill-email');
 
   const continueBtn = page.getByRole('button', { name: /^(Continue|Tiếp tục)$/ });
   await continueBtn.waitFor({ state: 'visible', timeout: 20000 });
@@ -194,7 +219,7 @@ export async function loginCapcut(
 
   // --- Bước 4: điền password và đăng nhập ---
   const inputPassword = page.locator('input[type="password"]').first();
-  await fillVerified(inputPassword, creds.password, 'Password', log);
+  await fillVerified(inputPassword, creds.password, 'Password', log, ui, signal, 'login:fill-password');
 
   const signInBtn = page
     .getByRole('button', { name: /^(Sign in|Log in|Continue|Đăng nhập|Tiếp tục)$/ })
@@ -220,7 +245,9 @@ export async function loginCapcut(
     .first();
   if (await closeModal.isVisible({ timeout: 3000 }).catch(() => false)) {
     await foregroundPage(page, { signal, stage: 'login:close-modal', ui }, async () => {
-      await closeModal.click({ timeout: 5000 }).catch(() => {});
+      await closeModal.click({ timeout: 5000 }).catch((error: unknown) => {
+        rethrowInterrupted(error, signal);
+      });
     });
     await page.waitForTimeout(1500);
   }

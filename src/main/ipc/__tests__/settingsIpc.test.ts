@@ -55,6 +55,7 @@ describe('Settings IPC Registration (Task 2.1.3 RED)', () => {
       retention: '30',
     },
     automation: {
+      maxBillablePurchases: 0,
       threadCount: 10,
       browser: 'multilogin',
       headless: false,

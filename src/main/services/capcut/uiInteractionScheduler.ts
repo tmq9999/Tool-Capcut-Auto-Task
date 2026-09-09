@@ -5,7 +5,7 @@ import type {
   UiSchedulerEvent,
   UiSessionIdentity
 } from './types';
-import type { AutomationEvidenceEvent } from '../../../shared/schemas/automation-evidence.schema';
+import { toUiEvidenceLabel, type AutomationEvidenceNonTerminalEvent } from '../../../shared/schemas/automation-evidence.schema';
 
 export interface RunUiInteractionSchedulerOptions {
   editorLaneLimit?: number;
@@ -52,6 +52,11 @@ export class RunUiInteractionScheduler {
   private isShutdown = false;
   private shutdownError: Error | null = null;
   private currentForegroundOwner?: string;
+  private readonly stoppedSessions = new Set<string>();
+  private readonly closedSessions = new Set<string>();
+  private readonly poisonedSessions = new Map<string, unknown>();
+  private readonly retainedEditors = new Set<string>();
+  private readonly activeEditorOwners = new Map<string, number>();
 
   private readonly queues: {
     foreground: Array<Ticket<unknown>>;
@@ -68,6 +73,7 @@ export class RunUiInteractionScheduler {
 
   forSession(identity: UiSessionIdentity): AccountUiInteraction {
     return {
+      focusMode: identity.focusMode ?? 'native',
       foreground: <T>(label: string, operation: () => Promise<T>) =>
         this.enqueue<T>('foreground', identity, label, operation),
       editor: <T>(label: string, operation: () => Promise<T>) =>
@@ -76,17 +82,41 @@ export class RunUiInteractionScheduler {
   }
 
   confirmProfileStopped(sessionAlias: string): void {
-    if (this.quarantinedAlias === sessionAlias) {
-      this.quarantinedAlias = null;
+    if (this.stoppedSessions.has(sessionAlias)) return;
+    this.stoppedSessions.add(sessionAlias);
+    const ownedEditors = this.activeEditorOwners.get(sessionAlias) ?? 0;
+    const hadUnsafeOwnership = this.poisonedSessions.delete(sessionAlias) ||
+      this.retainedEditors.has(sessionAlias) || this.currentForegroundOwner === sessionAlias || ownedEditors > 0;
+    this.retainedEditors.delete(sessionAlias);
+    if (ownedEditors > 0) {
+      this.activeEditor -= ownedEditors;
+      this.activeEditorOwners.delete(sessionAlias);
+      queueMicrotask(() => this.processQueue('editor'));
+    }
+    if (this.currentForegroundOwner === sessionAlias) {
+      this.currentForegroundOwner = undefined;
+      this.activeForeground = 0;
+    }
+    const nextPoisoned = this.poisonedSessions.keys().next();
+    this.quarantinedAlias = nextPoisoned.done ? null : nextPoisoned.value;
+    if (hadUnsafeOwnership) {
       this.emitEvent({
         type: 'profile-stopped',
         sessionAlias,
         at: Date.now()
       });
-      queueMicrotask(() => {
-        this.processQueue('foreground');
-      });
     }
+    queueMicrotask(() => {
+      this.processQueue('foreground');
+      this.processQueue('editor');
+    });
+  }
+
+  closeSession(sessionAlias: string): void {
+    if (this.closedSessions.has(sessionAlias) || this.stoppedSessions.has(sessionAlias)) return;
+    this.closedSessions.add(sessionAlias);
+    const error = new Error('UI_SESSION_CLOSED');
+    this.drainSessionQueues(sessionAlias, error);
   }
 
   shutdown(reason?: { code: 'RESOURCE_CLEANUP_FAILED' | 'RUN_ABORTED'; message?: string } | Error): void {
@@ -148,7 +178,9 @@ export class RunUiInteractionScheduler {
       foregroundWaiting: this.queues.foreground.length,
       editorActive: this.activeEditor,
       editorWaiting: this.queues.editor.length,
-      quarantinedSessionAliases: this.quarantinedAlias ? [this.quarantinedAlias] : []
+      quarantinedSessionAliases: [...new Set([
+        ...this.poisonedSessions.keys(), ...this.retainedEditors
+      ])]
     };
   }
 
@@ -164,6 +196,18 @@ export class RunUiInteractionScheduler {
   ): Promise<T> {
     if (this.isShutdown) {
       return Promise.reject(this.shutdownError ?? new Error('Scheduler is shut down'));
+    }
+
+    if (this.stoppedSessions.has(identity.sessionAlias)) {
+      return Promise.reject(new Error('UI_SESSION_STOPPED'));
+    }
+
+    if (this.closedSessions.has(identity.sessionAlias)) {
+      return Promise.reject(new Error('UI_SESSION_CLOSED'));
+    }
+
+    if (this.poisonedSessions.has(identity.sessionAlias)) {
+      return Promise.reject(this.poisonedSessions.get(identity.sessionAlias));
     }
 
     if (identity.signal.aborted) {
@@ -226,9 +270,10 @@ export class RunUiInteractionScheduler {
 
       while (this.queues.foreground.length > 0) {
         const ticket = this.queues.foreground.shift()!;
-        if (ticket.signal.aborted) {
+        if (ticket.signal.aborted || this.stoppedSessions.has(ticket.sessionAlias) ||
+          this.closedSessions.has(ticket.sessionAlias) || this.poisonedSessions.has(ticket.sessionAlias)) {
           ticket.cleanupAbortListener?.();
-          ticket.reject(ticket.signal.reason ?? new Error('Aborted'));
+          ticket.reject(this.poisonedSessions.get(ticket.sessionAlias) ?? ticket.signal.reason ?? new Error('Aborted'));
           continue;
         }
 
@@ -241,13 +286,18 @@ export class RunUiInteractionScheduler {
     } else {
       while (this.activeEditor < this.editorLaneLimit && this.queues.editor.length > 0) {
         const ticket = this.queues.editor.shift()!;
-        if (ticket.signal.aborted) {
+        if (ticket.signal.aborted || this.stoppedSessions.has(ticket.sessionAlias) ||
+          this.closedSessions.has(ticket.sessionAlias) || this.poisonedSessions.has(ticket.sessionAlias)) {
           ticket.cleanupAbortListener?.();
-          ticket.reject(ticket.signal.reason ?? new Error('Aborted'));
+          ticket.reject(this.poisonedSessions.get(ticket.sessionAlias) ?? ticket.signal.reason ?? new Error('Aborted'));
           continue;
         }
 
         this.activeEditor++;
+        this.activeEditorOwners.set(
+          ticket.sessionAlias,
+          (this.activeEditorOwners.get(ticket.sessionAlias) ?? 0) + 1
+        );
         ticket.cleanupAbortListener?.();
         void this.runEditorTicket(ticket);
       }
@@ -270,6 +320,7 @@ export class RunUiInteractionScheduler {
 
     let releaseNormally = true;
     let callerSettled = false;
+    let abortCleanup: (() => void) | undefined;
 
     try {
       let opPromise: Promise<unknown>;
@@ -304,7 +355,6 @@ export class RunUiInteractionScheduler {
         }
       );
 
-      let abortCleanup: (() => void) | undefined;
       const abortPromise = new Promise<never>((_, reject) => {
         if (ticket.signal.aborted) {
           reject(ticket.signal.reason ?? new Error('Aborted'));
@@ -318,7 +368,6 @@ export class RunUiInteractionScheduler {
       });
 
       const value = await Promise.race([opPromise, abortPromise]);
-      abortCleanup?.();
 
       if (ticket.signal.aborted) {
         throw ticket.signal.reason ?? new Error('Aborted');
@@ -334,6 +383,7 @@ export class RunUiInteractionScheduler {
         sessionAlias: ticket.sessionAlias,
         label: ticket.label,
         holdMs: finishedAt - startedAt,
+        outcome: 'resolved',
         at: finishedAt
       });
     } catch (error) {
@@ -341,26 +391,39 @@ export class RunUiInteractionScheduler {
       const isTimeout = isDomReadTimeout(error);
       const isActiveAbort = ticket.started && ticket.signal.aborted;
 
-      if (isTimeout || isActiveAbort) {
+      if ((isTimeout || isActiveAbort) && !this.stoppedSessions.has(ticket.sessionAlias)) {
         ticket.abortedActive = isActiveAbort;
-        this.quarantine(
+        this.poison(
           ticket.sessionAlias,
           ticket.label,
+          error,
           isTimeout ? 'DOM_READ_TIMEOUT' : 'ACTIVE_ABORT'
         );
         releaseNormally = false;
+      } else if (!isTimeout && !isActiveAbort) {
+        const finishedAt = Date.now();
+        this.emitEvent({
+          type: 'finished',
+          lane: 'foreground',
+          sessionAlias: ticket.sessionAlias,
+          label: ticket.label,
+          holdMs: finishedAt - startedAt,
+          outcome: 'rejected',
+          at: finishedAt
+        });
       }
 
       ticket.reject(error);
     } finally {
-      this.activeForeground--;
-      if (this.currentForegroundOwner === ticket.sessionAlias) {
-        this.currentForegroundOwner = undefined;
-      }
-      if (releaseNormally) {
-        queueMicrotask(() => {
-          this.processQueue('foreground');
-        });
+      abortCleanup?.();
+      if (releaseNormally && this.currentForegroundOwner === ticket.sessionAlias) {
+        if (!this.poisonedSessions.has(ticket.sessionAlias) || this.stoppedSessions.has(ticket.sessionAlias)) {
+          this.activeForeground--;
+          this.currentForegroundOwner = undefined;
+          queueMicrotask(() => {
+            this.processQueue('foreground');
+          });
+        }
       }
     }
   }
@@ -380,6 +443,8 @@ export class RunUiInteractionScheduler {
     });
 
     let callerSettled = false;
+    let abortCleanup: (() => void) | undefined;
+    let releaseNormally = true;
 
     try {
       let opPromise: Promise<unknown>;
@@ -414,7 +479,6 @@ export class RunUiInteractionScheduler {
         }
       );
 
-      let abortCleanup: (() => void) | undefined;
       const abortPromise = new Promise<never>((_, reject) => {
         if (ticket.signal.aborted) {
           reject(ticket.signal.reason ?? new Error('Aborted'));
@@ -428,7 +492,6 @@ export class RunUiInteractionScheduler {
       });
 
       const value = await Promise.race([opPromise, abortPromise]);
-      abortCleanup?.();
 
       if (ticket.signal.aborted) {
         throw ticket.signal.reason ?? new Error('Aborted');
@@ -444,28 +507,60 @@ export class RunUiInteractionScheduler {
         sessionAlias: ticket.sessionAlias,
         label: ticket.label,
         holdMs: finishedAt - startedAt,
+        outcome: 'resolved',
         at: finishedAt
       });
     } catch (error) {
       callerSettled = true;
-      if (ticket.started && ticket.signal.aborted) {
-        ticket.abortedActive = true;
+      const isTimeout = isDomReadTimeout(error);
+      const isActiveAbort = ticket.started && ticket.signal.aborted;
+      if (isTimeout || isActiveAbort) {
+        ticket.abortedActive = ticket.signal.aborted;
+        if (!this.stoppedSessions.has(ticket.sessionAlias)) {
+          this.retainedEditors.add(ticket.sessionAlias);
+          this.poison(
+            ticket.sessionAlias,
+            ticket.label,
+            error,
+            isTimeout ? 'DOM_READ_TIMEOUT' : 'ACTIVE_ABORT'
+          );
+          releaseNormally = false;
+        }
+      } else {
+        const finishedAt = Date.now();
+        this.emitEvent({
+          type: 'finished',
+          lane: 'editor',
+          sessionAlias: ticket.sessionAlias,
+          label: ticket.label,
+          holdMs: finishedAt - startedAt,
+          outcome: 'rejected',
+          at: finishedAt
+        });
       }
       ticket.reject(error);
     } finally {
-      this.activeEditor--;
-      queueMicrotask(() => {
-        this.processQueue('editor');
-      });
+      abortCleanup?.();
+      if (releaseNormally) {
+        if (this.poisonedSessions.has(ticket.sessionAlias) && !this.stoppedSessions.has(ticket.sessionAlias)) {
+          this.retainedEditors.add(ticket.sessionAlias);
+        } else {
+          this.releaseEditorOwner(ticket.sessionAlias);
+        }
+      }
     }
   }
 
-  private quarantine(
+  private poison(
     sessionAlias: string,
     label: string,
+    error: unknown,
     code: 'DOM_READ_TIMEOUT' | 'ACTIVE_ABORT'
   ): void {
-    this.quarantinedAlias = sessionAlias;
+    if (this.poisonedSessions.has(sessionAlias)) return;
+    this.poisonedSessions.set(sessionAlias, error);
+    this.quarantinedAlias ??= sessionAlias;
+    this.drainSessionQueues(sessionAlias, error);
     this.emitEvent({
       type: 'quarantined',
       sessionAlias,
@@ -475,7 +570,30 @@ export class RunUiInteractionScheduler {
     });
   }
 
+  private drainSessionQueues(sessionAlias: string, error: unknown): void {
+    for (const lane of ['foreground', 'editor'] as const) {
+      const queue = this.queues[lane];
+      for (let index = queue.length - 1; index >= 0; index--) {
+        const ticket = queue[index];
+        if (ticket.sessionAlias !== sessionAlias) continue;
+        queue.splice(index, 1);
+        ticket.cleanupAbortListener?.();
+        ticket.reject(error);
+      }
+    }
+  }
+
+  private releaseEditorOwner(sessionAlias: string): void {
+    const owned = this.activeEditorOwners.get(sessionAlias) ?? 0;
+    if (owned === 0) return;
+    if (owned === 1) this.activeEditorOwners.delete(sessionAlias);
+    else this.activeEditorOwners.set(sessionAlias, owned - 1);
+    this.activeEditor--;
+    queueMicrotask(() => this.processQueue('editor'));
+  }
+
   private emitEvent(event: UiSchedulerEvent): void {
+    if (event.type === 'late-settled' && this.stoppedSessions.has(event.sessionAlias)) return;
     try {
       this.onEvent?.(event);
     } catch {
@@ -484,12 +602,16 @@ export class RunUiInteractionScheduler {
   }
 }
 
-export function createDirectUiInteraction(signal: AbortSignal): AccountUiInteraction {
+export function createDirectUiInteraction(
+  signal: AbortSignal,
+  focusMode: 'native' | 'target' = 'native'
+): AccountUiInteraction {
   const run = async <T>(operation: () => Promise<T>): Promise<T> => {
     signal.throwIfAborted();
     return operation();
   };
   return {
+    focusMode,
     foreground: (_label, operation) => run(operation),
     editor: (_label, operation) => run(operation)
   };
@@ -498,7 +620,7 @@ export function createDirectUiInteraction(signal: AbortSignal): AccountUiInterac
 export function mapUiSchedulerEventToEvidence(
   runId: string,
   event: UiSchedulerEvent
-): AutomationEvidenceEvent {
+): AutomationEvidenceNonTerminalEvent {
   const at = new Date(event.at).toISOString();
   switch (event.type) {
     case 'queued':
@@ -507,9 +629,10 @@ export function mapUiSchedulerEventToEvidence(
         runId,
         at,
         sessionAlias: event.sessionAlias,
+        workerAlias: event.sessionAlias.split('-session-')[0],
         type: 'ui-queued',
         lane: event.lane,
-        label: event.label
+        label: toUiEvidenceLabel(event.label)
       };
     case 'started':
       return {
@@ -517,9 +640,10 @@ export function mapUiSchedulerEventToEvidence(
         runId,
         at,
         sessionAlias: event.sessionAlias,
+        workerAlias: event.sessionAlias.split('-session-')[0],
         type: 'ui-started',
         lane: event.lane,
-        label: event.label,
+        label: toUiEvidenceLabel(event.label),
         waitMs: event.waitMs
       };
     case 'finished':
@@ -528,10 +652,12 @@ export function mapUiSchedulerEventToEvidence(
         runId,
         at,
         sessionAlias: event.sessionAlias,
+        workerAlias: event.sessionAlias.split('-session-')[0],
         type: 'ui-finished',
         lane: event.lane,
-        label: event.label,
-        holdMs: event.holdMs
+        label: toUiEvidenceLabel(event.label),
+        holdMs: event.holdMs,
+        outcome: event.outcome
       };
     case 'quarantined':
       return {
@@ -539,8 +665,9 @@ export function mapUiSchedulerEventToEvidence(
         runId,
         at,
         sessionAlias: event.sessionAlias,
+        workerAlias: event.sessionAlias.split('-session-')[0],
         type: 'ui-quarantined',
-        label: event.label,
+        label: toUiEvidenceLabel(event.label),
         code: event.code
       };
     case 'profile-stopped':
@@ -549,6 +676,7 @@ export function mapUiSchedulerEventToEvidence(
         runId,
         at,
         sessionAlias: event.sessionAlias,
+        workerAlias: event.sessionAlias.split('-session-')[0],
         type: 'profile-stop',
         outcome: 'confirmed'
       };
@@ -558,8 +686,9 @@ export function mapUiSchedulerEventToEvidence(
         runId,
         at,
         sessionAlias: event.sessionAlias,
+        workerAlias: event.sessionAlias.split('-session-')[0],
         type: 'ui-late-settled',
-        label: event.label,
+        label: toUiEvidenceLabel(event.label),
         outcome: event.outcome
       };
     case 'shutdown':
@@ -576,4 +705,3 @@ export function mapUiSchedulerEventToEvidence(
     }
   }
 }
-

@@ -67,6 +67,7 @@ describe('Repository Layer Behavior Suite (Task 6 RED)', () => {
         retention: '30'
       },
       automation: {
+        maxBillablePurchases: 0,
         threadCount: 10,
         browser: 'multilogin',
         headless: false,

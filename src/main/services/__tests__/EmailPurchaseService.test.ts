@@ -7,16 +7,24 @@ import { createDatabaseConnection } from '../../database/connection';
 import { runMigrations } from '../../database/migrator';
 import { CredentialRepository } from '../../repositories/CredentialRepository';
 import { PurchasedEmailRepository } from '../../repositories/PurchasedEmailRepository';
+import { AccountMutationRepository } from '../../repositories/AccountMutationRepository';
 import {
   EmailPurchaseService,
+  type BillablePurchaseEvent,
   type IGmail94EmailApi,
-  type IDongVanFBEmailApi
+  type IDongVanFBEmailApi,
+  type PurchaseOptions,
+  type ReservedEmail
 } from '../EmailPurchaseService';
 import type { ICredentialVault } from '../../security/CredentialVault';
 import type { DongVanPurchasedMail, DongVanCodeResult } from '../../providers/DongVanFBProvider';
 import type { ICustomDomainMailApi } from '../EmailPurchaseService';
 import { ProviderError } from '../../providers/ProviderError';
+import { DongVanFBProvider } from '../../providers/DongVanFBProvider';
+import type { HttpClient, HttpResponse } from '../../providers/HttpClient';
+import { AutomationTerminalError } from '../AutomationTerminalError';
 import type { Gmail94Profile, Gmail94Service } from '../../providers/Gmail94Provider';
+import type { ObservationIdentity, ObservationScope } from '../../providers/ObservedHttpClient';
 
 class PlainVault implements ICredentialVault {
   isAvailable(): boolean { return true; }
@@ -36,7 +44,7 @@ class StubGmail94 implements IGmail94EmailApi {
     balance: 0
   };
   public services: Gmail94Service[] = [];
-  public orderFailures: ProviderError[] = [];
+  public orderFailures: Error[] = [];
   public createGate: Promise<void> | null = null;
   public profileCalls = 0;
   public failAfter = Number.POSITIVE_INFINITY;
@@ -128,7 +136,7 @@ let dongvan: StubDongVanFB;
 let customDomain: StubCustomDomain;
 let idCounter: number;
 
-function createService(): EmailPurchaseService {
+function createService(observation?: ObservationScope): EmailPurchaseService {
   return new EmailPurchaseService(
     credRepo,
     purchasedRepo,
@@ -140,7 +148,32 @@ function createService(): EmailPurchaseService {
         domain: 'oldevlk.com',
         apiBaseUrl: 'http://103.116.38.76:3000',
         senderFilter: 'capcut'
-      })
+      }),
+      observation
+    }
+  );
+}
+
+function createFencedService(): EmailPurchaseService {
+  const mutationRepo = new AccountMutationRepository(db);
+  mutationRepo.registerApproval({
+    authorityRef: 'auth-test',
+    budgetOwnerRef: 'budget-test',
+    provider: 'gmail94',
+    approvedUnits: 2
+  });
+  return new EmailPurchaseService(
+    credRepo,
+    purchasedRepo,
+    vault,
+    { gmail94: gmail, dongvanfb: dongvan, customdomain: customDomain },
+    {
+      nextId: () => 'pe-' + ++idCounter,
+      mutationContext: {
+        repository: mutationRepo,
+        authorityRef: 'auth-test',
+        budgetOwnerRef: 'budget-test'
+      }
     }
   );
 }
@@ -174,12 +207,158 @@ afterEach(() => {
 });
 
 describe('EmailPurchaseService acquisition with Gmail94', () => {
+  it('records the durable guard before dispatch and refuses provider calls without approval', async () => {
+    storeKey('gmail94', 'GM-KEY');
+    const mutationRepo = new AccountMutationRepository(db);
+    const service = new EmailPurchaseService(
+      credRepo,
+      purchasedRepo,
+      vault,
+      { gmail94: gmail, dongvanfb: dongvan, customdomain: customDomain },
+      {
+        nextId: () => 'pe-' + ++idCounter,
+        mutationContext: {
+          repository: mutationRepo,
+          authorityRef: 'missing-approval',
+          budgetOwnerRef: 'budget-test'
+        }
+      }
+    );
+    const session = await service.openAcquisitionSession('gmail94', 1, { maxBillablePurchases: 1 }, new AbortController().signal);
+
+    await expect(session.acquireOne('worker-1', new AbortController().signal, {
+      ownerRef: 'owner-1', runId: 'run-1', stepAttemptId: 'attempt-1'
+    })).rejects.toThrow();
+    expect(gmail.createCalls).toHaveLength(0);
+  });
+
+  it('keeps UNKNOWN after reservation persistence failure and blocks replacement purchases after reopen', async () => {
+    storeKey('gmail94', 'GM-KEY');
+    const service = createFencedService();
+    const session = await service.openAcquisitionSession('gmail94', 1, { maxBillablePurchases: 2 }, new AbortController().signal);
+    vi.spyOn(purchasedRepo, 'insertReserved').mockImplementation(() => {
+      throw new Error('reservation persistence failed');
+    });
+
+    await expect(session.acquireOne('worker-1', new AbortController().signal, {
+      ownerRef: 'owner-1', runId: 'run-1', stepAttemptId: 'attempt-1'
+    })).rejects.toThrow();
+    expect(gmail.createCalls).toHaveLength(1);
+
+    db.close();
+    db = createDatabaseConnection(path.join(tmpDir, 'test.db'));
+    runMigrations(db);
+    credRepo = new CredentialRepository(db);
+    purchasedRepo = new PurchasedEmailRepository(db);
+    const reopenedMutationRepo = new AccountMutationRepository(db);
+    expect(reopenedMutationRepo.listBlocking({
+      authorityRef: 'auth-test', budgetOwnerRef: 'budget-test', ownerRef: 'owner-2', operation: 'purchase'
+    })).toHaveLength(1);
+    const reopenedService = new EmailPurchaseService(
+      credRepo,
+      purchasedRepo,
+      vault,
+      { gmail94: gmail, dongvanfb: dongvan, customdomain: customDomain },
+      {
+        nextId: () => 'pe-' + ++idCounter,
+        mutationContext: { repository: reopenedMutationRepo, authorityRef: 'auth-test', budgetOwnerRef: 'budget-test' }
+      }
+    );
+    const reopenedSession = await reopenedService.openAcquisitionSession('gmail94', 1, { maxBillablePurchases: 2 }, new AbortController().signal);
+    await expect(reopenedSession.acquireOne('worker-2', new AbortController().signal, {
+      ownerRef: 'owner-2', runId: 'run-2', stepAttemptId: 'attempt-2'
+    })).rejects.toThrow();
+    expect(gmail.createCalls).toHaveLength(1);
+  });
+
+  it('refuses a duplicate attempt without dispatching or consuming a second unit', async () => {
+    storeKey('gmail94', 'GM-KEY');
+    const service = createFencedService();
+    const signal = new AbortController().signal;
+    const session = await service.openAcquisitionSession('gmail94', 1, { maxBillablePurchases: 2 }, signal);
+    const identity = {
+      ownerRef: 'owner-duplicate', runId: 'run-1', stepAttemptId: 'attempt-duplicate'
+    };
+
+    await session.acquireOne('worker-1', signal, identity);
+    await expect(session.acquireOne('worker-1', signal, identity)).rejects.toThrow();
+
+    expect(gmail.createCalls).toHaveLength(1);
+    expect(new AccountMutationRepository(db).getApproval('auth-test')?.consumedUnits).toBe(1);
+  });
+
+  it('settles three independent purchased mailboxes without cross-binding peers', async () => {
+    storeKey('gmail94', 'GM-KEY');
+    const mutationRepo = new AccountMutationRepository(db);
+    mutationRepo.registerApproval({
+      authorityRef: 'auth-three', budgetOwnerRef: 'budget-three', provider: 'gmail94', approvedUnits: 3
+    });
+    const service = new EmailPurchaseService(
+      credRepo, purchasedRepo, vault,
+      { gmail94: gmail, dongvanfb: dongvan, customdomain: customDomain },
+      {
+        nextId: () => 'pe-' + ++idCounter,
+        mutationContext: { repository: mutationRepo, authorityRef: 'auth-three', budgetOwnerRef: 'budget-three' }
+      }
+    );
+    const signal = new AbortController().signal;
+    const session = await service.openAcquisitionSession('gmail94', 3, { maxBillablePurchases: 3 }, signal);
+
+    const results = [];
+    for (let index = 1; index <= 3; index += 1) {
+      const result = await session.acquireOne(`worker-${index}`, signal, {
+        ownerRef: `owner-${index}`, runId: 'run-three', stepAttemptId: `attempt-${index}`
+      });
+      results.push(result);
+    }
+
+    expect(mutationRepo.getApproval('auth-three')?.consumedUnits).toBe(3);
+    results.forEach((result, index) => {
+      const ownerRef = `owner-${index + 1}`;
+      expect(mutationRepo.getBinding(ownerRef)?.mailboxRef).toBe(result.purchasedEmail.id);
+      expect(mutationRepo.getIntent('auth-three', `purchase:${ownerRef}:attempt-${index + 1}`)?.state)
+        .toBe('effect-confirmed');
+    });
+    expect(new Set(results.map((result) => mutationRepo.getBinding(result.ownerRef!)?.mailboxRef)).size).toBe(3);
+  });
+
+  it('classifies preflight and purchase provider calls without exposing credentials', async () => {
+    storeKey('gmail94', 'GM-KEY');
+    gmail.profile = { name: null, email: null, balance: 100 };
+    gmail.services = [{ id: 1, name: 'CapCut', slug: 'capcut', price: 10 }];
+    const identities: Readonly<ObservationIdentity>[] = [];
+    const service = createService({
+      withObservationScope: async (identity, operation) => {
+        identities.push(identity);
+        return operation();
+      }
+    });
+    const signal = new AbortController().signal;
+
+    const session = await service.openAcquisitionSession(
+      'gmail94', 1, { maxBillablePurchases: 1 }, signal
+    );
+    await session.acquireOne('worker-1', signal);
+
+    expect(identities).toEqual([
+      { provider: 'gmail94', operation: 'profile' },
+      { provider: 'gmail94', operation: 'service-list' },
+      { provider: 'gmail94', operation: 'mailbox-purchase' }
+    ]);
+    expect(JSON.stringify(identities)).not.toContain('GM-KEY');
+  });
+
   it('rents one mailbox per thread and stores every order id', async () => {
     storeKey('gmail94', 'GM-KEY');
     const service = createService();
     const signal = new AbortController().signal;
 
-    const session = await service.openAcquisitionSession('gmail94', 3, { service: 'facebook' }, signal);
+    const session = await service.openAcquisitionSession(
+      'gmail94',
+      3,
+      { service: 'facebook', maxBillablePurchases: 3 },
+      signal
+    );
     const item1 = await session.acquireOne('worker-1', signal);
     const item2 = await session.acquireOne('worker-2', signal);
     const item3 = await session.acquireOne('worker-3', signal);
@@ -195,7 +374,12 @@ describe('EmailPurchaseService acquisition with Gmail94', () => {
   it('refuses to purchase when the provider has no api key configured', async () => {
     const service = createService();
     const signal = new AbortController().signal;
-    await expect(service.openAcquisitionSession('gmail94', 1, {}, signal)).rejects.toMatchObject({ code: 'CONFIG_ERROR' });
+    await expect(service.openAcquisitionSession(
+      'gmail94',
+      1,
+      { maxBillablePurchases: 1 },
+      signal
+    )).rejects.toMatchObject({ code: 'CONFIG_ERROR' });
   });
 
   /**
@@ -208,7 +392,12 @@ describe('EmailPurchaseService acquisition with Gmail94', () => {
     const service = createService();
     const signal = new AbortController().signal;
 
-    const session = await service.openAcquisitionSession('gmail94', 1, {}, signal);
+    const session = await service.openAcquisitionSession(
+      'gmail94',
+      1,
+      { maxBillablePurchases: 1 },
+      signal
+    );
     await session.acquireOne('worker-1', signal);
 
     expect(gmail.createCalls[0].service).toBe('capcut');
@@ -239,7 +428,12 @@ describe('EmailPurchaseService acquisition with Gmail94', () => {
     const service = createService();
     const signal = new AbortController().signal;
 
-    const session = await service.openAcquisitionSession('gmail94', 2, {}, signal);
+    const session = await service.openAcquisitionSession(
+      'gmail94',
+      2,
+      { maxBillablePurchases: 0 },
+      signal
+    );
     const item1 = await session.acquireOne('worker-1', signal);
     const item2 = await session.acquireOne('worker-2', signal);
 
@@ -254,14 +448,24 @@ describe('EmailPurchaseService acquisition with Gmail94', () => {
     const service = createService();
     const signal = new AbortController().signal;
 
-    const session1 = await service.openAcquisitionSession('gmail94', 1, {}, signal);
+    const session1 = await service.openAcquisitionSession(
+      'gmail94',
+      1,
+      { maxBillablePurchases: 1 },
+      signal
+    );
     const first = await session1.acquireOne('worker-1', signal);
     db.prepare(
       "INSERT INTO accounts (id, email, email_provider) VALUES ('acc-1', 'mail1@gmail.com', 'gmail94')"
     ).run();
     session1.commit(first, 'acc-1');
 
-    const session2 = await service.openAcquisitionSession('gmail94', 1, {}, signal);
+    const session2 = await service.openAcquisitionSession(
+      'gmail94',
+      1,
+      { maxBillablePurchases: 1 },
+      signal
+    );
     await session2.acquireOne('worker-1', signal);
 
     expect(gmail.createCalls).toHaveLength(2);
@@ -276,11 +480,21 @@ describe('EmailPurchaseService acquisition with Gmail94', () => {
     const service = createService();
     const signal = new AbortController().signal;
 
-    const session1 = await service.openAcquisitionSession('gmail94', 1, {}, signal);
+    const session1 = await service.openAcquisitionSession(
+      'gmail94',
+      1,
+      { maxBillablePurchases: 1 },
+      signal
+    );
     const first = await session1.acquireOne('worker-1', signal);
     session1.release(first);
 
-    const session2 = await service.openAcquisitionSession('gmail94', 1, {}, signal);
+    const session2 = await service.openAcquisitionSession(
+      'gmail94',
+      1,
+      { maxBillablePurchases: 1 },
+      signal
+    );
     const again = await session2.acquireOne('worker-1', signal);
 
     expect(gmail.createCalls).toHaveLength(1);
@@ -303,7 +517,12 @@ describe('EmailPurchaseService acquisition with DongVanFB', () => {
     const service = createService();
     const signal = new AbortController().signal;
 
-    const session = await service.openAcquisitionSession('dongvanfb', 1, {}, signal);
+    const session = await service.openAcquisitionSession(
+      'dongvanfb',
+      1,
+      { maxBillablePurchases: 1 },
+      signal
+    );
     const item = await session.acquireOne('worker-1', signal);
 
     expect(item.purchasedEmail).toEqual({
@@ -332,7 +551,12 @@ describe('EmailPurchaseService acquisition with DongVanFB', () => {
     const service = createService();
     const signal = new AbortController().signal;
 
-    const session = await service.openAcquisitionSession('dongvanfb', 1, {}, signal);
+    const session = await service.openAcquisitionSession(
+      'dongvanfb',
+      1,
+      { maxBillablePurchases: 1 },
+      signal
+    );
     const item = await session.acquireOne('worker-1', signal);
 
     expect(dongvan.oauthCalls).toEqual(['b@hotmail.com']);
@@ -349,7 +573,12 @@ describe('EmailPurchaseService acquisition with DongVanFB', () => {
     const service = createService();
     const signal = new AbortController().signal;
 
-    const session = await service.openAcquisitionSession('dongvanfb', 1, {}, signal);
+    const session = await service.openAcquisitionSession(
+      'dongvanfb',
+      1,
+      { maxBillablePurchases: 1 },
+      signal
+    );
     await session.acquireOne('worker-1', signal);
 
     expect(dongvan.oauthCalls).toEqual([]);
@@ -443,7 +672,12 @@ describe('EmailPurchaseService với domain tự sở hữu', () => {
     const service = createService();
     const signal = new AbortController().signal;
 
-    const session = await service.openAcquisitionSession('customdomain', 4, {}, signal);
+    const session = await service.openAcquisitionSession(
+      'customdomain',
+      4,
+      { maxBillablePurchases: 0 },
+      signal
+    );
     const items = await Promise.all([
       session.acquireOne('w1', signal),
       session.acquireOne('w2', signal),
@@ -466,14 +700,24 @@ describe('EmailPurchaseService với domain tự sở hữu', () => {
   it('không cần API key nào để dùng domain tự sở hữu', async () => {
     const service = createService();
     const signal = new AbortController().signal;
-    await expect(service.openAcquisitionSession('customdomain', 1, {}, signal)).resolves.toBeDefined();
+    await expect(service.openAcquisitionSession(
+      'customdomain',
+      1,
+      { maxBillablePurchases: 0 },
+      signal
+    )).resolves.toBeDefined();
   });
 
   it('mỗi địa chỉ sinh ra là khác nhau', async () => {
     const service = createService();
     const signal = new AbortController().signal;
 
-    const session = await service.openAcquisitionSession('customdomain', 12, {}, signal);
+    const session = await service.openAcquisitionSession(
+      'customdomain',
+      12,
+      { maxBillablePurchases: 0 },
+      signal
+    );
     const items = await Promise.all(
       Array.from({ length: 12 }, (_, i) => session.acquireOne(`w${i}`, signal))
     );
@@ -485,7 +729,12 @@ describe('EmailPurchaseService với domain tự sở hữu', () => {
     const service = createService();
     const signal = new AbortController().signal;
 
-    const session = await service.openAcquisitionSession('customdomain', 2, {}, signal);
+    const session = await service.openAcquisitionSession(
+      'customdomain',
+      2,
+      { maxBillablePurchases: 0 },
+      signal
+    );
     await session.acquireOne('w1', signal);
     await session.acquireOne('w2', signal);
 
@@ -495,7 +744,12 @@ describe('EmailPurchaseService với domain tự sở hữu', () => {
   it('đọc OTP qua base url và bộ lọc người gửi trong cài đặt', async () => {
     const service = createService();
     const signal = new AbortController().signal;
-    const session = await service.openAcquisitionSession('customdomain', 1, {}, signal);
+    const session = await service.openAcquisitionSession(
+      'customdomain',
+      1,
+      { maxBillablePurchases: 0 },
+      signal
+    );
     const bought = await session.acquireOne('w1', signal);
     const address = bought.purchasedEmail.email;
     customDomain.otpByAddress.set(address, '260973');
@@ -511,7 +765,12 @@ describe('EmailPurchaseService với domain tự sở hữu', () => {
   it('trả null khi hộp thư chưa có mã', async () => {
     const service = createService();
     const signal = new AbortController().signal;
-    const session = await service.openAcquisitionSession('customdomain', 1, {}, signal);
+    const session = await service.openAcquisitionSession(
+      'customdomain',
+      1,
+      { maxBillablePurchases: 0 },
+      signal
+    );
     const bought = await session.acquireOne('w1', signal);
 
     await expect(service.readOtp(bought.purchasedEmail.id)).resolves.toBeNull();
@@ -539,7 +798,7 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
     const session = await createService().openAcquisitionSession(
       'gmail94',
       3,
-      { service: 'capcut' },
+      { service: 'capcut', maxBillablePurchases: 2 },
       new AbortController().signal
     );
 
@@ -564,7 +823,7 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
     await expect(createService().openAcquisitionSession(
       'gmail94',
       2,
-      {},
+      { maxBillablePurchases: 2 },
       new AbortController().signal
     )).rejects.toMatchObject({
       state: 'blocked',
@@ -586,7 +845,7 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
     const session = await createService().openAcquisitionSession(
       'gmail94',
       2,
-      {},
+      { maxBillablePurchases: 1 },
       new AbortController().signal
     );
 
@@ -608,7 +867,7 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
     const session = await createService().openAcquisitionSession(
       'gmail94',
       1,
-      { service: 'facebook' },
+      { service: 'facebook', maxBillablePurchases: 1 },
       new AbortController().signal
     );
 
@@ -628,7 +887,7 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
     const session = await createService().openAcquisitionSession(
       'gmail94',
       1,
-      {},
+      { maxBillablePurchases: 2 },
       new AbortController().signal
     );
 
@@ -660,7 +919,7 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
     const session = await createService().openAcquisitionSession(
       'gmail94',
       1,
-      {},
+      { maxBillablePurchases: 1 },
       new AbortController().signal
     );
     gmail.profile = { name: null, email: null, balance: 250 };
@@ -691,7 +950,7 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
     expect(gmail.createCalls).toHaveLength(1);
   });
 
-  it('retries only transient purchase failures with 500ms and 1500ms backoff', async () => {
+  it('blocks an ambiguous purchase instead of retrying the billable request', async () => {
     vi.useFakeTimers();
     storeKey('gmail94', 'GM-KEY');
     gmail.profile = { name: null, email: null, balance: 5000 };
@@ -703,24 +962,22 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
     const session = await createService().openAcquisitionSession(
       'gmail94',
       1,
-      {},
+      { maxBillablePurchases: 1 },
       new AbortController().signal
     );
 
-    const acquisition = session.acquireOne('worker-1', new AbortController().signal);
+    const acquisition = session.acquireOne('worker-1', new AbortController().signal).catch(e => e);
     await vi.advanceTimersByTimeAsync(0);
     expect(gmail.createCalls).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(499);
     expect(gmail.createCalls).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
-    expect(gmail.createCalls).toHaveLength(2);
+    expect(gmail.createCalls).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1499);
-    expect(gmail.createCalls).toHaveLength(2);
+    expect(gmail.createCalls).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
-    await expect(acquisition).resolves.toMatchObject({
-      purchasedEmail: { email: 'mail1@gmail.com' }
-    });
-    expect(gmail.createCalls).toHaveLength(3);
+    expect(await acquisition).toMatchObject({ reason: { code: 'PURCHASE_OUTCOME_UNKNOWN' } });
+    expect(gmail.createCalls).toHaveLength(1);
     vi.useRealTimers();
   });
 
@@ -736,7 +993,7 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
       const session = await createService().openAcquisitionSession(
         'gmail94',
         1,
-        {},
+        { maxBillablePurchases: 1 },
         new AbortController().signal
       );
 
@@ -747,7 +1004,7 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
     }
   );
 
-  it('cancels a transient backoff before another Gmail94 order', async () => {
+  it('does not retry a rate-limited purchase without a provider idempotency guarantee', async () => {
     vi.useFakeTimers();
     storeKey('gmail94', 'GM-KEY');
     gmail.profile = { name: null, email: null, balance: 5000 };
@@ -755,18 +1012,18 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
       { id: 29, name: 'CapCut', slug: 'capcut', price: 1000 }
     ];
     gmail.orderFailures = [
-      new ProviderError('NETWORK_ERROR', 'network', 'gmail94')
+      new ProviderError('RATE_LIMITED', 'rate', 'gmail94')
     ];
     const session = await createService().openAcquisitionSession(
       'gmail94',
       1,
-      {},
+      { maxBillablePurchases: 1 },
       new AbortController().signal
     );
     const controller = new AbortController();
 
     const acquisition = session.acquireOne('worker-1', controller.signal);
-    const expectation = expect(acquisition).rejects.toThrow('test cancellation');
+    const expectation = expect(acquisition).rejects.toMatchObject({ reason: { code: 'PURCHASE_OUTCOME_UNKNOWN' } });
     await vi.advanceTimersByTimeAsync(0);
     controller.abort(new Error('test cancellation'));
     await vi.advanceTimersByTimeAsync(500);
@@ -775,7 +1032,7 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
     expect(gmail.createCalls).toHaveLength(1);
   });
 
-  it('blocks with PROVIDER_RETRY_EXHAUSTED after exactly three transient attempts', async () => {
+  it('does not expose raw transport failures or send another order', async () => {
     vi.useFakeTimers();
     storeKey('gmail94', 'GM-KEY');
     gmail.profile = { name: null, email: null, balance: 5000 };
@@ -783,14 +1040,14 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
       { id: 29, name: 'CapCut', slug: 'capcut', price: 1000 }
     ];
     gmail.orderFailures = [
-      new ProviderError('NETWORK_ERROR', 'one', 'gmail94'),
+      new Error('token=secret-one'),
       new ProviderError('RATE_LIMITED', 'two', 'gmail94'),
       new ProviderError('NETWORK_ERROR', 'three', 'gmail94')
     ];
     const session = await createService().openAcquisitionSession(
       'gmail94',
       1,
-      {},
+      { maxBillablePurchases: 1 },
       new AbortController().signal
     );
 
@@ -801,15 +1058,15 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
     const expectation = expect(acquisition).rejects.toMatchObject({
       state: 'blocked',
       reason: {
-        code: 'PROVIDER_RETRY_EXHAUSTED',
+        code: 'PURCHASE_OUTCOME_UNKNOWN',
         provider: 'gmail94',
-        details: { attempts: 3 }
+        details: { attempts: 1 }
       }
     });
     await vi.advanceTimersByTimeAsync(2_000);
 
     await expectation;
-    expect(gmail.createCalls).toHaveLength(3);
+    expect(gmail.createCalls).toHaveLength(1);
   });
 
   it('cancels a worker waiting behind the serialized purchase queue', async () => {
@@ -823,7 +1080,7 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
     const session = await createService().openAcquisitionSession(
       'gmail94',
       2,
-      {},
+      { maxBillablePurchases: 2 },
       new AbortController().signal
     );
     const first = session.acquireOne('worker-1', new AbortController().signal);
@@ -850,5 +1107,542 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
 
     expect(rejectedBeforeFirstFinished).toBe(true);
     expect(gmail.createCalls).toHaveLength(2);
+    expect(session.purchaseStats()).toEqual({
+      budget: 2,
+      attempted: 2,
+      confirmed: 2,
+      ambiguous: 0
+    });
+  });
+
+  describe('Task 12: Billable provider budget enforcement at dispatch boundary', () => {
+    it('requires an explicit non-negative integer purchase budget for Gmail94 and DongVan', async () => {
+      storeKey('gmail94', 'GM-KEY');
+      storeKey('dongvanfb', 'DV-KEY');
+      gmail.profile = { name: null, email: null, balance: 5000 };
+      gmail.services = [{ id: 29, name: 'CapCut', slug: 'capcut', price: 1000 }];
+
+      const service = createService();
+      const invalidBudgets = [undefined, -1, 1.5, Number.NaN];
+
+      for (const budget of invalidBudgets) {
+        const invalidOptions = {
+          maxBillablePurchases: budget
+        } as unknown as PurchaseOptions;
+        await expect(
+          service.openAcquisitionSession('gmail94', 1, invalidOptions, new AbortController().signal)
+        ).rejects.toThrow(ProviderError);
+
+        await expect(
+          service.openAcquisitionSession('dongvanfb', 1, invalidOptions, new AbortController().signal)
+        ).rejects.toThrow(ProviderError);
+      }
+
+      expect(gmail.profileCalls).toBe(0);
+      expect(gmail.createCalls).toHaveLength(0);
+      expect(dongvan.buyCalls).toBe(0);
+
+      // zero is valid for reuse-only
+      const zeroGmail = await service.openAcquisitionSession('gmail94', 0, { maxBillablePurchases: 0 }, new AbortController().signal);
+      expect(zeroGmail.purchaseStats().budget).toBe(0);
+
+      // one permits at most one dispatch
+      const oneGmail = await service.openAcquisitionSession('gmail94', 1, { maxBillablePurchases: 1 }, new AbortController().signal);
+      expect(oneGmail.purchaseStats().budget).toBe(1);
+    });
+
+    it('reused Gmail94 inventory consumes no billable budget', async () => {
+      storeKey('gmail94', 'GM-KEY');
+      gmail.profile = { name: null, email: null, balance: 5000 };
+      gmail.services = [{ id: 29, name: 'CapCut', slug: 'capcut', price: 1000 }];
+      purchasedRepo.insertReserved({ id: 'reused-1', provider: 'gmail94', email: 'reused1@gmail.com', service: 'capcut' }, 'initial');
+      purchasedRepo.releaseReservation('reused-1', 'initial');
+      purchasedRepo.insertReserved({ id: 'reused-2', provider: 'gmail94', email: 'reused2@gmail.com', service: 'capcut' }, 'initial');
+      purchasedRepo.releaseReservation('reused-2', 'initial');
+
+      const session = await createService().openAcquisitionSession('gmail94', 2, { maxBillablePurchases: 0 }, new AbortController().signal);
+      const res1 = await session.acquireOne('w1', new AbortController().signal);
+      const res2 = await session.acquireOne('w2', new AbortController().signal);
+
+      expect(res1.purchasedEmail.id).toBe('reused-1');
+      expect(res2.purchasedEmail.id).toBe('reused-2');
+      expect(gmail.createCalls).toHaveLength(0);
+      expect(session.purchaseStats()).toEqual({
+        budget: 0,
+        attempted: 0,
+        confirmed: 0,
+        ambiguous: 0
+      });
+    });
+
+    it('reused DongVan inventory consumes no billable budget', async () => {
+      storeKey('dongvanfb', 'DV-KEY');
+      purchasedRepo.insertReserved({ id: 'dv-reused-1', provider: 'dongvanfb', email: 'dv1@dongvan.com' }, 'initial');
+      purchasedRepo.releaseReservation('dv-reused-1', 'initial');
+      purchasedRepo.insertReserved({ id: 'dv-reused-2', provider: 'dongvanfb', email: 'dv2@dongvan.com' }, 'initial');
+      purchasedRepo.releaseReservation('dv-reused-2', 'initial');
+
+      const session = await createService().openAcquisitionSession('dongvanfb', 2, { maxBillablePurchases: 0 }, new AbortController().signal);
+      const res1 = await session.acquireOne('w1', new AbortController().signal);
+      const res2 = await session.acquireOne('w2', new AbortController().signal);
+
+      expect(res1.purchasedEmail.id).toBe('dv-reused-1');
+      expect(res2.purchasedEmail.id).toBe('dv-reused-2');
+      expect(dongvan.buyCalls).toBe(0);
+      expect(session.purchaseStats()).toEqual({
+        budget: 0,
+        attempted: 0,
+        confirmed: 0,
+        ambiguous: 0
+      });
+    });
+
+    it('atomically caps concurrent Gmail94 dispatches', async () => {
+      storeKey('gmail94', 'GM-KEY');
+      gmail.profile = { name: null, email: null, balance: 10000 };
+      gmail.services = [{ id: 29, name: 'CapCut', slug: 'capcut', price: 1000 }];
+
+      const session = await createService().openAcquisitionSession('gmail94', 2, { maxBillablePurchases: 2 }, new AbortController().signal);
+      const results = await Promise.allSettled(
+        Array.from({ length: 5 }, (_, i) => session.acquireOne(`worker-${i}`, new AbortController().signal))
+      );
+
+      const fulfilled = results.filter((r): r is PromiseFulfilledResult<ReservedEmail> => r.status === 'fulfilled');
+      const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+
+      expect(fulfilled).toHaveLength(2);
+      expect(rejected).toHaveLength(3);
+      expect(gmail.createCalls).toHaveLength(2);
+
+      for (const rej of rejected) {
+        expect(rej.reason).toBeInstanceOf(AutomationTerminalError);
+        expect((rej.reason as AutomationTerminalError).reason.code).toBe('BILLABLE_PURCHASE_LIMIT_REACHED');
+      }
+
+      const stats = session.purchaseStats();
+      expect(stats.budget).toBe(2);
+      expect(stats.attempted).toBe(2);
+      expect(stats.confirmed).toBe(2);
+      expect(stats.ambiguous).toBe(0);
+    });
+
+    it('atomically caps concurrent DongVan dispatches', async () => {
+      storeKey('dongvanfb', 'DV-KEY');
+      dongvan.rows = [
+        [{
+          email: 'm1@dv.com',
+          password: 'p1',
+          refreshToken: null,
+          clientId: null,
+          raw: 'm1@dv.com|p1'
+        }],
+        [{
+          email: 'm2@dv.com',
+          password: 'p2',
+          refreshToken: null,
+          clientId: null,
+          raw: 'm2@dv.com|p2'
+        }],
+        [{
+          email: 'm3@dv.com',
+          password: 'p3',
+          refreshToken: null,
+          clientId: null,
+          raw: 'm3@dv.com|p3'
+        }]
+      ];
+
+      const session = await createService().openAcquisitionSession('dongvanfb', 2, { maxBillablePurchases: 2 }, new AbortController().signal);
+      const results = await Promise.allSettled(
+        Array.from({ length: 5 }, (_, i) => session.acquireOne(`worker-${i}`, new AbortController().signal))
+      );
+
+      const fulfilled = results.filter((r): r is PromiseFulfilledResult<ReservedEmail> => r.status === 'fulfilled');
+      const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+
+      expect(fulfilled).toHaveLength(2);
+      expect(rejected).toHaveLength(3);
+      expect(dongvan.buyCalls).toBe(2);
+
+      for (const rej of rejected) {
+        expect(rej.reason).toBeInstanceOf(AutomationTerminalError);
+        expect((rej.reason as AutomationTerminalError).reason.code).toBe('BILLABLE_PURCHASE_LIMIT_REACHED');
+      }
+
+      const stats = session.purchaseStats();
+      expect(stats.budget).toBe(2);
+      expect(stats.attempted).toBe(2);
+      expect(stats.confirmed).toBe(2);
+      expect(stats.ambiguous).toBe(0);
+    });
+
+    it('consumes budget immediately before provider dispatch', async () => {
+      storeKey('gmail94', 'GM-KEY');
+      gmail.profile = { name: null, email: null, balance: 5000 };
+      gmail.services = [{ id: 29, name: 'CapCut', slug: 'capcut', price: 1000 }];
+
+      let releaseProvider: () => void = () => {};
+      gmail.createGate = new Promise<void>((resolve) => { releaseProvider = resolve; });
+
+      const purchaseEvents: BillablePurchaseEvent[] = [];
+      const session = await createService().openAcquisitionSession(
+        'gmail94',
+        1,
+        {
+          maxBillablePurchases: 1,
+          onPurchaseEvent: (ev) => purchaseEvents.push(ev)
+        },
+        new AbortController().signal
+      );
+
+      const acquirePromise = session.acquireOne('w1', new AbortController().signal);
+      while (gmail.createCalls.length === 0) await Promise.resolve();
+
+      // Before provider resolves: attempted must be 1, confirmed 0
+      expect(purchaseEvents).toHaveLength(1);
+      expect(purchaseEvents[0].outcome).toBe('attempted');
+      expect(purchaseEvents[0].stats.attempted).toBe(1);
+      expect(purchaseEvents[0].stats.confirmed).toBe(0);
+
+      releaseProvider();
+      await acquirePromise;
+
+      expect(purchaseEvents).toHaveLength(2);
+      expect(purchaseEvents[1].outcome).toBe('confirmed');
+      expect(purchaseEvents[1].stats.confirmed).toBe(1);
+    });
+
+    it('ambiguous Gmail94 outcome consumes one unit and cannot retry', async () => {
+      storeKey('gmail94', 'GM-KEY');
+      gmail.profile = { name: null, email: null, balance: 5000 };
+      gmail.services = [{ id: 29, name: 'CapCut', slug: 'capcut', price: 1000 }];
+      gmail.orderFailures = [new Error('Network timeout during dispatch')];
+
+      const session = await createService().openAcquisitionSession('gmail94', 1, { maxBillablePurchases: 1 }, new AbortController().signal);
+
+      await expect(session.acquireOne('w1', new AbortController().signal)).rejects.toMatchObject({
+        state: 'blocked',
+        reason: { code: 'PURCHASE_OUTCOME_UNKNOWN', provider: 'gmail94' }
+      });
+
+      const stats = session.purchaseStats();
+      expect(stats.attempted).toBe(1);
+      expect(stats.confirmed).toBe(0);
+      expect(stats.ambiguous).toBe(1);
+
+      // Second acquire is budget-blocked without calling provider again
+      await expect(session.acquireOne('w2', new AbortController().signal)).rejects.toMatchObject({
+        state: 'blocked',
+        reason: { code: 'BILLABLE_PURCHASE_LIMIT_REACHED', provider: 'gmail94' }
+      });
+
+      expect(gmail.createCalls).toHaveLength(1);
+    });
+
+    it('ambiguous DongVan outcome consumes one unit and cannot retry', async () => {
+      storeKey('dongvanfb', 'DV-KEY');
+      dongvan.rows = []; // will cause buyMail to throw
+
+      const session = await createService().openAcquisitionSession('dongvanfb', 1, { maxBillablePurchases: 1 }, new AbortController().signal);
+
+      await expect(session.acquireOne('w1', new AbortController().signal)).rejects.toMatchObject({
+        state: 'blocked',
+        reason: { code: 'PURCHASE_OUTCOME_UNKNOWN', provider: 'dongvanfb' }
+      });
+
+      const stats = session.purchaseStats();
+      expect(stats.attempted).toBe(1);
+      expect(stats.confirmed).toBe(0);
+      expect(stats.ambiguous).toBe(1);
+
+      // Second request is budget-blocked
+      await expect(session.acquireOne('w2', new AbortController().signal)).rejects.toMatchObject({
+        state: 'blocked',
+        reason: { code: 'BILLABLE_PURCHASE_LIMIT_REACHED', provider: 'dongvanfb' }
+      });
+
+      expect(dongvan.buyCalls).toBe(1);
+    });
+
+    it('treats a real DongVan malformed purchase response as ambiguous after dispatch', async () => {
+      storeKey('dongvanfb', 'DV-KEY');
+      const malformedResponse: HttpResponse = {
+        status: 200,
+        ok: true,
+        body: {
+          status: true,
+          data: { order_code: 'order-without-mail', list_data: [] }
+        },
+        rawText: '{"status":true}'
+      };
+      const http: HttpClient = {
+        async send(): Promise<HttpResponse> {
+          return malformedResponse;
+        }
+      };
+      const realDongVan = new DongVanFBProvider(http);
+      const service = new EmailPurchaseService(
+        credRepo,
+        purchasedRepo,
+        vault,
+        { gmail94: gmail, dongvanfb: realDongVan, customdomain: customDomain }
+      );
+      const session = await service.openAcquisitionSession(
+        'dongvanfb',
+        1,
+        { maxBillablePurchases: 1 },
+        new AbortController().signal
+      );
+
+      await expect(
+        session.acquireOne('worker-1', new AbortController().signal)
+      ).rejects.toMatchObject({
+        state: 'blocked',
+        reason: { code: 'PURCHASE_OUTCOME_UNKNOWN', provider: 'dongvanfb' }
+      });
+      expect(session.purchaseStats()).toEqual({
+        budget: 1,
+        attempted: 1,
+        confirmed: 0,
+        ambiguous: 1
+      });
+    });
+
+    it('poisons the session without consuming budget when attempted-event delivery fails', async () => {
+      storeKey('gmail94', 'fake-key');
+      gmail.profile = { name: null, email: null, balance: 5000 };
+      gmail.services = [{ id: 29, name: 'CapCut', slug: 'capcut', price: 1000 }];
+      let eventCalls = 0;
+      const session = await createService().openAcquisitionSession(
+        'gmail94',
+        1,
+        {
+          maxBillablePurchases: 1,
+          onPurchaseEvent: () => {
+            eventCalls += 1;
+            throw new Error('fake-event-delivery-failure');
+          }
+        },
+        new AbortController().signal
+      );
+
+      await expect(
+        session.acquireOne('worker-1', new AbortController().signal)
+      ).rejects.toMatchObject({
+        state: 'failed',
+        reason: { code: 'INTERNAL_ERROR', provider: 'gmail94' }
+      });
+      await expect(
+        session.acquireOne('worker-2', new AbortController().signal)
+      ).rejects.toMatchObject({
+        state: 'failed',
+        reason: { code: 'INTERNAL_ERROR', provider: 'gmail94' }
+      });
+
+      expect(eventCalls).toBe(1);
+      expect(gmail.createCalls).toHaveLength(0);
+      expect(session.purchaseStats()).toEqual({
+        budget: 1,
+        attempted: 0,
+        confirmed: 0,
+        ambiguous: 0
+      });
+    });
+
+    it('confirmed purchase increments confirmed exactly once', async () => {
+      storeKey('gmail94', 'GM-KEY');
+      gmail.profile = { name: null, email: null, balance: 5000 };
+      gmail.services = [{ id: 29, name: 'CapCut', slug: 'capcut', price: 1000 }];
+
+      const session = await createService().openAcquisitionSession('gmail94', 1, { maxBillablePurchases: 1 }, new AbortController().signal);
+      await session.acquireOne('w1', new AbortController().signal);
+
+      const stats = session.purchaseStats();
+      expect(stats.attempted).toBe(1);
+      expect(stats.confirmed).toBe(1);
+      expect(stats.ambiguous).toBe(0);
+
+      // Next acquire cannot dispatch
+      await expect(session.acquireOne('w2', new AbortController().signal)).rejects.toMatchObject({
+        state: 'blocked',
+        reason: { code: 'BILLABLE_PURCHASE_LIMIT_REACHED', provider: 'gmail94' }
+      });
+
+      expect(gmail.createCalls).toHaveLength(1);
+    });
+
+    it('purchase events contain no mailbox/order/provider credential values', async () => {
+      storeKey('gmail94', 'SECRET-API-TOKEN-XYZ');
+      gmail.profile = { name: null, email: null, balance: 5000 };
+      gmail.services = [{ id: 29, name: 'CapCut', slug: 'capcut', price: 1000 }];
+
+      const events: BillablePurchaseEvent[] = [];
+      const session = await createService().openAcquisitionSession(
+        'gmail94',
+        1,
+        {
+          maxBillablePurchases: 1,
+          onPurchaseEvent: (ev) => events.push(ev)
+        },
+        new AbortController().signal
+      );
+
+      await session.acquireOne('w1', new AbortController().signal);
+
+      expect(events.length).toBeGreaterThanOrEqual(1);
+      const forbiddenStrings = ['SECRET-API-TOKEN', 'mail1@gmail.com', 'order-1'];
+
+      for (const ev of events) {
+        const serialized = JSON.stringify(ev);
+        for (const forbidden of forbiddenStrings) {
+          expect(serialized).not.toContain(forbidden);
+        }
+        expect(ev).toHaveProperty('provider');
+        expect(ev).toHaveProperty('outcome');
+        expect(ev).toHaveProperty('stats');
+      }
+    });
+
+    it('counts provider confirmation before persistence can fail', async () => {
+      storeKey('gmail94', 'fake-key');
+      gmail.profile = { name: null, email: null, balance: 5000 };
+      gmail.services = [{ id: 29, name: 'CapCut', slug: 'capcut', price: 1000 }];
+      const session = await createService().openAcquisitionSession(
+        'gmail94',
+        1,
+        { maxBillablePurchases: 1 },
+        new AbortController().signal
+      );
+      vi.spyOn(purchasedRepo, 'insertReserved').mockImplementationOnce(() => {
+        throw new Error('fake-persistence-failure');
+      });
+
+      await expect(
+        session.acquireOne('worker-1', new AbortController().signal)
+      ).rejects.toThrow('fake-persistence-failure');
+      expect(gmail.createCalls).toHaveLength(1);
+      expect(session.purchaseStats()).toEqual({
+        budget: 1,
+        attempted: 1,
+        confirmed: 1,
+        ambiguous: 0
+      });
+    });
+
+    it('counts DongVan confirmation before OAuth enrichment can fail', async () => {
+      storeKey('dongvanfb', 'fake-key');
+      dongvan.rows = [[{
+        email: 'mail@example.invalid',
+        password: 'fake-password',
+        refreshToken: null,
+        clientId: null,
+        raw: 'fake-offline-row'
+      }]];
+      vi.spyOn(dongvan, 'getOauth2').mockRejectedValueOnce(
+        new Error('fake-oauth-enrichment-failure')
+      );
+      const session = await createService().openAcquisitionSession(
+        'dongvanfb',
+        1,
+        { maxBillablePurchases: 1 },
+        new AbortController().signal
+      );
+
+      await expect(
+        session.acquireOne('worker-1', new AbortController().signal)
+      ).rejects.toThrow('fake-oauth-enrichment-failure');
+      expect(dongvan.buyCalls).toBe(1);
+      expect(session.purchaseStats()).toEqual({
+        budget: 1,
+        attempted: 1,
+        confirmed: 1,
+        ambiguous: 0
+      });
+    });
+
+    it('pre-dispatch cancellation consumes no attempt', async () => {
+      storeKey('gmail94', 'fake-key');
+      gmail.profile = { name: null, email: null, balance: 5000 };
+      gmail.services = [{ id: 29, name: 'CapCut', slug: 'capcut', price: 1000 }];
+      const session = await createService().openAcquisitionSession(
+        'gmail94',
+        1,
+        { maxBillablePurchases: 1 },
+        new AbortController().signal
+      );
+      const controller = new AbortController();
+      controller.abort(new Error('cancel-before-dispatch'));
+
+      await expect(session.acquireOne('worker-1', controller.signal)).rejects.toThrow(
+        'cancel-before-dispatch'
+      );
+      expect(gmail.createCalls).toHaveLength(0);
+      expect(session.purchaseStats()).toEqual({
+        budget: 1,
+        attempted: 0,
+        confirmed: 0,
+        ambiguous: 0
+      });
+    });
+
+    it('post-dispatch cancellation cannot refund a confirmed attempt', async () => {
+      storeKey('gmail94', 'fake-key');
+      gmail.profile = { name: null, email: null, balance: 5000 };
+      gmail.services = [{ id: 29, name: 'CapCut', slug: 'capcut', price: 1000 }];
+      let releaseProvider: () => void = () => {};
+      gmail.createGate = new Promise<void>((resolve) => { releaseProvider = resolve; });
+      const session = await createService().openAcquisitionSession(
+        'gmail94',
+        1,
+        { maxBillablePurchases: 1 },
+        new AbortController().signal
+      );
+      const controller = new AbortController();
+      const acquisition = session.acquireOne('worker-1', controller.signal);
+      while (gmail.createCalls.length === 0) await Promise.resolve();
+
+      controller.abort(new Error('cancel-after-dispatch'));
+      releaseProvider();
+      await acquisition.catch(() => undefined);
+
+      expect(gmail.createCalls).toHaveLength(1);
+      expect(session.purchaseStats()).toEqual({
+        budget: 1,
+        attempted: 1,
+        confirmed: 1,
+        ambiguous: 0
+      });
+    });
+
+    it('returns independent stats copies to sessions and event consumers', async () => {
+      storeKey('gmail94', 'fake-key');
+      gmail.profile = { name: null, email: null, balance: 5000 };
+      gmail.services = [{ id: 29, name: 'CapCut', slug: 'capcut', price: 1000 }];
+      const events: BillablePurchaseEvent[] = [];
+      const session = await createService().openAcquisitionSession(
+        'gmail94',
+        1,
+        {
+          maxBillablePurchases: 1,
+          onPurchaseEvent: (event) => {
+            events.push(event);
+            event.stats.attempted = 99;
+          }
+        },
+        new AbortController().signal
+      );
+
+      await session.acquireOne('worker-1', new AbortController().signal);
+      const firstCopy = session.purchaseStats();
+      firstCopy.confirmed = 99;
+
+      expect(events).toHaveLength(2);
+      expect(session.purchaseStats()).toEqual({
+        budget: 1,
+        attempted: 1,
+        confirmed: 1,
+        ambiguous: 0
+      });
+    });
   });
 });

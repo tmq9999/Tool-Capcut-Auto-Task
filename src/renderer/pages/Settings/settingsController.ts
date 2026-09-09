@@ -46,7 +46,20 @@ export interface ISettingsBridge {
     save: (req: SettingsSaveRequestDTO) => Promise<IpcEnvelope<{ success: boolean }>>;
   };
   credentials?: {
-    test?: (serviceName: string) => Promise<IpcEnvelope<SanitizedDiagnosticResult>>;
+    test?: (
+      request:
+        | string
+        | {
+            serviceName: KnownServiceName;
+            draftSecret?: string;
+            multiloginDraft?: {
+              mode: 'token' | 'credentials';
+              automationToken?: string;
+              email?: string;
+              password?: string;
+            };
+          }
+    ) => Promise<IpcEnvelope<SanitizedDiagnosticResult>>;
   };
 }
 
@@ -297,8 +310,28 @@ export class SettingsController {
         return false;
       }
 
+      // Refresh credentials and settings from backend after saving
+      const refreshResponse = await this.bridge.settings.get();
+      let nextStatuses = this.state.credentialStatuses;
+      let nextSettings = this.state.settings;
+
+      if (refreshResponse.success) {
+        nextSettings = AppSettingsSchema.parse(refreshResponse.data.settings);
+        nextStatuses = createInitialStatuses();
+        if (Array.isArray(refreshResponse.data.credentials)) {
+          for (const rawCred of refreshResponse.data.credentials) {
+            const validCred = CredentialStatusDTOSchema.parse(rawCred);
+            if (KNOWN_SERVICES.includes(validCred.serviceName as KnownServiceName)) {
+              nextStatuses[validCred.serviceName as KnownServiceName] = validCred;
+            }
+          }
+        }
+      }
+
       this.state = {
         ...this.state,
+        settings: nextSettings,
+        credentialStatuses: nextStatuses,
         isSaving: false,
         isSaved: true,
         drafts: createInitialDrafts(),

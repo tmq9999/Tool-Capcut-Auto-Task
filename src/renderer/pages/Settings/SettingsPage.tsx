@@ -12,6 +12,7 @@ import {
   type ISettingsBridge,
   type SettingsState,
   type KnownServiceName,
+  type SimpleDraft,
 } from './settingsController';
 import { DEFAULT_APP_SETTINGS } from '@shared/settings/default-settings';
 import { applyTheme, writeBootPreferences } from '@renderer/app/appPreferences';
@@ -102,8 +103,96 @@ export const SettingsPage: React.FC = () => {
       });
       return;
     }
+
+    const status = state.credentialStatuses[serviceName];
+    const simpleDraft =
+      serviceName !== 'multilogin'
+        ? (state.drafts as unknown as Record<string, SimpleDraft>)[serviceName]
+        : undefined;
+    const multiloginDraft = state.drafts.multilogin;
+
+    let draftSecret: string | undefined;
+    let mlDraft:
+      | { mode: 'token' | 'credentials'; automationToken?: string; email?: string; password?: string }
+      | undefined;
+
+    if (serviceName === 'multilogin') {
+      if (multiloginDraft.action === 'replace') {
+        if (multiloginDraft.auth.mode === 'token') {
+          if (!multiloginDraft.auth.automationToken?.trim()) {
+            setTestResult({
+              service: serviceName,
+              code: 'CONFIG_ERROR',
+              message: 'Ô automation token đang trống. Vui lòng nhập token trước khi kiểm tra.',
+            });
+            return;
+          }
+          mlDraft = { mode: 'token', automationToken: multiloginDraft.auth.automationToken.trim() };
+        } else {
+          if (!multiloginDraft.auth.email?.trim() || !multiloginDraft.auth.password?.trim()) {
+            setTestResult({
+              service: serviceName,
+              code: 'CONFIG_ERROR',
+              message: 'Vui lòng nhập đầy đủ Email và Mật khẩu Multilogin trước khi kiểm tra.',
+            });
+            return;
+          }
+          mlDraft = {
+            mode: 'credentials',
+            email: multiloginDraft.auth.email.trim(),
+            password: multiloginDraft.auth.password.trim(),
+          };
+        }
+      } else if (multiloginDraft.action === 'clear') {
+        setTestResult({
+          service: serviceName,
+          code: 'CONFIG_ERROR',
+          message: 'Cấu hình Multilogin đã bị xóa (chưa lưu). Vui lòng nhập thông tin mới.',
+        });
+        return;
+      } else if (!status?.isConfigured) {
+        setTestResult({
+          service: serviceName,
+          code: 'CONFIG_ERROR',
+          message: 'Chưa thiết lập thông tin Multilogin. Vui lòng nhập token hoặc email/mật khẩu.',
+        });
+        return;
+      }
+    } else {
+      if (simpleDraft?.action === 'replace') {
+        draftSecret = simpleDraft.value.trim();
+        if (!draftSecret) {
+          setTestResult({
+            service: serviceName,
+            code: 'CONFIG_ERROR',
+            message: 'Ô nhập API key đang trống. Vui lòng nhập key trước khi kiểm tra.',
+          });
+          return;
+        }
+      } else if (simpleDraft?.action === 'clear') {
+        setTestResult({
+          service: serviceName,
+          code: 'CONFIG_ERROR',
+          message: 'API key đã bị xóa (chưa lưu). Vui lòng nhập key mới trước khi kiểm tra.',
+        });
+        return;
+      } else if (!status?.isConfigured) {
+        setTestResult({
+          service: serviceName,
+          code: 'CONFIG_ERROR',
+          message: 'Chưa thiết lập API key cho dịch vụ này. Vui lòng nhập key vào ô bên cạnh.',
+        });
+        return;
+      }
+    }
+
     try {
-      const res = await bridge.credentials.test(serviceName);
+      const payload = {
+        serviceName,
+        draftSecret,
+        multiloginDraft: mlDraft,
+      };
+      const res = await bridge.credentials.test(payload);
       if (res.success) {
         setTestResult({
           service: serviceName,

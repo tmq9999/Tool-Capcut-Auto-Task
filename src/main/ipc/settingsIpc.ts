@@ -74,7 +74,11 @@ export function registerSettingsIpc(
       }
 
       try {
-        const result = await connectionManager.testConnection(validation.data.serviceName);
+        const { serviceName, draftSecret, multiloginDraft } = validation.data;
+        const result =
+          draftSecret !== undefined || multiloginDraft !== undefined
+            ? await connectionManager.testConnection(serviceName, draftSecret, multiloginDraft)
+            : await connectionManager.testConnection(serviceName);
         return {
           success: true,
           data: result

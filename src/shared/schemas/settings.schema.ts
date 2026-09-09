@@ -35,8 +35,8 @@ export const BrowserSettingsSchema = z.object({
      *   `api-v3` — REST `/api/v3/profile/quick`, đã live test 01/09/2026.
      * Chi tiết và bảng so sánh: `docs/MERGE-PLAN.md`.
      */
-    launcher: z.enum(['xcli', 'api-v3']).default('xcli')
-  }).strict().default({ port: 35000, launcher: 'xcli' }),
+    launcher: z.enum(['xcli', 'api-v3']).default('api-v3')
+  }).strict().default({ port: 35000, launcher: 'api-v3' }),
   gologin: z.object({
     autoPort: z.boolean().default(true)
   }).strict().default({ autoPort: true }),
@@ -73,6 +73,8 @@ export type ExportSettingsDTO = z.infer<typeof ExportSettingsSchema>;
  */
 export const AutomationConfigSettingsSchema = z.object({
   threadCount: z.number().int().min(1).max(200).default(10),
+  mailLimit: z.number().int().min(0).max(200).optional(),
+  maxBillablePurchases: z.number().int().min(0).max(200).default(0),
   browser: z.enum(['multilogin', 'gologin', 'gpm', 'camoufox', 'patchright']).default('multilogin'),
   headless: z.boolean().default(false),
   retryCount: z.number().int().min(0).max(10).default(3),
@@ -108,6 +110,7 @@ export const AutomationConfigSettingsSchema = z.object({
   includeSpecial: z.boolean().default(false)
 }).strict().default({
   threadCount: 10,
+  maxBillablePurchases: 0,
   browser: 'multilogin',
   headless: false,
   retryCount: 3,

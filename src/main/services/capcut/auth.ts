@@ -29,6 +29,7 @@ import type { BrowserContext, Page } from 'playwright-core';
 import { isLoggedIn, loginCapcut, type CapcutCredentials } from './login';
 import { signupCapcut } from './signup';
 import type { AccountUiInteraction } from './types';
+import { isDomReadTimeout } from './cancellation';
 
 /**
  * Tài khoản tối thiểu mà tầng xác thực cần: email + password, cộng NGUỒN lấy
@@ -66,8 +67,8 @@ export interface AuthOptions {
    * `EmailPurchaseService`; thiếu nó mà CapCut đòi OTP thì signup ném lỗi rõ ràng.
    */
   getOtp?: (email: string) => Promise<string>;
-  ui?: AccountUiInteraction;
-  signal?: AbortSignal;
+  ui: AccountUiInteraction;
+  signal: AbortSignal;
   allowSignupFallback?: boolean;
 }
 
@@ -103,6 +104,9 @@ export async function ensureInApp(
   account: AuthAccount,
   opts: AuthOptions
 ): Promise<AuthResult> {
+  if (!opts.ui) throw new Error('UI_INTERACTION_REQUIRED');
+  if (!opts.signal) throw new Error('ABORT_SIGNAL_REQUIRED');
+  opts.signal.throwIfAborted();
   const log = opts.log;
 
   if (await isLoggedIn(page)) {
@@ -132,6 +136,8 @@ export async function ensureInApp(
   }
 
   await loginCapcut(page, context, account, log, { ui: opts.ui, signal: opts.signal }).catch((e: unknown) => {
+    opts.signal.throwIfAborted();
+    if (isDomReadTimeout(e)) throw e;
     log(`Đăng nhập thất bại: ${(e as Error).message}`);
   });
   if (await isLoggedIn(page)) return { mode: 'login', created: false };

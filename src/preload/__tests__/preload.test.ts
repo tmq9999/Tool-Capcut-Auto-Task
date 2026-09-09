@@ -122,6 +122,17 @@ describe('Preload Bridge (Task 2.1.3 RED)', () => {
     expect(result.success).toBe(true);
   });
 
+  it('sends health and userData only over the dedicated rollout channels', async () => {
+    await import('../preload');
+    const [, bridge] = mockContextBridge.exposeInMainWorld.mock.calls[0] as [string, ElectronBridge];
+    const request = { threadCount: 3 as const, rolloutStage: 3 as const, headless: false as const };
+    await bridge.run.health(request);
+    await bridge.run.userData();
+    expect(mockIpcRenderer.invoke.mock.calls).toEqual([
+      [IPC_CHANNELS.RUN_HEALTH, request], [IPC_CHANNELS.RUN_USER_DATA]
+    ]);
+  });
+
   it('calling bridge.settings.get() invokes SETTINGS_GET with no request payload', async () => {
     mockIpcRenderer.invoke.mockResolvedValue({
       success: true,

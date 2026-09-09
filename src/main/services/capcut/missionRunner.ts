@@ -16,12 +16,11 @@ import type { Locator, Page } from 'playwright-core';
 import { dump, StepError } from './diag';
 import { ensurePageUsable } from './overlays';
 import { foregroundPage } from './human';
-import { createDirectUiInteraction } from './uiInteractionScheduler';
 import type { ActionProof, CapcutTask, TaskSnapshot, TaskStore } from './taskApi';
-import type { AccountUiInteraction, CapcutMissionEnv, MissionGroup } from './types';
+import type { AccountUiInteraction, CapcutMissionEnv, MissionGroup, TaskClaimResult } from './types';
 import { URLS } from './urls';
 import { measureStage } from '../stageTiming';
-import { abortable, abortableDelay } from './cancellation';
+import { abortable, abortableDelay, isDomReadTimeout } from './cancellation';
 
 export type { CapcutMissionEnv, MissionGroup, TaskOutcome } from './types';
 
@@ -174,26 +173,32 @@ async function countTaskRows(page: Page): Promise<number> {
 export async function closeTaskPopover(
   page: Page,
   allowReload: boolean,
-  signal?: AbortSignal,
-  ui?: AccountUiInteraction
+  signal: AbortSignal,
+  ui: AccountUiInteraction
 ): Promise<boolean> {
-  signal?.throwIfAborted();
+  if (!signal) throw new Error('ABORT_SIGNAL_REQUIRED');
+  if (!ui) throw new Error('UI_INTERACTION_REQUIRED');
+  signal.throwIfAborted();
   if ((await countTaskRows(page)) === 0) return true;
-  const wait = (ms: number): Promise<void> => signal ? abortableDelay(ms, signal) : page.waitForTimeout(ms);
+  const wait = (ms: number): Promise<void> => abortableDelay(ms, signal);
 
-  const targetSig = signal ?? new AbortController().signal;
-  const targetUi = ui ?? createDirectUiInteraction(targetSig);
-  await foregroundPage(page, { signal: targetSig, stage: 'popover:escape', ui: targetUi }, () =>
+  await foregroundPage(page, { signal, stage: 'popover:escape', ui }, () =>
     page.keyboard.press('Escape')
-  ).catch(() => {});
+  ).catch((error: unknown) => {
+    signal.throwIfAborted();
+    if (isDomReadTimeout(error)) throw error;
+  });
   await wait(600);
   if ((await countTaskRows(page)) === 0) return true;
 
   if (!allowReload) return false;
 
-  signal?.throwIfAborted();
+  signal.throwIfAborted();
   const reload = page.reload({ waitUntil: 'domcontentloaded', timeout: 12_000 });
-  await (signal ? abortable(reload, signal) : reload).catch(() => { signal?.throwIfAborted(); });
+  await abortable(reload, signal).catch((error: unknown) => {
+    signal.throwIfAborted();
+    if (isDomReadTimeout(error)) throw error;
+  });
   await wait(5000);
   return (await countTaskRows(page)) === 0;
 }
@@ -207,9 +212,9 @@ export async function closeTaskPopover(
  */
 export async function assertNoPopover(
   page: Page,
-  log: LogFn = NO_LOG,
-  signal?: AbortSignal,
-  ui?: AccountUiInteraction
+  log: LogFn,
+  signal: AbortSignal,
+  ui: AccountUiInteraction
 ): Promise<void> {
   if (await closeTaskPopover(page, true, signal, ui)) return;
   // Câu này vừa đi vào log (LogBus) vừa là message của StepError: người đọc log
@@ -235,10 +240,18 @@ export async function reconcileMissionEvidence(
   need: Set<string>
 ): Promise<MissionGroupResult> {
   const actionStartedAt = Date.now();
+  if (env.verifyRewardStep) {
+    const error = new Error('REWARD_LEAF_BOUNDARY_REQUIRED');
+    const evidence = new Map<string, MissionEvidence>();
+    for (const key of need) {
+      evidence.set(key, { key, state: 'failed', error });
+    }
+    return { evidence, snapshot: store.snapshot(), actionSettledAt: actionStartedAt };
+  }
   let actError: Error | null = null;
   try {
     const runAct = () => group.act(env, need);
-    if (group.workspace === 'editor' && env.ui?.editor) {
+    if (group.workspace === 'editor') {
       await measureStage(
         'mission-action:' + group.name,
         () => env.ui.editor('mission:' + group.id, runAct),
@@ -258,13 +271,13 @@ export async function reconcileMissionEvidence(
     actError = error instanceof Error ? error : new Error(String(error));
   }
 
-  const actionSettledAt = Date.now();
+  const actionFinishedAt = Date.now();
 
   return measureStage(
     'mission-reconciliation:' + group.name,
     async () => {
       const budgetMs = actError ? Math.min(3000, group.proofTimeoutMs) : group.proofTimeoutMs;
-      const deadlineAt = actionSettledAt + budgetMs;
+      const deadlineAt = actionFinishedAt + budgetMs;
       const remaining = (): number => Math.max(0, deadlineAt - Date.now());
 
       const proofEntries = await Promise.all([...need].map(async (key) => {
@@ -321,6 +334,11 @@ export async function reconcileMissionEvidence(
         });
       }
 
+      // `requiredAfter` is a mutation watermark, not a mission-duration
+      // watermark. A task_list received after a successful do_action remains
+      // valid even when unrelated UI cleanup keeps `act()` alive afterward.
+      const actionSettledAt = Math.max(actionStartedAt, ...proofEntries.map(([, value]) =>
+        value instanceof Error || value.errNo !== 0 ? actionStartedAt : value.at));
       return { evidence, snapshot, actionSettledAt, ...((actError as { code?: string } | null)?.code === 'DOM_READ_TIMEOUT' ? { fatalError: actError! } : {}) };
     },
     env.log
@@ -334,7 +352,7 @@ export async function runGroup(
   need: Set<string>
 ): Promise<MissionGroupResult> {
   env.signal.throwIfAborted();
-  if (!await ensurePageUsable(env.page, env.log)) {
+  if (!await ensurePageUsable(env.page, env.log, env.ui, env.signal)) {
     throw new StepError('Modal vẫn phủ trang; không thao tác nhiệm vụ.', await dump(env.page, 'mission_overlay_blocked'));
   }
   // Simple tasks need this popover closed. Workspace groups navigate away from
@@ -390,12 +408,14 @@ export async function findTaskRow(
 export async function withTaskPopover<T>(
   page: Page,
   fn: () => Promise<T>,
-  log: LogFn = NO_LOG,
-  options: { signal?: AbortSignal; deadlineAt?: number; ui?: AccountUiInteraction } = {}
+  log: LogFn,
+  options: { signal: AbortSignal; deadlineAt?: number; ui: AccountUiInteraction }
 ): Promise<T> {
-  const signal = options.signal ?? new AbortController().signal;
+  const { signal, ui } = options;
+  if (!signal) throw new Error('ABORT_SIGNAL_REQUIRED');
+  if (!ui) throw new Error('UI_INTERACTION_REQUIRED');
+  signal.throwIfAborted();
   const deadlineAt = options.deadlineAt ?? Date.now() + 20_000;
-  const ui = options.ui ?? createDirectUiInteraction(signal);
   const remaining = (): number => {
     signal.throwIfAborted();
     if (page.isClosed()) throw new StepError('Tab đã đóng khi mở nhiệm vụ.');
@@ -424,7 +444,10 @@ export async function withTaskPopover<T>(
         log('Thử lối vào nhiệm vụ: ' + await describe(entry));
         await foregroundPage(page, { signal, stage: 'popover:entry-click', ui }, () =>
           abortable(entry.click({ timeout: Math.min(1500, ms), force: true }), signal)
-        ).catch(() => { signal.throwIfAborted(); });
+        ).catch((error: unknown) => {
+          signal.throwIfAborted();
+          if (isDomReadTimeout(error)) throw error;
+        });
         if (await waitRows(Math.min(1000, Math.max(0, until - Date.now())))) return true;
       }
       if (Date.now() < until) await abortableDelay(Math.min(200, until - Date.now()), signal);
@@ -435,30 +458,35 @@ export async function withTaskPopover<T>(
   await measureStage('popover-open', async () => {
     remaining();
     if (await countTaskRows(page) > 0) return;
-    if (!await ensurePageUsable(page, log)) throw new StepError('Modal vẫn phủ trang nhiệm vụ.');
+    if (!await ensurePageUsable(page, log, ui, signal)) throw new StepError('Modal vẫn phủ trang nhiệm vụ.');
     remaining();
-    await foregroundPage(page, { signal, stage: 'popover:bring-to-front', ui }, () =>
-      abortable(page.bringToFront(), signal)
-    );
     if (await tryHere(Math.min(5000, remaining()))) return;
     remaining();
     if (!page.url().includes('enter_source=web_task_earn_credit')) {
       log('Vào route nhiệm vụ; vẫn dùng cùng deadline.');
       await abortable(page.goto(URLS.tasks, { waitUntil: 'domcontentloaded', timeout: remaining() }), signal);
-      if (!await ensurePageUsable(page, log)) throw new StepError('Modal vẫn phủ trang nhiệm vụ.');
+      if (!await ensurePageUsable(page, log, ui, signal)) throw new StepError('Modal vẫn phủ trang nhiệm vụ.');
     }
     if (!await tryHere(remaining())) throw new StepError('Không mở được popover trong thời hạn.');
   }, log);
   remaining();
+  let skipCleanup = false;
   try {
     return await fn();
+  } catch (error: unknown) {
+    signal.throwIfAborted();
+    skipCleanup = isDomReadTimeout(error);
+    throw error;
   } finally {
     // Reload here destroys the deferred PWA prompt and can cancel do_action.
     // A pinned popover is handled at the next canvas-safe mission boundary.
-    if (!signal.aborted && !page.isClosed()) {
+    if (!skipCleanup && !signal.aborted && !page.isClosed()) {
       await measureStage('popover-close', async () => {
         if (!await closeTaskPopover(page, false, signal, ui)) log('Popover còn ghim; xử lý ở ranh giới nhóm kế tiếp.');
-      }, log).catch(() => {});
+      }, log).catch((error: unknown) => {
+        signal.throwIfAborted();
+        if (isDomReadTimeout(error)) throw error;
+      });
     }
   }
 }
@@ -475,42 +503,51 @@ export async function claimIfPending(
   page: Page,
   task: CapcutTask,
   store: TaskStore,
-  log: LogFn = NO_LOG,
-  signal?: AbortSignal,
-  ui?: AccountUiInteraction
-): Promise<boolean> {
-  if (task.status !== 2) return false;
+  log: LogFn,
+  signal: AbortSignal,
+  ui: AccountUiInteraction,
+  onActionSettled?: (at: number) => void
+): Promise<TaskClaimResult> {
+  if (!signal) throw new Error('ABORT_SIGNAL_REQUIRED');
+  if (!ui) throw new Error('UI_INTERACTION_REQUIRED');
+  signal.throwIfAborted();
+  if (task.status !== 2) return { claimed: false, actionSettledAt: null };
 
-  const mark = Date.now();
-  const targetSig = signal ?? new AbortController().signal;
-  const targetUi = ui ?? createDirectUiInteraction(targetSig);
-  await withTaskPopover(
+  const actionSettledAt = await withTaskPopover(
     page,
     async () => {
-      targetSig.throwIfAborted();
+      signal.throwIfAborted();
       const row = await findTaskRow(page, task.taskKey, task.title, log);
-      await foregroundPage(page, { signal: targetSig, stage: 'popover:claim', ui: targetUi }, () =>
+      const clicked = await foregroundPage(page, { signal, stage: 'popover:claim', ui }, () =>
         row.locator('button').first().click({ timeout: 8000 })
-      ).catch(() => {});
+      ).catch((error: unknown) => {
+        signal.throwIfAborted();
+        if (isDomReadTimeout(error)) throw error;
+        return false;
+      });
+      if (clicked === false) return null;
+      const settledAt = Date.now();
+      onActionSettled?.(settledAt);
+      return settledAt;
     },
     log,
-    { signal: targetSig, ui: targetUi }
+    { signal, ui }
   );
-
+  if (actionSettledAt === null) return { claimed: false, actionSettledAt: null };
   const deadline = Date.now() + 30_000;
   let after: number | undefined;
-  let since = mark;
+  let since = actionSettledAt;
   while (Date.now() < deadline) {
-    signal?.throwIfAborted();
+    signal.throwIfAborted();
     const snap = await store.waitForSnapshot(since, deadline - Date.now(), signal)
       .catch(() => {
-        signal?.throwIfAborted();
+        signal.throwIfAborted();
         return null;
       });
     if (!snap) break;
     since = snap.at;
     after = snap.byKey.get(task.taskKey)?.status;
-    if (after === 4) return true;
+    if (after === 4) return { claimed: true, actionSettledAt };
   }
-  return after === 4;
+  return { claimed: after === 4, actionSettledAt };
 }

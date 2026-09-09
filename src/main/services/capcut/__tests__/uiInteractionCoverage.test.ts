@@ -37,8 +37,10 @@ interface Violation {
 const DIRECT_METHOD_NAMES = new Set([
   'click',
   'press',
+  'pressSequentially',
   'type',
   'fill',
+  'clear',
   'hover',
   'bringToFront',
   'setViewportSize',
@@ -53,7 +55,7 @@ function isDirectCall(node: ts.CallExpression): { isDirect: boolean; form: strin
 
   const methodName = expr.name.text;
 
-  // Direct method on locator/page/window: .click, .press, .type, .fill, .hover, .bringToFront, .setViewportSize, .setWindowBounds
+  // Direct method on locator/page/window: .click, .press, .pressSequentially, .type, .fill, .clear, .hover, .bringToFront, .setViewportSize, .setWindowBounds
   if (DIRECT_METHOD_NAMES.has(methodName)) {
     return { isDirect: true, form: `.${methodName}()` };
   }
@@ -146,7 +148,7 @@ function isAllowedContext(node: ts.CallExpression, relPath: string): boolean {
 function findViolationsInFile(filePath: string): Violation[] {
   const absolutePath = path.resolve(process.cwd(), filePath);
   if (!fs.existsSync(absolutePath)) {
-    return [];
+    throw new Error(`UI interaction inventory file is missing: ${filePath}`);
   }
   const content = fs.readFileSync(absolutePath, 'utf8');
   const sourceFile = ts.createSourceFile(
@@ -160,6 +162,52 @@ function findViolationsInFile(filePath: string): Violation[] {
 
   function visit(node: ts.Node) {
     if (ts.isCallExpression(node)) {
+      if (
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'createDirectUiInteraction' &&
+        !(
+          filePath.replace(/\\/g, '/').endsWith('src/main/services/capcut/launcher/BrowserLauncher.ts') &&
+          isInsideFunctionNamed(node, ['attachOverCdp'])
+        )
+      ) {
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+        violations.push({
+          file: filePath.replace(/\\/g, '/'),
+          line: line + 1,
+          column: character + 1,
+          form: 'createDirectUiInteraction()',
+          snippet: node.getText(sourceFile).slice(0, 100).replace(/\r?\n/g, ' ')
+        });
+      }
+
+      const requiredArguments: Record<string, number> = {
+        humanClick: 3,
+        humanType: 5,
+        clickIfVisible: 4,
+        dismissOverlays: 2,
+        skipOnboardingSurvey: 4,
+        closeBlockingPricingModal: 4,
+        ensurePageUsable: 4,
+        checkProTrial: 5,
+        closeTaskPopover: 4,
+        assertNoPopover: 4,
+        claimIfPending: 6,
+        withTaskPopover: 4
+      };
+      if (ts.isIdentifier(node.expression)) {
+        const minimum = requiredArguments[node.expression.text];
+        if (minimum !== undefined && node.arguments.length < minimum) {
+          const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+          violations.push({
+            file: filePath.replace(/\\/g, '/'),
+            line: line + 1,
+            column: character + 1,
+            form: `${node.expression.text}(missing-ui-arguments)`,
+            snippet: node.getText(sourceFile).slice(0, 100).replace(/\r?\n/g, ' ')
+          });
+        }
+      }
+
       const { isDirect, form } = isDirectCall(node);
       if (isDirect && !isAllowedContext(node, filePath)) {
         const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
@@ -225,5 +273,10 @@ describe('UI Interaction Coverage and Mission Group Metadata', () => {
         `configureHeadedWindowUnlocked in BrowserLauncher.ts, or an operation callback passed to ui.foreground(...) / foregroundPage(...).`
       );
     }
+  });
+
+  it('fails closed when a production inventory file is missing', () => {
+    expect(() => findViolationsInFile('src/main/services/capcut/does-not-exist.ts'))
+      .toThrow('UI interaction inventory file is missing');
   });
 });

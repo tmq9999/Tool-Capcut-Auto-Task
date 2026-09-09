@@ -15,10 +15,10 @@
  *
  * Chạy: npm run selectors
  */
-import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { chromium, type Page } from 'playwright-core';
+import { loadOfflineFixture } from './offlineFixture';
 
 import { assertHittable } from '../src/main/services/capcut/diag';
 import { findTaskRow, findTaskEntries } from '../src/main/services/capcut/missionRunner';
@@ -47,19 +47,12 @@ function check(name: string, cond: boolean, got?: unknown): void {
 
 async function open(browser: { newPage(): Promise<Page> }, file: string): Promise<{ page: Page; close: () => Promise<void> }> {
   const html = fs.readFileSync(path.resolve(file), 'utf8');
-  const server = http.createServer((_q, res) => {
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    res.end(html);
-  });
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
-  const port = (server.address() as { port: number }).port;
   const page = await browser.newPage();
-  await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded' });
+  await loadOfflineFixture(page, html);
   return {
     page,
     close: async () => {
       await page.close();
-      server.close();
     },
   };
 }
@@ -68,6 +61,8 @@ const counter = (page: Page) => (sel: string): Promise<number> =>
   page.evaluate((q: string) => document.querySelectorAll(q).length, sel);
 
 async function main(): Promise<void> {
+  const toolSignal = new AbortController().signal;
+  const toolUi = createDirectUiInteraction(toolSignal);
   const browser = await chromium.launch({ executablePath: CHROME, headless: true });
 
   // ------------------------------------------ /ai-design TRƯỚC khi gửi prompt
@@ -398,7 +393,7 @@ async function main(): Promise<void> {
      * khảo sát" vô điều kiện, tức là không có cách nào phân biệt được.
      */
     const said: string[] = [];
-    const gone = await skipOnboardingSurvey(page, (m) => said.push(m));
+    const gone = await skipOnboardingSurvey(page, (m) => said.push(m), toolUi, toolSignal);
     check('mask không tắt thì hàm trả false (không nói dối)', gone === false, gone);
     check('log nói rõ khảo sát VẪN CÒN',
       said.some((m) => /vẫn còn/i.test(m)), said);
@@ -578,7 +573,7 @@ async function main(): Promise<void> {
       (await page.evaluate(() => document.body.innerText.includes('Stop generating'))) === false);
 
     const said: string[] = [];
-    const closed = await closeBlockingPricingModal(page, (m) => said.push(m));
+    const closed = await closeBlockingPricingModal(page, (m) => said.push(m), toolUi, toolSignal);
     check('DOM tĩnh không đóng được thì hàm trả false (không nói dối)', closed === false, closed);
     check('log nói rõ bảng giá VẪN mở', said.some((m) => /VẪN mở/.test(m)), said);
 
@@ -618,7 +613,7 @@ async function main(): Promise<void> {
       (await page.evaluate(() => document.body.innerText.includes('页面异常'))) === true);
 
     const said: string[] = [];
-    const blocked = await ensurePageUsable(page, (m) => said.push(m)).then(() => false, () => true);
+    const blocked = await ensurePageUsable(page, (m) => said.push(m), toolUi, toolSignal).then(() => false, () => true);
     check('modal không dẹp được phải chặn caller, không tiếp tục thao tác', blocked);
     check('log nêu được thủ phạm thay vì im lặng',
       said.some((m) => /trang lỗi|chưa nhận diện/i.test(m)), said);

@@ -93,7 +93,7 @@ export const EmailProviderPanel: React.FC<EmailProviderPanelProps> = ({
               onChange={(e) =>
                 onSetSimpleDraft('gmail94', { action: 'replace', value: e.target.value })
               }
-              placeholder={gmailStatus?.isConfigured ? 'Đã lưu: ••••••••' : 'Chưa thiết lập'}
+              placeholder={gmailStatus?.isConfigured ? 'Đã lưu: •••••••• (nhập để thay đổi)' : 'Dán API key Gmail94 vào đây...'}
               fontMono
             />
             {gmailStatus?.isConfigured && drafts.gmail94.action !== 'clear' && (
@@ -125,6 +125,20 @@ export const EmailProviderPanel: React.FC<EmailProviderPanelProps> = ({
             {renderStatusBadge(gmailStatus)}
           </div>
 
+          {drafts.gmail94.action === 'replace' ? (
+            <span className="text-warning text-xs font-label-xs block">
+              Đang nhập key mới (chưa lưu). Bấm &quot;Kiểm tra API&quot; để test trực tiếp key này.
+            </span>
+          ) : gmailStatus?.isConfigured ? (
+            <span className="text-on-surface-variant text-[11px] font-label-xs block">
+              Hệ thống đang lưu key: <span className="text-primary font-mono font-semibold">{gmailStatus.metadata.maskedHint}</span>. Bấm &quot;Kiểm tra API&quot; để test key đã lưu này.
+            </span>
+          ) : (
+            <span className="text-on-surface-variant text-[11px] font-label-xs block">
+              Chưa có key trong máy. Vui lòng nhập key rồi bấm &quot;Lưu cài đặt&quot;.
+            </span>
+          )}
+
           {gmailTestResult && (
             <div
               className={`mt-1 p-2 rounded font-body-sm text-xs flex items-center gap-1.5 ${
@@ -155,7 +169,7 @@ export const EmailProviderPanel: React.FC<EmailProviderPanelProps> = ({
               onChange={(e) =>
                 onSetSimpleDraft('dongvanfb', { action: 'replace', value: e.target.value })
               }
-              placeholder={dongvanStatus?.isConfigured ? 'Đã lưu: ••••••••' : 'Chưa thiết lập'}
+              placeholder={dongvanStatus?.isConfigured ? 'Đã lưu: •••••••• (nhập để thay đổi)' : 'Dán API key DongVanFB vào đây...'}
               fontMono
             />
             {dongvanStatus?.isConfigured && drafts.dongvanfb.action !== 'clear' && (
@@ -186,6 +200,20 @@ export const EmailProviderPanel: React.FC<EmailProviderPanelProps> = ({
             </Button>
             {renderStatusBadge(dongvanStatus)}
           </div>
+
+          {drafts.dongvanfb.action === 'replace' ? (
+            <span className="text-warning text-xs font-label-xs block">
+              Đang nhập key mới (chưa lưu). Bấm &quot;Kiểm tra API&quot; để test trực tiếp key này.
+            </span>
+          ) : dongvanStatus?.isConfigured ? (
+            <span className="text-on-surface-variant text-[11px] font-label-xs block">
+              Hệ thống đang lưu key: <span className="text-primary font-mono font-semibold">{dongvanStatus.metadata.maskedHint}</span>. Bấm &quot;Kiểm tra API&quot; để test key đã lưu này.
+            </span>
+          ) : (
+            <span className="text-on-surface-variant text-[11px] font-label-xs block">
+              Chưa có key trong máy. Vui lòng nhập key rồi bấm &quot;Lưu cài đặt&quot;.
+            </span>
+          )}
 
           {dongvanTestResult && (
             <div

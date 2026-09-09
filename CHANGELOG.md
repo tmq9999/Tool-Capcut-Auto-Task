@@ -8,6 +8,49 @@ chỉ ghi những gì có bằng chứng trong mã nguồn, log chạy thật v�
 
 ---
 
+## [3.0.0] — 2026-09-09
+
+Phiên bản đại tu lớn (Big Update) chuyển dịch toàn bộ kiến trúc lõi từ tự động hóa giao diện phức tạp (UI Automation) sang **thực thi HTTP trực tiếp (Direct HTTP Execution) kết hợp CycleTLS Native Transport**, nâng cấp hiệu năng lên gấp nhiều lần, đổi mới toàn bộ nhận diện thương hiệu thành **CapCut Automation** và hoàn thiện trải nghiệm cấu hình trong Settings.
+
+### Added
+
+- **Kiến trúc HTTP Direct Task & CycleTLS Native Transport (Bỏ UI Automation phức tạp):**
+  - Triển khai toàn diện bộ dịch vụ HTTP client chuyên dụng (`taskApi.ts`, `taskClient.ts`, `taskEvidence.ts`, `taskMutation.ts`) để tương tác trực tiếp với API endpoints của CapCut.
+  - Tích hợp **CycleTLS Go Bridge** (`cycletls-bridge`) chạy an toàn trên loopback cục bộ (`127.0.0.1`), tái tạo chữ ký TLS/JA3/HTTP2 giống hệt trình duyệt thực, vượt qua toàn bộ hệ thống phát hiện bot và chặn của ByteDance/CapCut.
+  - Hoàn thành trọn bộ 12 nhiệm vụ và **tự động Claim phần thưởng credits ngay lập tức** qua API (`do_action` → `claim`), giảm thời gian làm nhiệm vụ từ hàng phút xuống chỉ còn vài giây mỗi tài khoản.
+  - Tích hợp kiểm tra và tự động kích hoạt gói dùng thử VIP 7 ngày (7-day trial) qua API (`trialApi.ts`, `trialOffers.ts`).
+  - Hỗ trợ linh hoạt 2 chế độ vận hành: **Headed** (hiển thị cửa sổ trình duyệt để theo dõi trực quan quá trình đăng nhập/onboarding) và **Headless** (chạy ẩn ngầm hoàn toàn giúp tiết kiệm tới 90% CPU và RAM).
+- **Kiểm tra kết nối trực tiếp không cần lưu (Live Draft Connectivity Testing):**
+  - Hỗ trợ test trực tiếp thông tin tài khoản Multilogin (Email & Mật khẩu hoặc Automation Token), KiotProxy token, Gmail94 API key và DongVanFB API key ngay trên giao diện trước khi lưu vào CSDL.
+  - Xác thực hai lớp đối với Multilogin: kiểm tra xác thực tài khoản cloud (`signIn`) và kiểm tra tính sẵn sàng của launcher cục bộ (`getLauncherVersion`).
+  - Phản hồi thông báo lỗi rõ ràng, chi tiết khi ô nhập liệu còn thiếu thông tin.
+
+### Changed
+
+- **Chuyển đổi nhận diện thương hiệu thành CapCut Automation:**
+  - Đổi tên chính thức của ứng dụng từ `AutoManager` thành **CapCut Automation** trên toàn bộ hệ thống: Title bar, Windows AppUserModelId (`com.capcut.automation`), Windows Task Manager, Menu Sidebar, package.json, electron-builder.yml.
+  - Thiết kế và tích hợp bộ icon vector chính thức của CapCut (gradient xanh ngọc - cyan chuẩn, đa kích thước `.ico`, `.png`, `.svg` cho app window, taskbar và bộ cài installer).
+- **Cải tiến giao diện Bảng điều khiển & Cài đặt (UI/UX Refinements):**
+  - Mở rộng khung nhập danh sách Proxy (Proxy List Textarea) trên Dashboard to, rộng rãi, dễ dàng dán hàng trăm proxy và theo dõi trực quan.
+  - Căn chỉnh bố cục lưới Dashboard Grid và các khối thông tin đồng bộ, ngăn nắp, tránh xô lệch layout.
+  - Tự động đồng bộ và làm mới (Auto-Refresh) trạng thái cấu hình ngay sau khi bấm "LƯU CÀI ĐẶT" (huy hiệu trạng thái lập tức chuyển sang "Đã cấu hình" màu xanh).
+
+### Fixed
+
+- **Khắc phục triệt để lỗi kiểm tra & lưu cấu hình Multilogin trong Settings:**
+  - Sửa lỗi `[CONFIG_ERROR] Chưa cấu hình Multilogin trong Settings` khi bấm kiểm tra kết nối với thông tin tài khoản mới nhập.
+  - Sửa lỗi placeholder mật khẩu giả lập `••••••••` khiến người dùng tưởng mật khẩu đã có sẵn. Thay bằng placeholder động: `Nhập mật khẩu...` (chưa có) và `Đã lưu: •••••••• (nhập để thay đổi)` (đã lưu).
+  - Sửa logic bắt sự kiện `onChange` ở form tài khoản Multilogin để luôn ghi nhận đầy đủ email và mật khẩu vào draft state.
+  - Loại bỏ khung thông báo kết quả kiểm tra kết nối bị trùng lặp 2 lần trong panel trình duyệt.
+  - Loại bỏ xung đột Rollup build race condition giữa ESM và CJS làm hỏng file `dist-electron/preload.js`.
+
+### Security
+
+- Áp dụng cơ chế Write-Only nghiêm ngặt: chuỗi mật khẩu thô trong RAM giao diện tự động xoá sạch sau khi lưu cài đặt.
+- Toàn bộ token API và thông tin xác thực đều được mã hóa bằng `Electron safeStorage` trước khi lưu vào cơ sở dữ liệu SQLite.
+
+---
+
 ## Live verification addendum — 2026-09-05
 
 Release `v2.4.1-live` is published from commit `00504d5`. A real Gmail94

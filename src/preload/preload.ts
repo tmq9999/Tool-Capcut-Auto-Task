@@ -32,14 +32,17 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 
 const bridge: ElectronBridge = {
   platform: process.platform,
-  version: '2.4.0',
+  version: '3.0.0',
   ping: () => ipcRenderer.invoke(IPC_CHANNELS.PING),
   settings: {
     get: () => ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET),
     save: (req: SettingsSaveRequestDTO) => ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_SAVE, req)
   },
   credentials: {
-    test: (serviceName: string) => ipcRenderer.invoke(IPC_CHANNELS.CREDENTIALS_TEST, { serviceName })
+    test: (request: string | { serviceName: string; draftSecret?: string; multiloginDraft?: unknown }) => {
+      const payload = typeof request === 'string' ? { serviceName: request } : request;
+      return ipcRenderer.invoke(IPC_CHANNELS.CREDENTIALS_TEST, payload);
+    }
   },
   accounts: {
     list: (filter: AccountFilterDTO) => ipcRenderer.invoke(IPC_CHANNELS.ACCOUNTS_LIST, filter),
@@ -60,6 +63,8 @@ const bridge: ElectronBridge = {
   },
   run: {
     start: (config: AutomationRunConfigDTO) => ipcRenderer.invoke(IPC_CHANNELS.RUN_START, config),
+    health: (input) => ipcRenderer.invoke(IPC_CHANNELS.RUN_HEALTH, input),
+    userData: () => ipcRenderer.invoke(IPC_CHANNELS.RUN_USER_DATA),
     stop: () => ipcRenderer.invoke(IPC_CHANNELS.RUN_STOP),
     stopThread: (accountId: string) => ipcRenderer.invoke(IPC_CHANNELS.RUN_STOP_THREAD, { accountId }),
     threads: () => ipcRenderer.invoke(IPC_CHANNELS.RUN_THREADS),

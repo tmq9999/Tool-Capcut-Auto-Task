@@ -37,6 +37,9 @@ export type AutomationModule = z.infer<typeof AutomationModuleEnum>;
 export const MissionTransportEnum = z.enum(['ui', 'http-only']);
 export type MissionTransport = z.infer<typeof MissionTransportEnum>;
 
+export const RolloutStageSchema = z.union([z.literal(1), z.literal(3), z.literal(5), z.literal(10)]);
+export type RolloutStage = z.infer<typeof RolloutStageSchema>;
+
 export const EmailSourceConfigSchema = z.discriminatedUnion('mode', [
   z.object({
     mode: z.literal('manual'),
@@ -114,8 +117,12 @@ export type PasswordConfig = z.infer<typeof PasswordConfigSchema>;
 export const AutomationRunConfigSchema = z.object({
   missionTransport: MissionTransportEnum.optional(),
   threadCount: z.number().int().min(1).max(200),
-  /** Missing or zero preserves unlimited API/custom runs. */
+  /** Account acquisition cap; billable dispatches have a separate explicit budget. */
   mailLimit: z.number().int().min(0).max(200).optional(),
+  maxBillablePurchases: z.number().int().min(0).max(200).optional(),
+  rolloutStage: RolloutStageSchema.optional(),
+  approvedMailboxes: z.number().int().min(0).max(200).optional(),
+  stopAfter: z.number().int().min(0).max(200).optional(),
   browser: BrowserRuntimeEnum,
   headless: z.boolean(),
   retryCount: z.number().int().min(0).max(10),
@@ -143,9 +150,55 @@ export const AutomationRunConfigSchema = z.object({
   .refine((c) => c.typeDelayMinMs <= c.typeDelayMaxMs, {
     message: 'Delay gõ phím: giá trị Min phải nhỏ hơn hoặc bằng Max',
     path: ['typeDelayMaxMs']
+  })
+  .superRefine((config, ctx) => {
+    const reject = (field: string, message: string): void => {
+      ctx.addIssue({ code: 'custom', path: [field], message });
+    };
+    if (config.emailSource.mode === 'api') {
+      if (config.maxBillablePurchases === undefined) {
+        reject('maxBillablePurchases', 'Phải chỉ định giới hạn mua hộp thư.');
+      }
+    } else if ((config.maxBillablePurchases ?? 0) !== 0) {
+      reject('maxBillablePurchases', 'Nguồn không mua hộp thư phải có ngân sách bằng 0.');
+    }
+    if (config.rolloutStage === undefined) return;
+    if (config.headless || (config.missionTransport ?? 'ui') !== 'ui' || config.module !== 'credit') {
+      reject('rolloutStage', 'Rollout chỉ hỗ trợ headed UI credit.');
+    }
+    if (config.emailSource.mode === 'api') {
+      for (const field of ['threadCount', 'mailLimit', 'approvedMailboxes', 'stopAfter', 'maxBillablePurchases'] as const) {
+        if (config[field] !== config.rolloutStage) reject(field, 'Giới hạn phải bằng rollout stage.');
+      }
+    } else if (config.emailSource.mode === 'existing') {
+      if (config.rolloutStage !== 3 || config.threadCount !== 3 || config.emailSource.accountIds.length !== 3) {
+        reject('rolloutStage', 'Resume rollout yêu cầu đúng ba tài khoản và ba luồng.');
+      }
+      if ((config.mailLimit ?? 0) !== 0 || config.approvedMailboxes !== undefined || config.stopAfter !== undefined) {
+        reject('emailSource', 'Resume không nhận giới hạn mua hộp thư.');
+      }
+    } else {
+      reject('emailSource', 'Nguồn không hỗ trợ rollout.');
+    }
   });
 
 export type AutomationRunConfigDTO = z.infer<typeof AutomationRunConfigSchema>;
+
+export const RunHealthRequestSchema = z.object({
+  threadCount: z.union([z.literal(3), z.literal(10)]),
+  rolloutStage: z.union([z.literal(3), z.literal(10)]),
+  headless: z.literal(false)
+}).strict().refine((request) => request.threadCount === request.rolloutStage, {
+  message: 'Health stage phải bằng số luồng.'
+});
+export type RunHealthRequestDTO = z.infer<typeof RunHealthRequestSchema>;
+
+export const RunHealthResponseSchema = z.object({
+  runId: z.string().min(1), artifactBasename: z.string().min(1),
+  attempted: z.number().int().min(0), healthy: z.number().int().min(0),
+  stopped: z.number().int().min(0), cleanupFailures: z.number().int().min(0)
+}).strict();
+export type RunHealthResponseDTO = z.infer<typeof RunHealthResponseSchema>;
 
 export const AutomationRunStateEnum = z.enum([
   'idle',
@@ -169,6 +222,8 @@ export const AutomationTerminalCodeEnum = z.enum([
   'PROVIDER_CONFIG_ERROR',
   'PROVIDER_RETRY_EXHAUSTED',
   'PURCHASE_OUTCOME_UNKNOWN',
+  'BILLABLE_PURCHASE_LIMIT_REACHED',
+  'HEALTH_CHECK_COMPLETED',
   'PROXY_CAPACITY_UNAVAILABLE',
   'INTERNAL_ERROR',
   'TASK_CHECKPOINT_PERSISTENCE_FAILED',

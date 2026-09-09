@@ -91,17 +91,17 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
       )}
 
       {!isCollapsed && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6 gap-2.5">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
           {/* Panel 1: Cấu hình chung */}
           <Panel
             title="Cấu hình chung"
-            icon={<Sliders className="w-3.5 h-3.5" />}
-            className="p-2.5 flex flex-col justify-between"
+            icon={<Sliders className="w-4 h-4 text-primary" />}
+            className="p-3 flex flex-col justify-between"
           >
-            <div className="space-y-1.5 mt-1">
-              <div className="grid grid-cols-2 gap-1.5">
-                <div className="flex flex-col gap-0.5">
-                  <label className="font-label-xs text-[10px] text-on-surface-variant">Luồng</label>
+            <div className="space-y-2 mt-1">
+              <div className="grid grid-cols-2 gap-2">
+                <div className="flex flex-col gap-1">
+                  <label className="font-label-xs text-[11px] text-on-surface-variant font-medium">Số luồng song song</label>
                   <Input
                     type="number"
                     min={1}
@@ -116,8 +116,8 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                   />
                 </div>
 
-                <div className="flex flex-col gap-0.5">
-                  <label className="font-label-xs text-[10px] text-on-surface-variant">Browser</label>
+                <div className="flex flex-col gap-1">
+                  <label className="font-label-xs text-[11px] text-on-surface-variant font-medium">Trình duyệt</label>
                   <Select
                     controlSize="sm"
                     value={config.browser}
@@ -125,13 +125,6 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                     onChange={(e) => onChange({ browser: e.target.value as BrowserRuntime })}
                   >
                     {BROWSER_OPTIONS.map((option) => {
-                      /**
-                       * Khoá browser chưa có implementation, đúng khuôn `module`
-                       * trial/team ở dưới. Trước 04/09/2026 dropdown cho chọn cả
-                       * 5 trong khi chỉ Multilogin có provider + launcher, mà
-                       * `start()` lại MUA EMAIL trước khi mở browser — chọn nhầm
-                       * là mất tiền rồi mới báo lỗi.
-                       */
                       const ready = isBrowserImplemented(option.value);
                       return (
                         <option key={option.value} value={option.value} disabled={!ready}>
@@ -141,269 +134,164 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                     })}
                   </Select>
                 </div>
-              </div>
 
-              <div className="flex flex-col gap-0.5">
-                <label className="font-label-xs text-[10px] text-on-surface-variant">Mode</label>
-                <SegmentedControl
-                  options={[
-                    { value: 'headed', label: 'Headed' },
-                    { value: 'headless', label: 'Headless' },
-                  ]}
-                  value={config.headless ? 'headless' : 'headed'}
-                  onChange={(value) => onChange({ headless: value === 'headless' })}
-                  size="sm"
-                  disabled={disabled}
-                />
-              </div>
-
-              <div className="flex items-center justify-between pt-0.5">
-                <span className="font-label-xs text-[10px] text-on-surface-variant">Thử lại (lần)</span>
-                <NumberStepper
-                  value={config.retryCount}
-                  onChange={(value) => onChange({ retryCount: value })}
-                  min={0}
-                  max={10}
-                  controlSize="sm"
-                />
-              </div>
-            </div>
-          </Panel>
-
-          {/* Panel 2: Delay & Timing */}
-          <Panel
-            title="Delay & Timing"
-            icon={<Timer className="w-3.5 h-3.5" />}
-            className="p-2.5 flex flex-col justify-between"
-          >
-            <div className="space-y-2 mt-1">
-              <div className="flex flex-col gap-0.5">
-                <label className="font-label-xs text-[10px] text-on-surface-variant">
-                  Delay thao tác (ms)
-                </label>
-                <div className="flex items-center gap-1">
+                <div className="flex flex-col gap-1">
+                  <label className="font-label-xs text-[11px] text-on-surface-variant font-medium">Giới hạn mail</label>
                   <Input
                     type="number"
                     min={0}
-                    max={600000}
-                    placeholder="Min"
-                    value={config.stepDelayMinMs}
-                    onChange={(e) =>
-                      onChange({ stepDelayMinMs: clampConfigNumber(e.target.value, 0, 600000, config.stepDelayMinMs) })
-                    }
-                    controlSize="sm"
-                    disabled={disabled}
-                    fontMono
-                  />
-                  <span className="text-on-surface-variant text-xs">-</span>
-                  <Input
-                    type="number"
-                    min={0}
-                    max={600000}
-                    placeholder="Max"
-                    value={config.stepDelayMaxMs}
-                    onChange={(e) =>
-                      onChange({ stepDelayMaxMs: clampConfigNumber(e.target.value, 0, 600000, config.stepDelayMaxMs) })
-                    }
+                    max={200}
+                    placeholder="0 = không giới hạn"
+                    value={config.mailLimit}
+                    onChange={(e) => onChange({ mailLimit: clampConfigNumber(e.target.value, 0, 200, config.mailLimit) })}
                     controlSize="sm"
                     disabled={disabled}
                     fontMono
                   />
                 </div>
+
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="purchase-budget" className="font-label-xs text-[11px] text-on-surface-variant font-medium">Giới hạn mua mới</label>
+                  <Input
+                    id="purchase-budget"
+                    type="number"
+                    min={0}
+                    max={200}
+                    placeholder="0 = chỉ dùng mail sẵn"
+                    value={config.maxBillablePurchases}
+                    onChange={(e) => onChange({ maxBillablePurchases: clampConfigNumber(e.target.value, 0, 200, config.maxBillablePurchases) })}
+                    controlSize="sm"
+                    disabled={disabled || config.emailSourceMode !== 'api'}
+                    fontMono
+                  />
+                </div>
               </div>
 
-              <div className="flex flex-col gap-0.5">
-                <label className="font-label-xs text-[10px] text-on-surface-variant">
-                  Delay gõ phím (ms)
-                </label>
-                <div className="flex items-center gap-1">
-                  <Input
-                    type="number"
-                    min={0}
-                    max={60000}
-                    placeholder="Min"
-                    value={config.typeDelayMinMs}
-                    onChange={(e) =>
-                      onChange({ typeDelayMinMs: clampConfigNumber(e.target.value, 0, 60000, config.typeDelayMinMs) })
-                    }
-                    controlSize="sm"
+              <div className="grid grid-cols-2 gap-2 pt-1 border-t border-panel-border/50">
+                <div className="flex flex-col gap-1">
+                  <label className="font-label-xs text-[11px] text-on-surface-variant font-medium">Hiển thị trình duyệt</label>
+                  <SegmentedControl
+                    options={[
+                      { value: 'headed', label: 'Headed (Hiện)' },
+                      { value: 'headless', label: 'Headless (Ẩn)' },
+                    ]}
+                    value={config.headless ? 'headless' : 'headed'}
+                    onChange={(value) => onChange({ headless: value === 'headless' })}
+                    size="sm"
                     disabled={disabled}
-                    fontMono
                   />
-                  <span className="text-on-surface-variant text-xs">-</span>
-                  <Input
-                    type="number"
-                    min={0}
-                    max={60000}
-                    placeholder="Max"
-                    value={config.typeDelayMaxMs}
-                    onChange={(e) =>
-                      onChange({ typeDelayMaxMs: clampConfigNumber(e.target.value, 0, 60000, config.typeDelayMaxMs) })
-                    }
-                    controlSize="sm"
-                    disabled={disabled}
-                    fontMono
-                  />
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <label className="font-label-xs text-[11px] text-on-surface-variant font-medium">Số lần thử lại</label>
+                  <div className="flex items-center justify-between h-8">
+                    <span className="text-xs text-on-surface-variant">Thất bại thử lại:</span>
+                    <NumberStepper
+                      value={config.retryCount}
+                      onChange={(value) => onChange({ retryCount: value })}
+                      min={0}
+                      max={10}
+                      controlSize="sm"
+                    />
+                  </div>
                 </div>
               </div>
             </div>
           </Panel>
 
-          {/* Panel 3: Proxy Settings */}
+          {/* Panel 2: Proxy Settings */}
           <Panel
             title="Proxy Settings"
-            icon={<Globe className="w-3.5 h-3.5" />}
-            className="p-2.5 flex flex-col justify-between"
+            icon={<Globe className="w-4 h-4 text-primary" />}
+            className="p-3 flex flex-col justify-between"
           >
-            <div className="space-y-1.5 mt-1 flex-1 flex flex-col">
-              <div className="flex items-center justify-between">
-                <label className="font-label-xs text-[10px] text-on-surface-variant">Mode</label>
-                <div className="w-28">
+            <div className="space-y-2 mt-1 flex-1 flex flex-col">
+              <div className="grid grid-cols-2 gap-2">
+                <div className="flex flex-col gap-1">
+                  <label className="font-label-xs text-[11px] text-on-surface-variant font-medium">Chế độ Proxy</label>
                   <Select
                     controlSize="sm"
                     value={config.proxyMode}
                     disabled={disabled}
                     onChange={(e) => onChange({ proxyMode: e.target.value as 'direct' | 'proxykey' })}
                   >
-                    <option value="direct">Direct IP</option>
-                    <option value="proxykey">Proxy Key</option>
+                    <option value="direct">Direct IP (Proxy tĩnh)</option>
+                    <option value="proxykey">Proxy Key (KiotProxy)</option>
                   </Select>
                 </div>
+
+                {config.proxyMode === 'proxykey' ? (
+                  <div className="flex flex-col gap-1">
+                    <label className="font-label-xs text-[11px] text-on-surface-variant font-medium">Vùng IP (Region)</label>
+                    <Select
+                      controlSize="sm"
+                      value={config.proxyRegion}
+                      disabled={disabled}
+                      onChange={(e) =>
+                        onChange({ proxyRegion: e.target.value as AutomationConfigState['proxyRegion'] })
+                      }
+                    >
+                      <option value="random">Ngẫu nhiên (Tự động)</option>
+                      <option value="bac">Miền Bắc</option>
+                      <option value="trung">Miền Trung</option>
+                      <option value="nam">Miền Nam</option>
+                    </Select>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-1">
+                    <label className="font-label-xs text-[11px] text-on-surface-variant font-medium">Cấu trúc</label>
+                    <div className="h-8 flex items-center px-2 rounded bg-surface-container-low border border-panel-border text-[11px] text-on-surface-variant font-mono">
+                      ip:port:user:pass
+                    </div>
+                  </div>
+                )}
               </div>
 
               {config.proxyMode === 'proxykey' ? (
-                <div className="flex-1 flex flex-col gap-0.5">
-                  {/*
-                    Vùng chỉ có nghĩa với proxy key: KiotProxy cấp IP theo vùng
-                    (`bac`/`trung`/`nam`), còn proxy dán tay `http://ip:port` thì IP
-                    đã cố định. `random` = không gửi khoá vùng, để KiotProxy tự chọn.
-                  */}
-                  <div className="flex items-center justify-between">
-                    <label className="font-label-xs text-[10px] text-on-surface-variant">Vùng</label>
-                    <div className="w-28">
-                      <Select
-                        controlSize="sm"
-                        value={config.proxyRegion}
-                        disabled={disabled}
-                        onChange={(e) =>
-                          onChange({ proxyRegion: e.target.value as AutomationConfigState['proxyRegion'] })
-                        }
-                      >
-                        <option value="random">Ngẫu nhiên</option>
-                        <option value="bac">Miền Bắc</option>
-                        <option value="trung">Miền Trung</option>
-                        <option value="nam">Miền Nam</option>
-                      </Select>
-                    </div>
-                  </div>
+                <div className="flex-1 flex flex-col gap-1">
                   <Textarea
-                    placeholder="Mỗi dòng một proxy key..."
+                    placeholder="Nhập danh sách Proxy Key (mỗi dòng một key)..."
                     value={config.proxyKeyList}
                     disabled={disabled}
                     onChange={(e) => onChange({ proxyKeyList: e.target.value })}
-                    className="h-[38px] min-h-[38px] py-1 text-[11px]"
+                    className="h-28 min-h-[110px] py-1.5 text-xs font-mono resize-y"
+                    rows={5}
                   />
-                  <span className="flex items-start gap-1 text-[10px] text-on-surface-variant leading-snug">
-                    <ShieldCheck className="w-3 h-3 text-primary mt-0.5 shrink-0" />
+                  <span className="flex items-center gap-1.5 text-[11px] text-on-surface-variant leading-snug">
+                    <ShieldCheck className="w-3.5 h-3.5 text-primary shrink-0" />
                     <span>
                       {proxyKeyCount > 0
-                        ? 'Chỉ dùng ' + proxyKeyCount + ' key này, tối đa ' + proxyKeyCount + ' luồng song song.'
-                        : 'Để trống = dùng toàn bộ key trong tài khoản.'}
+                        ? `Đã nạp ${proxyKeyCount} key, tối đa ${proxyKeyCount} luồng song song.`
+                        : 'Để trống = sử dụng toàn bộ key có sẵn trong tài khoản KiotProxy.'}
                     </span>
                   </span>
                 </div>
               ) : (
-                <div className="flex flex-col gap-0.5 flex-1">
+                <div className="flex flex-col gap-1 flex-1">
                   <Textarea
-                    placeholder="IP:PORT:USER:PASS"
+                    placeholder="Mỗi dòng một proxy (IP:PORT hoặc IP:PORT:USER:PASS)..."
                     value={config.proxyList}
                     disabled={disabled}
                     onChange={(e) => onChange({ proxyList: e.target.value })}
-                    className="h-[52px] min-h-[52px] py-1 text-[11px]"
+                    className="h-28 min-h-[110px] py-1.5 text-xs font-mono resize-y"
+                    rows={5}
                   />
                 </div>
               )}
             </div>
           </Panel>
 
-          {/* Panel 4: Module */}
-          <Panel
-            title="Module"
-            icon={<CreditCard className="w-3.5 h-3.5" />}
-            className="p-2.5 flex flex-col justify-between"
-          >
-            <div className="space-y-1.5 mt-1">
-              {/*
-                Chỉ `credit` có engine thật (đăng ký/đăng nhập + làm 12 nhiệm vụ).
-                `trial` và `team` chưa implement — khoá lại thay vì cho chọn rồi
-                im lặng không làm gì, giống cách browser chưa hỗ trợ báo lỗi rõ.
-              */}
-              {([
-                { value: 'credit', label: 'Làm NV Credit', ready: true },
-                { value: 'trial', label: 'Pay Trial 7D', ready: false },
-                { value: 'team', label: 'Pay Team', ready: false },
-              ] as const).map((option) => (
-                <label
-                  key={option.value}
-                  title={option.ready ? undefined : 'Chưa hỗ trợ'}
-                  className={`flex items-center gap-2 p-1.5 border rounded transition-colors ${
-                    option.ready ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'
-                  } ${
-                    config.module === option.value
-                      ? 'border-primary bg-primary/10'
-                      : 'border-panel-border hover:border-outline'
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="payment_module"
-                    checked={config.module === option.value}
-                    disabled={disabled || !option.ready}
-                    onChange={() => onChange({ module: option.value })}
-                    className="w-3.5 h-3.5 text-primary focus:ring-primary border-panel-border bg-surface"
-                  />
-                  <span className="font-body-sm text-body-sm text-on-surface">
-                    {option.label}
-                    {option.ready ? '' : ' (chưa hỗ trợ)'}
-                  </span>
-                </label>
-              ))}
-
-              {/*
-                Cổng trial đọc bằng selector và CỐ Ý fail-open: đọc không được thì
-                coi như đủ điều kiện. Bật ô này là chấp nhận bỏ qua account — mỗi
-                account bỏ qua là một hộp thư đã trả tiền, nên mặc định TẮT.
-              */}
-              <label
-                className={`flex items-start gap-2 p-1.5 border rounded border-panel-border ${
-                  disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:border-outline'
-                }`}
-              >
-                <input
-                  type="checkbox"
-                  checked={config.skipWithoutTrial}
-                  disabled={disabled}
-                  onChange={(e) => onChange({ skipWithoutTrial: e.target.checked })}
-                  className="w-3.5 h-3.5 mt-0.5 text-primary focus:ring-primary border-panel-border bg-surface rounded"
-                />
-                <span className="font-label-xs text-[10px] text-on-surface-variant leading-snug">
-                  Bỏ qua account không có trial Pro ≥ 7 ngày
-                </span>
-              </label>
-            </div>
-          </Panel>
-
-          {/* Panel 5: Nguồn Email */}
+          {/* Panel 3: Nguồn Email */}
           <Panel
             title="Nguồn Email"
-            icon={<Mail className="w-3.5 h-3.5" />}
-            className="p-2.5 flex flex-col justify-between"
+            icon={<Mail className="w-4 h-4 text-primary" />}
+            className="p-3 flex flex-col justify-between"
           >
-            <div className="space-y-1.5 mt-1 flex-1 flex flex-col">
+            <div className="space-y-2 mt-1 flex-1 flex flex-col">
               <SegmentedControl
                 options={[
-                  { value: 'manual', label: 'Manual' },
-                  { value: 'api', label: 'API' },
+                  { value: 'api', label: 'API Thuê Mail' },
+                  { value: 'manual', label: 'Dán thủ công' },
                   { value: 'custom', label: 'Custom (Đã khóa)', disabled: true },
                 ]}
                 value={config.emailSourceMode === 'custom' ? 'api' : config.emailSourceMode}
@@ -413,13 +301,13 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
               />
 
               {config.emailSourceMode === 'custom' ? (
-                <div className="flex-1 flex flex-col gap-1">
-                  <div className="rounded border border-panel-border bg-surface-container-low px-2 py-1">
+                <div className="flex-1 flex flex-col gap-1.5">
+                  <div className="rounded border border-panel-border bg-surface-container-low p-2">
                     <div className="flex items-center justify-between gap-1">
-                      <span className="text-[10px] text-on-surface-variant">Domain</span>
-                      <span className="font-code text-[11px] text-primary">@{customEmail.domain}</span>
+                      <span className="text-[11px] text-on-surface-variant">Domain</span>
+                      <span className="font-code text-xs text-primary">@{customEmail.domain}</span>
                     </div>
-                    <span className="text-[10px] text-on-surface-variant leading-snug block">
+                    <span className="text-[10px] text-on-surface-variant leading-snug block mt-1">
                       {'Duy trì tối đa ' + config.threadCount + ' luồng; mỗi luồng tự sinh địa chỉ mới khi sẵn sàng.'}
                     </span>
                   </div>
@@ -430,49 +318,53 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                   </span>
                 </div>
               ) : config.emailSourceMode === 'api' ? (
-                <div className="flex-1 flex flex-col gap-1">
-                  <Select
-                    controlSize="sm"
-                    value={config.emailApiProvider}
-                    disabled={disabled}
-                    onChange={(e) => onChange({ emailApiProvider: e.target.value as EmailApiProvider })}
-                  >
-                    {emailProviders.map((entry) => (
-                      <option key={entry.provider} value={entry.provider}>
-                        {EMAIL_PROVIDER_LABEL[entry.provider]}
-                      </option>
-                    ))}
-                  </Select>
+                <div className="flex-1 flex flex-col gap-2">
+                  <div className="flex flex-col gap-1">
+                    <label className="font-label-xs text-[11px] text-on-surface-variant font-medium">Nhà cung cấp Email</label>
+                    <Select
+                      controlSize="sm"
+                      value={config.emailApiProvider}
+                      disabled={disabled}
+                      onChange={(e) => onChange({ emailApiProvider: e.target.value as EmailApiProvider })}
+                    >
+                      {emailProviders.map((entry) => (
+                        <option key={entry.provider} value={entry.provider}>
+                          {EMAIL_PROVIDER_LABEL[entry.provider]}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
 
                   {selectedEmailProvider?.isConfigured ? (
-                    <div className="rounded border border-panel-border bg-surface-container-low px-2 py-1">
+                    <div className="rounded border border-panel-border bg-surface-container-low p-2 flex flex-col gap-1">
                       <div className="flex items-center justify-between gap-1">
-                        <span className="text-[10px] text-on-surface-variant">API Key</span>
-                        <span className="font-code text-[11px] text-primary tracking-wider">
+                        <span className="text-[11px] text-on-surface-variant">API Key:</span>
+                        <span className="font-code text-xs text-primary tracking-wider font-semibold">
                           {selectedEmailProvider.maskedHint}
                         </span>
                       </div>
-                      <span className="text-[10px] text-on-surface-variant leading-snug">
-                        {'Duy trì tối đa ' + config.threadCount + ' luồng; chỉ lấy 1 email khi một luồng đã có proxy và sẵn sàng.'}
+                      <span className="text-[10px] text-on-surface-variant leading-relaxed">
+                        {'Duy trì tối đa ' + config.threadCount + ' luồng; chỉ lấy 1 email khi luồng đã có proxy và sẵn sàng.'}
                       </span>
                     </div>
                   ) : (
-                    <div className="rounded border border-warning/30 bg-warning/10 px-2 py-1 flex items-start gap-1">
-                      <AlertCircle className="w-3 h-3 text-warning mt-0.5 shrink-0" />
-                      <span className="text-[10px] text-warning leading-snug">
-                        Chưa cấu hình API key ở Settings.
+                    <div className="rounded border border-warning/30 bg-warning/10 p-2 flex items-start gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 text-warning mt-0.5 shrink-0" />
+                      <span className="text-[11px] text-warning leading-snug">
+                        Chưa cấu hình API key trong mục Cài đặt.
                       </span>
                     </div>
                   )}
                 </div>
               ) : (
-                <div className="flex flex-col gap-0.5 flex-1">
+                <div className="flex flex-col gap-1 flex-1">
                   <Textarea
-                    placeholder="email|password..."
+                    placeholder="Nhập email|password (mỗi dòng một tài khoản)..."
                     value={config.emailList}
                     disabled={disabled}
                     onChange={(e) => onChange({ emailList: e.target.value })}
-                    className="h-[52px] min-h-[52px] py-1 text-[11px]"
+                    className="h-28 min-h-[110px] py-1.5 text-xs font-mono resize-y"
+                    rows={5}
                   />
                   <span className="text-[10px] text-on-surface-variant leading-snug">
                     {'Xử lý mọi dòng hợp lệ, tối đa ' + config.threadCount + ' dòng cùng lúc.'}
@@ -482,41 +374,189 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
             </div>
           </Panel>
 
+          {/* Panel 4: Module */}
+          <Panel
+            title="Module kịch bản"
+            icon={<CreditCard className="w-4 h-4 text-primary" />}
+            className="p-3 flex flex-col justify-between"
+          >
+            <div className="space-y-2.5 mt-1">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                {([
+                  { value: 'credit', label: 'Làm NV Credit', ready: true },
+                  { value: 'trial', label: 'Pay Trial 7D', ready: false },
+                  { value: 'team', label: 'Pay Team', ready: false },
+                ] as const).map((option) => (
+                  <label
+                    key={option.value}
+                    title={option.ready ? undefined : 'Chưa hỗ trợ'}
+                    className={`flex items-center gap-2 p-2 border rounded transition-colors ${
+                      option.ready ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'
+                    } ${
+                      config.module === option.value
+                        ? 'border-primary bg-primary/10'
+                        : 'border-panel-border hover:border-outline'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="payment_module"
+                      checked={config.module === option.value}
+                      disabled={disabled || !option.ready}
+                      onChange={() => onChange({ module: option.value })}
+                      className="w-3.5 h-3.5 text-primary focus:ring-primary border-panel-border bg-surface"
+                    />
+                    <span className="font-body-sm text-xs text-on-surface font-medium">
+                      {option.label}
+                      {option.ready ? '' : ' (chưa hỗ trợ)'}
+                    </span>
+                  </label>
+                ))}
+              </div>
+
+              <label
+                className={`flex items-center gap-2.5 p-2 rounded border border-panel-border bg-surface-container-low/50 ${
+                  disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:border-outline'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={config.skipWithoutTrial}
+                  disabled={disabled}
+                  onChange={(e) => onChange({ skipWithoutTrial: e.target.checked })}
+                  className="w-4 h-4 text-primary focus:ring-primary border-panel-border bg-surface rounded"
+                />
+                <span className="font-label-xs text-xs text-on-surface leading-snug">
+                  Bỏ qua tài khoản nếu không có gói dùng thử Pro trial ≥ 7 ngày
+                </span>
+              </label>
+            </div>
+          </Panel>
+
+          {/* Panel 5: Delay & Timing */}
+          <Panel
+            title="Delay & Timing"
+            icon={<Timer className="w-4 h-4 text-primary" />}
+            className="p-3 flex flex-col justify-between"
+          >
+            <div className="space-y-2 mt-1">
+              <div className="flex flex-col gap-1">
+                <label className="font-label-xs text-[11px] text-on-surface-variant font-medium">
+                  Delay thao tác giữa các bước (ms)
+                </label>
+                <div className="grid grid-cols-2 gap-2 items-center">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] text-on-surface-variant shrink-0 w-8">Min:</span>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={600000}
+                      placeholder="Min"
+                      value={config.stepDelayMinMs}
+                      onChange={(e) =>
+                        onChange({ stepDelayMinMs: clampConfigNumber(e.target.value, 0, 600000, config.stepDelayMinMs) })
+                      }
+                      controlSize="sm"
+                      disabled={disabled}
+                      fontMono
+                    />
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] text-on-surface-variant shrink-0 w-8">Max:</span>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={600000}
+                      placeholder="Max"
+                      value={config.stepDelayMaxMs}
+                      onChange={(e) =>
+                        onChange({ stepDelayMaxMs: clampConfigNumber(e.target.value, 0, 600000, config.stepDelayMaxMs) })
+                      }
+                      controlSize="sm"
+                      disabled={disabled}
+                      fontMono
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="font-label-xs text-[11px] text-on-surface-variant font-medium">
+                  Delay gõ phím mô phỏng người thật (ms)
+                </label>
+                <div className="grid grid-cols-2 gap-2 items-center">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] text-on-surface-variant shrink-0 w-8">Min:</span>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={60000}
+                      placeholder="Min"
+                      value={config.typeDelayMinMs}
+                      onChange={(e) =>
+                        onChange({ typeDelayMinMs: clampConfigNumber(e.target.value, 0, 60000, config.typeDelayMinMs) })
+                      }
+                      controlSize="sm"
+                      disabled={disabled}
+                      fontMono
+                    />
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] text-on-surface-variant shrink-0 w-8">Max:</span>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={60000}
+                      placeholder="Max"
+                      value={config.typeDelayMaxMs}
+                      onChange={(e) =>
+                        onChange({ typeDelayMaxMs: clampConfigNumber(e.target.value, 0, 60000, config.typeDelayMaxMs) })
+                      }
+                      controlSize="sm"
+                      disabled={disabled}
+                      fontMono
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </Panel>
+
           {/* Panel 6: Mật khẩu CapCut */}
           <Panel
             title="Mật khẩu CapCut"
-            icon={<KeyRound className="w-3.5 h-3.5" />}
-            className="p-2.5 flex flex-col justify-between"
+            icon={<KeyRound className="w-4 h-4 text-primary" />}
+            className="p-3 flex flex-col justify-between"
           >
-            <div className="space-y-1.5 mt-1">
+            <div className="space-y-2 mt-1">
               <div className="flex items-center justify-between">
-                <div className="flex gap-2">
-                  <label className="flex items-center gap-1 cursor-pointer">
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-1.5 cursor-pointer">
                     <input
                       type="radio"
                       name="pw_mode"
                       checked={config.passwordMode === 'custom'}
                       disabled={disabled}
                       onChange={() => onChange({ passwordMode: 'custom' })}
-                      className="w-3 h-3 text-primary"
+                      className="w-3.5 h-3.5 text-primary"
                     />
-                    <span className="text-[11px] text-on-surface">Tự đặt</span>
+                    <span className="text-xs text-on-surface font-medium">Tự đặt</span>
                   </label>
-                  <label className="flex items-center gap-1 cursor-pointer">
+                  <label className="flex items-center gap-1.5 cursor-pointer">
                     <input
                       type="radio"
                       name="pw_mode"
                       checked={config.passwordMode === 'random'}
                       disabled={disabled}
                       onChange={() => onChange({ passwordMode: 'random' })}
-                      className="w-3 h-3 text-primary"
+                      className="w-3.5 h-3.5 text-primary"
                     />
-                    <span className="text-[11px] text-on-surface">Random</span>
+                    <span className="text-xs text-on-surface font-medium">Ngẫu nhiên (Random)</span>
                   </label>
                 </div>
 
-                <div className="flex items-center gap-1">
-                  <span className="font-label-xs text-[10px] text-on-surface-variant">Dài</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-label-xs text-[11px] text-on-surface-variant">Độ dài:</span>
                   <Input
                     type="number"
                     min={6}
@@ -527,55 +567,56 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                       onChange({ passwordLength: clampConfigNumber(e.target.value, 6, 64, config.passwordLength) })
                     }
                     controlSize="sm"
-                    className="w-12 text-center py-0 h-6 text-xs"
+                    className="w-14 text-center py-0.5 h-7 text-xs font-semibold"
                     fontMono
                   />
                 </div>
               </div>
 
-              {config.passwordMode === 'custom' && (
+              {config.passwordMode === 'custom' ? (
                 <Input
                   type="text"
-                  placeholder="Mật khẩu dùng cho mọi tài khoản"
+                  placeholder="Mật khẩu dùng chung cho mọi tài khoản..."
                   value={config.customPassword}
                   disabled={disabled}
                   onChange={(e) => onChange({ customPassword: e.target.value })}
                   controlSize="sm"
                   fontMono
                 />
+              ) : (
+                <div className="grid grid-cols-3 gap-2 p-2 bg-surface-container-low rounded border border-panel-border text-xs">
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <Checkbox
+                      checked={config.includeUppercase}
+                      disabled={disabled}
+                      onChange={(e) => onChange({ includeUppercase: e.target.checked })}
+                    />
+                    <span className="text-on-surface-variant text-[11px]">A-Z (Hoa)</span>
+                  </label>
+
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <Checkbox
+                      checked={config.includeNumbers}
+                      disabled={disabled}
+                      onChange={(e) => onChange({ includeNumbers: e.target.checked })}
+                    />
+                    <span className="text-on-surface-variant text-[11px]">0-9 (Số)</span>
+                  </label>
+
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <Checkbox
+                      checked={config.includeSpecial}
+                      disabled={disabled}
+                      onChange={(e) => onChange({ includeSpecial: e.target.checked })}
+                    />
+                    <span className="text-on-surface-variant text-[11px]">!@# (Ký tự)</span>
+                  </label>
+                </div>
               )}
-
-              <div className="grid grid-cols-2 gap-1 p-1 bg-surface-container-low rounded border border-panel-border text-[10px]">
-                <label className="flex items-center gap-1 cursor-pointer">
-                  <Checkbox
-                    checked={config.includeUppercase}
-                    disabled={disabled}
-                    onChange={(e) => onChange({ includeUppercase: e.target.checked })}
-                  />
-                  <span className="text-on-surface-variant">A-Z</span>
-                </label>
-
-                <label className="flex items-center gap-1 cursor-pointer">
-                  <Checkbox
-                    checked={config.includeNumbers}
-                    disabled={disabled}
-                    onChange={(e) => onChange({ includeNumbers: e.target.checked })}
-                  />
-                  <span className="text-on-surface-variant">0-9</span>
-                </label>
-
-                <label className="flex items-center gap-1 cursor-pointer col-span-2">
-                  <Checkbox
-                    checked={config.includeSpecial}
-                    disabled={disabled}
-                    onChange={(e) => onChange({ includeSpecial: e.target.checked })}
-                  />
-                  <span className="text-on-surface-variant">Ký tự đặc biệt (!@#)</span>
-                </label>
-              </div>
             </div>
           </Panel>
         </div>
+
       )}
     </div>
   );

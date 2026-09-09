@@ -33,16 +33,28 @@ export class Gmail94Connectivity implements ConnectivityProvider {
     private readonly clock: ClockLike = defaultClock
   ) {}
 
-  async testConnection(): Promise<SanitizedDiagnosticResult> {
+  async testConnection(draft?: unknown): Promise<SanitizedDiagnosticResult> {
     const timestamp = new Date(this.clock.now()).toISOString();
-    const token = this.secrets.readSimpleKey(GMAIL94_SERVICE_NAME);
+    const isDraft = typeof draft === 'string';
+    const explicitToken = isDraft ? draft.trim() : undefined;
+
+    if (explicitToken !== undefined && explicitToken.length === 0) {
+      return {
+        code: 'CONFIG_ERROR',
+        message: 'API key đang trống. Vui lòng nhập key trước khi kiểm tra.',
+        timestamp,
+      };
+    }
+
+    const token = explicitToken ?? this.secrets.readSimpleKey(GMAIL94_SERVICE_NAME);
     const profile = await this.api.getProfile(token);
 
     const details: Record<string, string | number | boolean> = {};
     if (typeof profile.balance === 'number') details.balance = profile.balance;
     if (profile.name) details.account = profile.name;
 
-    return ok('Gmail94 đã kết nối.', timestamp, Object.keys(details).length > 0 ? details : undefined);
+    const msg = isDraft ? 'Gmail94 đã kết nối với key vừa nhập.' : 'Gmail94 đã kết nối (khóa đã lưu).';
+    return ok(msg, timestamp, Object.keys(details).length > 0 ? details : undefined);
   }
 }
 
@@ -58,11 +70,23 @@ export class DongVanFBConnectivity implements ConnectivityProvider {
     private readonly clock: ClockLike = defaultClock
   ) {}
 
-  async testConnection(): Promise<SanitizedDiagnosticResult> {
+  async testConnection(draft?: unknown): Promise<SanitizedDiagnosticResult> {
     const timestamp = new Date(this.clock.now()).toISOString();
-    const apiKey = this.secrets.readSimpleKey(DONGVANFB_SERVICE_NAME);
+    const isDraft = typeof draft === 'string';
+    const explicitKey = isDraft ? draft.trim() : undefined;
+
+    if (explicitKey !== undefined && explicitKey.length === 0) {
+      return {
+        code: 'CONFIG_ERROR',
+        message: 'API key đang trống. Vui lòng nhập key trước khi kiểm tra.',
+        timestamp,
+      };
+    }
+
+    const apiKey = explicitKey ?? this.secrets.readSimpleKey(DONGVANFB_SERVICE_NAME);
     const balance = await this.api.checkBalance(apiKey);
-    return ok('DongVanFB đã kết nối.', timestamp, { balance });
+    const msg = isDraft ? 'DongVanFB đã kết nối với key vừa nhập.' : 'DongVanFB đã kết nối (khóa đã lưu).';
+    return ok(msg, timestamp, { balance });
   }
 }
 
@@ -82,9 +106,20 @@ export class KiotProxyConnectivity implements ConnectivityProvider {
     private readonly clock: ClockLike = defaultClock
   ) {}
 
-  async testConnection(): Promise<SanitizedDiagnosticResult> {
+  async testConnection(draft?: unknown): Promise<SanitizedDiagnosticResult> {
     const timestamp = new Date(this.clock.now()).toISOString();
-    const apiToken = this.secrets.readSimpleKey(KIOTPROXY_SERVICE_NAME);
+    const isDraft = typeof draft === 'string';
+    const explicitToken = isDraft ? draft.trim() : undefined;
+
+    if (explicitToken !== undefined && explicitToken.length === 0) {
+      return {
+        code: 'CONFIG_ERROR',
+        message: 'API token KiotProxy đang trống. Vui lòng nhập token trước khi kiểm tra.',
+        timestamp,
+      };
+    }
+
+    const apiToken = explicitToken ?? this.secrets.readSimpleKey(KIOTPROXY_SERVICE_NAME);
 
     const info = await this.api.getUserInfo(apiToken);
     const keys = await this.api.listKeys(apiToken);
@@ -102,12 +137,13 @@ export class KiotProxyConnectivity implements ConnectivityProvider {
     if (typeof info.balance === 'number') details.balance = info.balance;
     if (info.username) details.account = info.username;
 
-    return ok('KiotProxy đã kết nối.', timestamp, details);
+    const msg = isDraft ? 'KiotProxy đã kết nối với token vừa nhập.' : 'KiotProxy đã kết nối (khóa đã lưu).';
+    return ok(msg, timestamp, details);
   }
 }
 
 export interface MultiloginTokenSource {
-  getAccessToken(): Promise<string>;
+  getAccessToken(draft?: unknown): Promise<string>;
 }
 
 export interface MultiloginLauncherApi {
@@ -127,13 +163,40 @@ export class MultiloginConnectivity implements ConnectivityProvider {
     private readonly clock: ClockLike = defaultClock
   ) {}
 
-  async testConnection(): Promise<SanitizedDiagnosticResult> {
+  async testConnection(draft?: unknown): Promise<SanitizedDiagnosticResult> {
     const timestamp = new Date(this.clock.now()).toISOString();
-    await this.auth.getAccessToken();
+    const isDraftObj = typeof draft === 'object' && draft !== null && 'mode' in draft;
+
+    if (isDraftObj) {
+      const mlDraft = draft as { mode: 'token' | 'credentials'; automationToken?: string; email?: string; password?: string };
+      if (mlDraft.mode === 'token') {
+        const token = mlDraft.automationToken?.trim();
+        if (!token) {
+          return {
+            code: 'CONFIG_ERROR',
+            message: 'Automation token Multilogin đang trống.',
+            timestamp,
+          };
+        }
+      } else if (mlDraft.mode === 'credentials') {
+        const email = mlDraft.email?.trim();
+        const password = mlDraft.password?.trim();
+        if (!email || !password) {
+          return {
+            code: 'CONFIG_ERROR',
+            message: 'Email hoặc mật khẩu Multilogin đang trống.',
+            timestamp,
+          };
+        }
+      }
+    }
+
+    await this.auth.getAccessToken(draft);
 
     try {
       const launcherVersion = await this.launcher.getLauncherVersion();
-      return ok('Multilogin đã kết nối.', timestamp, {
+      const msg = isDraftObj ? 'Multilogin đã kết nối thành công với thông tin vừa nhập.' : 'Multilogin đã kết nối (khóa đã lưu).';
+      return ok(msg, timestamp, {
         accountAuthenticated: true,
         launcherVersion
       });

@@ -11,7 +11,7 @@ export const DEFAULT_APP_SETTINGS: AppSettingsDTO = {
   browser: {
     provider: 'gpm',
     gpm: { port: 19995 },
-    multilogin: { port: 35000, launcher: 'xcli' },
+    multilogin: { port: 35000, launcher: 'api-v3' },
     gologin: { autoPort: true },
     camoufox: { headless: false },
     patchright: { headless: false },
@@ -21,6 +21,8 @@ export const DEFAULT_APP_SETTINGS: AppSettingsDTO = {
   },
   automation: {
     threadCount: 10,
+    mailLimit: 0,
+    maxBillablePurchases: 0,
     browser: 'multilogin',
     headless: false,
     retryCount: 3,

@@ -1,27 +1,23 @@
-# AutoManager v2.4.1 — CapCut Free Credits Automation Desktop Client
+# CapCut Automation v3.0.0 — CapCut Free Credits Automation Desktop Client
 
-> Hệ thống tự động hóa Desktop chuyên nghiệp trên Windows: Tự động hóa đăng ký, đăng nhập tài khoản CapCut Web và cày trọn bộ 12 nhiệm vụ Free Credits (lên tới 2.060 credits/tài khoản) thông qua Playwright kết nối Multilogin qua giao thức CDP, quản lý lease proxy xoay vòng KiotProxy và cấp phát email Just-In-Time (JIT) qua Gmail94/DongVanFB.
+> Hệ thống tự động hóa Desktop chuyên nghiệp trên Windows: Tự động hóa đăng ký, đăng nhập tài khoản CapCut Web và cày trọn bộ 12 nhiệm vụ Free Credits (lên tới 2.060 credits/tài khoản) thông qua kiến trúc kép **CycleTLS Native Direct HTTP Execution** kết hợp Playwright Browser Session, kiểm tra và kích hoạt dùng thử 7 ngày VIP, quản lý lease proxy xoay vòng KiotProxy và cấp phát email Just-In-Time (JIT) qua Gmail94/DongVanFB.
 
 [![Electron](https://img.shields.io/badge/Electron-35.0.0-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-19.1.0-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8.2_Strict-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Vite](https://img.shields.io/badge/Vite-6.2.1-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
+[![Vite](https://img.shields.io/badge/Vite-6.4.3-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
 [![SQLite](https://img.shields.io/badge/SQLite-WAL_Mode-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
+[![CycleTLS](https://img.shields.io/badge/CycleTLS-Go_Native_Bridge-00ADD8?logo=go&logoColor=white)](https://github.com/Danny-Dasilva/CycleTLS)
 [![Playwright](https://img.shields.io/badge/Playwright-Core_1.62.1-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/)
 
 ## Tải bản phát hành live
 
-Release đã được xác minh end-to-end trên Windows:
+Release v3.0.0 đã được đóng gói và xác minh end-to-end trên Windows:
 
-- [Tải AutoManager-2.4.1-x64.exe](https://github.com/tmq9999/Tool-Capcut-Auto-Task/releases/download/v2.4.1-live/AutoManager-2.4.1-x64.exe)
-- [Tải blockmap cho cập nhật](https://github.com/tmq9999/Tool-Capcut-Auto-Task/releases/download/v2.4.1-live/AutoManager-2.4.1-x64.exe.blockmap)
-- [Xem release notes và checksum](https://github.com/tmq9999/Tool-Capcut-Auto-Task/releases/tag/v2.4.1-live)
+- [Tải CapCut Automation-3.0.0-x64.exe](https://github.com/tmq9999/Tool-Capcut-Auto-Task/releases/download/v3.0.0-live/CapCut%20Automation-3.0.0-x64.exe)
+- [Xem release notes và changelog chi tiết](CHANGELOG.md)
 
-SHA256 installer: `6f62b89e0c2a5b14e3d4f67010c06b712cf134d85977a232fd1244ecd3d12874`
-
-Live evidence: một mailbox Gmail94 thật đã hoàn tất đăng ký OTP và toàn bộ `12/12`
-nhiệm vụ CapCut, ghi nhận `670/670` credits. Chi tiết nằm trong
-[`docs/releases/2026-09-05-v2.4.1-live.md`](docs/releases/2026-09-05-v2.4.1-live.md).
+SHA256 installer: `14210fcd813c6e05b284c15ae95f406ea667ef0dfea2befa899328691fb8193c`
 
 ---
 
@@ -30,10 +26,10 @@ nhiệm vụ CapCut, ghi nhận `670/670` credits. Chi tiết nằm trong
 - [1. Giới thiệu tổng quan](#1-giới-thiệu-tổng-quan)
 - [2. Đặc tả kiến trúc kỹ thuật lõi](#2-đặc-tả-kiến-trúc-kỹ-thuật-lõi)
   - [2.1. Phân tầng kiến trúc (Architecture Layers)](#21-phân-tầng-kiến-trúc-architecture-layers)
-  - [2.2. Cơ sở dữ liệu SQLite & Hệ thống Migrations](#22-cơ-sở-dữ-liệu-sqlite--hệ-thống-migrations)
-  - [2.3. Cơ chế Continuous Worker & Cấp phát Email Just-In-Time (JIT)](#23-cơ-chế-continuous-worker--cấp-phát-email-just-in-time-jit)
-  - [2.4. Engine Automation CapCut & Cổng chứng minh nhiệm vụ](#24-engine-automation-capcut--cổng-chứng-minh-nhiệm-vụ)
-  - [2.5. Bảng bất biến kỹ thuật đã đo lường (Invariance Table)](#25-bảng-bất-biến-kỹ-thuật-đã-đo-lường-invariance-table)
+  - [2.2. Động cơ HTTP Direct Tasks & CycleTLS Native Transport](#22-động-cơ-http-direct-tasks--cycletls-native-transport)
+  - [2.3. Cơ sở dữ liệu SQLite & Hệ thống Migrations](#23-cơ-sở-dữ-liệu-sqlite--hệ-thống-migrations)
+  - [2.4. Cơ chế Continuous Worker & Cấp phát Email Just-In-Time (JIT)](#24-cơ-chế-continuous-worker--cấp-phát-email-just-in-time-jit)
+  - [2.5. Danh sách 12 nhiệm vụ Free Credits & Cổng chứng minh `do_action`](#25-danh-sách-12-nhiệm-vụ-free-credits--cổng-chứng-minh-do_action)
 - [3. Đặc tả chức năng chi tiết các Tab & Settings trên UI](#3-đặc-tả-chức-năng-chi-tiết-các-tab--settings-trên-ui)
   - [3.1. Tab Dashboard (Bảng điều khiển & Vận hành)](#31-tab-dashboard-bảng-điều-khiển--vận-hành)
   - [3.2. Tab Accounts (Quản lý tài khoản & Dữ liệu)](#32-tab-accounts-quản-lý-tài-khoản--dữ-liệu)
@@ -52,16 +48,19 @@ nhiệm vụ CapCut, ghi nhận `670/670` credits. Chi tiết nằm trong
 
 ## 1. Giới thiệu tổng quan
 
-**AutoManager v2.4.1** là ứng dụng desktop thương mại phát triển chuyên biệt cho môi trường Windows, phục vụ nhu cầu tự động hóa quy trình nuôi, tạo và làm nhiệm vụ nhận Free Credits cho tài khoản CapCut Web số lượng lớn.
+**CapCut Automation v3.0.0** là phiên bản nâng cấp toàn diện (Big Update), phát triển chuyên biệt cho môi trường Windows, phục vụ nhu cầu tự động hóa quy trình nuôi, tạo và làm nhiệm vụ nhận Free Credits cho tài khoản CapCut Web số lượng lớn với tốc độ và độ ổn định cao nhất.
 
-### Điểm nổi bật của phiên bản 2.4.1:
-- **Hợp nhất mã nguồn toàn diện:** Engine automation trình duyệt (`Playwright Core`) đã được tích hợp trực tiếp vào tiến trình `main` của Electron, loại bỏ hoàn toàn việc phân tách 2 thư mục rời rạc trước đây.
-- **Mô hình công nhân liên tục (Continuous Worker Pool):** Thiết lập số luồng (`threadCount`) đóng vai trò là mức chịu tải đồng thời (concurrency limit). Hệ thống tự động xoay vòng nạp công việc liên tục cho đến khi người dùng bấm Dừng hoặc gặp điều kiện chặn rõ ràng.
-- **Tiết kiệm chi phí với JIT Email & Tái sử dụng:** Giữ lease proxy thành công trước mới kích hoạt lệnh mua email. Tự động kiểm tra và ưu tiên tái sử dụng các hộp thư chưa tiêu thụ trong kho dữ liệu cục bộ bằng cơ chế đặt chỗ nguyên tử (Atomic Reservation).
-- **Cổng chứng minh không giả lập (Proof-based Execution):** Mỗi nhiệm vụ chỉ được coi là hoàn tất khi bắt được gói tin mạng `do_action` trả về `err_no === 0` và đối chiếu thành công với API `task_status` của CapCut.
-- **Bảo mật chuẩn Enterprise:** Mật khẩu, token API và cookies được mã hóa thông qua `Electron safeStorage` trước khi lưu vào SQLite. Không rò rỉ bất kỳ chuỗi bảo mật dạng thô nào lên Renderer hay file nhật ký.
+### Điểm đột phá của phiên bản 3.0.0:
+- **Động cơ HTTP Direct Tasks & CycleTLS Native Transport:** Thay thế hoàn toàn thao tác click giả lập UI nặng nề, chậm chạp và dễ gãy bằng việc gọi trực tiếp các API endpoints của CapCut qua cầu nối CycleTLS (Go native) chạy trên loopback. Giúp hoàn tất 12 nhiệm vụ chỉ trong vài giây.
+- **Tự động Claim Credits & Kích hoạt Trial 7 ngày:** Tự động gửi lệnh nhận thưởng (`claim`) ngay sau khi hoàn thành nhiệm vụ và kiểm tra kích hoạt gói dùng thử VIP 7 ngày nếu tài khoản đủ điều kiện.
+- **Linh hoạt Headed / Headless:** Tùy chọn mở cửa sổ trình duyệt (Headed) để quan sát trực quan hoặc chạy ngầm hoàn toàn (Headless) để tiết kiệm tối đa CPU/RAM khi chạy đa luồng.
+- **Kiểm tra kết nối Live Draft:** Kiểm tra ngay tính hợp lệ của tài khoản Multilogin, KiotProxy, Gmail94, DongVanFB ngay khi đang nhập liệu mà không cần phải bấm Lưu trước.
+- **Bộ nhận diện thương hiệu CapCut Automation:** Đồng bộ tên ứng dụng, logo vector CapCut gradient chuẩn trên cửa sổ, thanh tác vụ (Task Manager) và bộ cài Windows.
+- **Mô hình công nhân liên tục (Continuous Worker Pool):** Tự động xoay vòng nạp công việc liên tục, cấp phát Email Just-In-Time (JIT) sau khi giữ thành công proxy, bảo mật mã hóa AES qua `Electron safeStorage`.
 
 ---
+
+
 
 ## 2. Đặc tả kiến trúc kỹ thuật lõi
 
@@ -88,23 +87,38 @@ Hệ thống tuân thủ nghiêm ngặt mô hình luồng phụ thuộc hướng
 ┌───────────────────────────▼────────────────────────────┐
 │                  Application Services                  │
 │  (AutomationRunService, EmailPurchase, CapcutEngine)   │
-└─────────────┬────────────────────────────┬─────────────┘
-              │                            │
-┌─────────────▼─────────────┐┌─────────────▼─────────────┐
-│    Repositories & SQL     ││    External Providers     │
-│   (AccountRepo, LogRepo)  ││ (Multilogin, KiotProxy,   │
-│   SQLite (better-sqlite3) ││  Gmail94, DongVanFB)      │
-└───────────────────────────┘└───────────────────────────┘
+└──────┬────────────────────┬────────────────────┬───────┘
+       │                    │                    │
+┌──────▼──────┐      ┌──────▼──────┐      ┌──────▼─────────────┐
+│ Repositories│      │ CycleTLS    │      │ External Providers │
+│ & SQLite    │      │ Go Bridge   │      │ (Multilogin,       │
+│ (better-    │      │ (Loopback   │      │  KiotProxy,        │
+│  sqlite3)   │      │  127.0.0.1) │      │  Gmail94, DongVan) │
+└─────────────┘      └─────────────┘      └────────────────────┘
 ```
 
 #### Nguyên tắc ranh giới an toàn:
 1. **Renderer Isolation:** Renderer tuyệt đối không import Node.js APIs, Electron internals, `better-sqlite3` hay các SDK mang thông tin bảo mật.
-2. **ContextBridge thu hẹp:** Preload chỉ mở 11 kênh invoke và 3 kênh push; không bao giờ phơi bày `ipcRenderer` thô ra biến toàn cục `window`.
-3. **Mã hóa dữ liệu nhạy cảm:** Bí mật (API key, mật khẩu CapCut, access token, cookies) được mã hóa tại tầng `CredentialVault` trước khi lưu trữ vào SQLite. Phía UI chỉ nhận cờ boolean `isConfigured` hoặc chuỗi gợi ý đã che mờ (`maskedHint`).
+2. **ContextBridge thu hẹp:** Preload chỉ mở các kênh invoke và push có kiểu chặt chẽ; không bao giờ phơi bày `ipcRenderer` thô ra biến toàn cục `window`.
+3. **Mã hóa dữ liệu nhạy cảm:** Mọi thông tin nhạy cảm (API key, mật khẩu CapCut, access token, cookies) được mã hóa tại tầng `CredentialVault` bằng `Electron safeStorage` trước khi lưu trữ vào SQLite.
 
 ---
 
-### 2.2. Cơ sở dữ liệu SQLite & Hệ thống Migrations
+### 2.2. Động cơ HTTP Direct Tasks & CycleTLS Native Transport
+
+Phiên bản 3.0.0 loại bỏ hoàn toàn các bước click giao diện phức tạp, chậm chạp và dễ gãy của Playwright trên Canvas/Studio, thay thế bằng **giao tiếp HTTP trực tiếp**:
+
+- **CycleTLS Go Bridge:** Chạy tiến trình nền Go native độc quyền qua loopback `127.0.0.1`. Nhận yêu cầu từ Node process và thực hiện request ra ngoài với chữ ký TLS Fingerprint (JA3, HTTP/2, Akamai fingerprint) giả lập trình duyệt Chrome thật 100%, vượt qua hoàn toàn Cloudflare & ByteDance WAF.
+- **Thực thi 12 nhiệm vụ qua API (`taskApi.ts`, `taskMutation.ts`):** Kích hoạt trực tiếp payload `do_action` cho từng loại nhiệm vụ (Newbie register, PWA, Notifications, Design Studio, Video Studio).
+- **Tự động Claim Credits tức thì:** Ngay sau khi hoàn thành nhiệm vụ, hệ thống gửi lệnh claim và lưu biên lai (`proof`) vào CSDL.
+- **Kiểm tra Trial VIP 7 ngày (`trialApi.ts`):** Tự động phát hiện ưu đãi và kích hoạt gói dùng thử 7 ngày Pro/VIP.
+- **Chế độ Headed / Headless:**
+  - *Headed:* Sử dụng khi cần quan sát trực quan màn hình đăng nhập hoặc kiểm tra giao diện.
+  - *Headless:* Chạy hoàn toàn ngầm, tiết kiệm 90% CPU/RAM, thích hợp vận hành số lượng luồng lớn.
+
+---
+
+### 2.3. Cơ sở dữ liệu SQLite & Hệ thống Migrations
 
 Cơ sở dữ liệu SQLite được đặt tại đường dẫn cục bộ theo chuẩn hệ điều hành: `app.getPath("userData")/automanager.db`.
 
@@ -116,16 +130,19 @@ PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 ```
 
-#### 5 Migration phiên bản cơ sở dữ liệu:
-- **`001_initial_schema`:** Khởi tạo bảng `schema_migrations`, bảng `app_settings` (chứa JSON cấu hình phi bảo mật), bảng `service_credentials` (chứa token đã mã hóa qua vault), bảng `accounts` (thông tin tài khoản CapCut) và bảng `runtime_logs`.
-- **`002_provider_runtime`:** Thêm bảng `purchased_emails` (theo dõi đơn hàng mua mail từ Gmail94/DongVanFB) và bảng `proxy_leases` (quản lý thời gian chiếm giữ proxy, đảm bảo nguyên tắc không trùng IP).
-- **`003_proxy_lease_ip_reuse`:** Bổ sung các chỉ mục chuyên dụng và cột `released_at` trên `proxy_leases` để tối ưu tái sử dụng IP sạch.
-- **`004_account_task_progress`:** Bổ sung bảng `account_tasks` lưu chi tiết trạng thái 12 nhiệm vụ CapCut của từng tài khoản, phục vụ popup xem tiến độ trên UI.
-- **`005_purchased_email_reservations`:** Bổ sung cột `reserved_at` và `reserved_by` trên bảng `purchased_emails` để thực hiện khóa nguyên tử (Atomic JIT Reservation), chống xung đột tài nguyên giữa các luồng chạy song song.
+#### 8 Migration phiên bản cơ sở dữ liệu:
+- **`001_initial_schema`:** Khởi tạo bảng `schema_migrations`, `app_settings`, `service_credentials`, `accounts` và `runtime_logs`.
+- **`002_provider_runtime`:** Thêm bảng `purchased_emails` và `proxy_leases`.
+- **`003_proxy_lease_ip_reuse`:** Bổ sung chỉ mục và cột `released_at` trên `proxy_leases` để tối ưu tái sử dụng IP sạch.
+- **`004_account_task_progress`:** Bổ sung bảng `account_tasks` lưu chi tiết trạng thái 12 nhiệm vụ CapCut của từng tài khoản.
+- **`005_purchased_email_reservations`:** Khóa nguyên tử (Atomic JIT Reservation) trên `purchased_emails` chống tranh chấp giữa các luồng.
+- **`006_account_task_receipts`:** Lưu biên lai và chữ ký xác thực nhiệm vụ đã claim thành công.
+- **`007_account_unsettled_proofs`:** Bảng tạm đối soát bằng chứng mạng chưa quyết toán trước khi commit vào tài khoản.
+- **`008_account_mutation_intents`:** Quản lý ý định thay đổi trạng thái tài khoản (mutation intent log) đảm bảo tính nhất quán dữ liệu khi xảy ra crash/ngắt quãng.
 
 ---
 
-### 2.3. Cơ chế Continuous Worker & Cấp phát Email Just-In-Time (JIT)
+### 2.4. Cơ chế Continuous Worker & Cấp phát Email Just-In-Time (JIT)
 
 Hệ thống hoạt động theo mô hình điều phối hàng đợi luồng công nhân độc lập:
 
@@ -151,25 +168,24 @@ Hệ thống hoạt động theo mô hình điều phối hàng đợi luồng c
    - Nếu kho trống: Đặt mua 1 hộp thư mới qua API Gmail94/DongVanFB
         │
         ▼
-3. Mở profile Multilogin qua cổng CDP (Port 35000)
+3. Khởi tạo phiên trình duyệt (Headed / Headless theo cấu hình)
         │
         ▼
-4. Chạy Engine CapCut (Đăng ký -> Nhận 12 Nhiệm vụ -> Claim Credits)
+4. Chạy Đăng ký & Kích hoạt CycleTLS Session
         │
         ▼
-5. Đóng profile, nhả lease Proxy, lưu tài khoản vào SQLite
+5. Thực thi HTTP Direct Tasks: 12 Nhiệm vụ + Tự động Claim Credits + Check Trial 7 ngày
+        │
+        ▼
+6. Đóng session, nhả lease Proxy, lưu tài khoản vào SQLite
         │
         ▼
 [Slot được giải phóng] ──► Tự động kéo tài khoản/email tiếp theo để chạy liên tục!
 ```
 
-- **Quy tắc JIT Email:** Không bao giờ mua sẵn một mảng email lớn ở đầu phiên. Worker chỉ mua/nhận 1 email ngay khi luồng đó đã nắm giữ proxy thành công.
-- **Nguyên tử hóa đặt chỗ (Atomic Reservation):** Câu lệnh SQL cập nhật trạng thái `reserved_at` và `reserved_by` đồng thời trong một giao dịch, ngăn chặn hoàn toàn tình trạng hai luồng song song lấy trùng một hộp thư.
-- **Phục hồi sự cố:** Khi ứng dụng bị tắt đột ngột (crash/tắt máy), hàm `startupRecovery` lúc khởi động lại sẽ tự động giải phóng các email bị giữ trước đó về trạng thái khả dụng.
-
 ---
 
-### 2.4. Engine Automation CapCut & Cổng chứng minh nhiệm vụ
+### 2.5. Danh sách 12 nhiệm vụ Free Credits & Cổng chứng minh `do_action`
 
 Mã nguồn tại `src/main/services/capcut/` độc lập hoàn toàn với việc đọc SQLite hay mua proxy. Engine nhận vào ngữ cảnh trình duyệt `{ page, context, sampleImage, log, signal, pace }` và trả về kết quả định lượng.
 

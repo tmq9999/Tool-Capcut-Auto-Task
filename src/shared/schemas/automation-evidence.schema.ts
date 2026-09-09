@@ -1,12 +1,46 @@
 import { z } from 'zod';
-import { AutomationTerminalCodeEnum } from './automation.schema';
+import { AutomationTerminalCodeEnum, RolloutStageSchema } from './automation.schema';
+
+const WorkerAliasSchema = z.string().regex(/^worker-[1-9]\d*$/);
+const SessionAliasSchema = z.string().regex(/^worker-[1-9]\d*-session-[1-9]\d*$/);
+const AccountAliasSchema = z.string().regex(/^account-[1-9]\d*$/);
+export const EvidenceTaskKeySchema = z.enum([
+  'capcut_web_newbie_register', 'capcut_web_pwa_install', 'capcut_web_push_authorize',
+  'capcut_web_design_studio_picture_creation', 'capcut_web_design_studio_ai_chat',
+  'capcut_web_design_studio_upload_img', 'capcut_web_design_studio_canvas_edit',
+  'capcut_web_inspiration_generate_done', 'capcut_web_video_studio_creation',
+  'capcut_web_video_studio_send_msg', 'capcut_web_video_studio_generate_done', 'capcut_web_video_studio_export'
+]);
+export const UiEvidenceLabelSchema = z.enum([
+  'ui-action', 'launch', 'auth', 'trial', 'overlay', 'popover', 'claim',
+  'design-studio', 'video-studio', 'pwa-install', 'notifications', 'renderer-health', 'canvas-area'
+]);
+export type UiEvidenceLabel = z.infer<typeof UiEvidenceLabelSchema>;
+
+/** Map operational strings to fixed public categories; never forward a raw label. */
+export function toUiEvidenceLabel(label: string): UiEvidenceLabel {
+  if (/^(launch|window|attach)/i.test(label)) return 'launch';
+  if (/^(auth|login|signup)/i.test(label)) return 'auth';
+  if (/^trial/i.test(label)) return 'trial';
+  if (/^overlay/i.test(label)) return 'overlay';
+  if (/^(popover:claim|claim)/i.test(label)) return 'claim';
+  if (/^(popover|task-popover)/i.test(label)) return 'popover';
+  if (/^(design|mission:design)/i.test(label)) return 'design-studio';
+  if (/^(video|mission:video)/i.test(label)) return 'video-studio';
+  if (/^(pwa|mission:pwa)/i.test(label)) return 'pwa-install';
+  if (/^(notification|mission:notification)/i.test(label)) return 'notifications';
+  if (/^(health|renderer)/i.test(label)) return 'renderer-health';
+  if (/^canvas/i.test(label)) return 'canvas-area';
+  return 'ui-action';
+}
 
 export const EvidenceBaseSchema = z.object({
   schemaVersion: z.literal(1),
-  runId: z.string().uuid().or(z.string().regex(/^run-/)),
+  runId: z.string().uuid().or(z.string().regex(/^run-[a-zA-Z0-9][a-zA-Z0-9-]{0,127}$/)),
   at: z.string().datetime(),
-  workerAlias: z.string().regex(/^worker-\d+$/).optional(),
-  sessionAlias: z.string().regex(/^worker-\d+-session-\d+$/).optional()
+  workerAlias: WorkerAliasSchema.optional(),
+  sessionAlias: SessionAliasSchema.optional(),
+  accountAlias: AccountAliasSchema.optional()
 }).strict();
 
 export type EvidenceBase = z.infer<typeof EvidenceBaseSchema>;
@@ -17,7 +51,8 @@ export const RunStartEventSchema = EvidenceBaseSchema.extend({
   headed: z.literal(true),
   stage: z.union([z.literal(1), z.literal(3), z.literal(5), z.literal(10)]).nullable(),
   workerTarget: z.number().int().min(0),
-  maxBillablePurchases: z.number().int().min(0)
+  maxBillablePurchases: z.number().int().min(0),
+  uiScope: z.enum(['run-native', 'session-target']).optional()
 }).strict();
 
 export const StageEventSchema = EvidenceBaseSchema.extend({
@@ -52,35 +87,49 @@ export const HealthSummaryEventSchema = EvidenceBaseSchema.extend({
   cleanupFailures: z.number().int().min(0)
 }).strict();
 
+export const ProfileStartEventSchema = EvidenceBaseSchema.extend({
+  type: z.literal('profile-start'), workerAlias: WorkerAliasSchema, sessionAlias: SessionAliasSchema
+}).strict();
+
+export const AccountTerminalEventSchema = EvidenceBaseSchema.extend({
+  type: z.literal('account-terminal'), workerAlias: WorkerAliasSchema, accountAlias: AccountAliasSchema,
+  outcome: z.enum(['completed', 'failed', 'stopped', 'skipped'])
+}).strict();
+
+export const MailboxAcquiredEventSchema = EvidenceBaseSchema.extend({
+  type: z.literal('mailbox-acquired'), workerAlias: WorkerAliasSchema, accountAlias: AccountAliasSchema
+}).strict();
+
 export const UiQueuedEventSchema = EvidenceBaseSchema.extend({
   type: z.literal('ui-queued'),
   lane: z.enum(['foreground', 'editor']),
-  label: z.string().min(1)
+  label: UiEvidenceLabelSchema
 }).strict();
 
 export const UiStartedEventSchema = EvidenceBaseSchema.extend({
   type: z.literal('ui-started'),
   lane: z.enum(['foreground', 'editor']),
-  label: z.string().min(1),
+  label: UiEvidenceLabelSchema,
   waitMs: z.number().int().min(0)
 }).strict();
 
 export const UiFinishedEventSchema = EvidenceBaseSchema.extend({
   type: z.literal('ui-finished'),
   lane: z.enum(['foreground', 'editor']),
-  label: z.string().min(1),
-  holdMs: z.number().int().min(0)
+  label: UiEvidenceLabelSchema,
+  holdMs: z.number().int().min(0),
+  outcome: z.enum(['resolved', 'rejected']).optional()
 }).strict();
 
 export const UiQuarantinedEventSchema = EvidenceBaseSchema.extend({
   type: z.literal('ui-quarantined'),
-  label: z.string().min(1),
+  label: UiEvidenceLabelSchema,
   code: z.enum(['DOM_READ_TIMEOUT', 'ACTIVE_ABORT'])
 }).strict();
 
 export const UiLateSettledEventSchema = EvidenceBaseSchema.extend({
   type: z.literal('ui-late-settled'),
-  label: z.string().min(1),
+  label: UiEvidenceLabelSchema,
   outcome: z.enum(['resolved', 'rejected'])
 }).strict();
 
@@ -90,13 +139,16 @@ export const SchedulerShutdownEventSchema = EvidenceBaseSchema.extend({
 }).strict();
 
 export const TaskCheckpointItemSchema = z.object({
-  key: z.string().min(1),
+  key: EvidenceTaskKeySchema,
   status: z.number().int().min(0),
   errNo: z.number().int().optional()
 }).strict();
 
 export const TaskCheckpointEventSchema = EvidenceBaseSchema.extend({
   type: z.literal('task-checkpoint'),
+  workerAlias: WorkerAliasSchema,
+  sessionAlias: SessionAliasSchema,
+  accountAlias: AccountAliasSchema,
   fresh: z.boolean(),
   final: z.boolean(),
   observedAt: z.string().datetime(),
@@ -113,12 +165,17 @@ export const PersistenceFailureEventSchema = EvidenceBaseSchema.extend({
 
 export const ProfileStopEventSchema = EvidenceBaseSchema.extend({
   type: z.literal('profile-stop'),
+  workerAlias: WorkerAliasSchema,
+  sessionAlias: SessionAliasSchema,
   outcome: z.enum(['confirmed', 'failed']),
   code: z.literal('RESOURCE_CLEANUP_FAILED').optional()
 }).strict();
 
 export const TerminalEventSchema = EvidenceBaseSchema.extend({
   type: z.literal('terminal'),
+  mode: z.enum(['new', 'resume', 'health']),
+  stage: RolloutStageSchema.nullable(),
+  mailboxAcquisitions: z.number().int().min(0),
   state: z.enum(['completed', 'failed', 'stopped', 'blocked']),
   code: AutomationTerminalCodeEnum,
   accepted: z.number().int().min(0),
@@ -140,6 +197,9 @@ export const AutomationEvidenceEventDiscriminatedSchema = z.discriminatedUnion('
   ResourceSnapshotEventSchema,
   PurchaseEventSchema,
   HealthSummaryEventSchema,
+  ProfileStartEventSchema,
+  AccountTerminalEventSchema,
+  MailboxAcquiredEventSchema,
   UiQueuedEventSchema,
   UiStartedEventSchema,
   UiFinishedEventSchema,
@@ -184,3 +244,4 @@ export const AutomationEvidenceEventSchema = AutomationEvidenceEventDiscriminate
 );
 
 export type AutomationEvidenceEvent = z.infer<typeof AutomationEvidenceEventSchema>;
+export type AutomationEvidenceNonTerminalEvent = Exclude<AutomationEvidenceEvent, { type: 'terminal' }>;

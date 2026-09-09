@@ -16,6 +16,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BrowserContext, Locator, Page } from 'playwright-core';
+import { abortableDelay, boundedDomRead, DomReadTimeoutError, withinDeadline } from './cancellation';
+import { SessionEvidenceBudget } from './evidenceBudget';
 
 export type NetErrorKind = 'proxy' | 'dns' | 'timeout' | 'other';
 
@@ -65,6 +67,45 @@ export function getDumpDir(): string {
   return dumpRoot ?? path.resolve('.debug');
 }
 
+export interface StepScreenshotOptions {
+  runId: string;
+  sessionId: string;
+  stepId: string;
+  phase: 'before' | 'after';
+  budget: SessionEvidenceBudget;
+  responsiveSafe: boolean;
+}
+
+export interface StepScreenshotResult extends StepScreenshotOptions { filePath: string; bytes: number; }
+
+/** Capture a screenshot only at an explicitly safe, responsive step boundary. */
+export async function captureStepScreenshot(page: Page, options: StepScreenshotOptions): Promise<StepScreenshotResult | null> {
+  if (!options.responsiveSafe || page.isClosed?.()) return null;
+  const alias = (value: string, fallback: string) => /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/.test(value) ? value : fallback;
+  const runId = alias(options.runId, 'run');
+  const sessionId = alias(options.sessionId, 'session');
+  const stepId = alias(options.stepId, 'step');
+  try {
+    const image = await withinDeadline(page.screenshot({ timeout: 1500 }), 1500);
+    const buffer = Buffer.isBuffer(image) ? image : Buffer.from(image as Uint8Array);
+    const reservation = options.budget.reserve('screenshot', buffer.byteLength);
+    if (!reservation) return null;
+    const dir = path.join(getDumpDir(), runId, sessionId);
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, `${stepId}-${options.phase}-${randomScreenshotId()}.png`);
+    fs.writeFileSync(filePath, buffer, { flag: 'wx', mode: 0o600 });
+    reservation.commit(buffer.byteLength);
+    return { ...options, runId, sessionId, stepId, filePath, bytes: buffer.byteLength };
+  } catch {
+    return null;
+  }
+}
+
+function randomScreenshotId(): string {
+  dumpSeq++;
+  return String(dumpSeq).padStart(3, '0');
+}
+
 /**
  * Số dump tối đa giữ lại trong thư mục hiện trường.
  *
@@ -107,20 +148,26 @@ export function pruneDumps(dir: string, keep: number = MAX_DUMPS): void {
 }
 
 /** Ảnh + DOM đầy đủ vào thư mục dump; trả về tên file (không đuôi) hoặc null. */
-export async function dump(page: Page, label: string): Promise<string | null> {
+export async function dump(page: Page, label: string, signal?: AbortSignal): Promise<string | null> {
+  signal?.throwIfAborted();
   try {
     const dir = getDumpDir();
     fs.mkdirSync(dir, { recursive: true });
     const safe = label.replace(/[^a-z0-9_-]+/gi, '_').slice(0, 40);
     const name = `${String(++dumpSeq).padStart(3, '0')}_${safe}`;
     // Ảnh có thể chụp thất bại nếu tab đang điều hướng — DOM vẫn đáng giá.
-    await page.screenshot({ path: path.join(dir, `${name}.png`) }).catch(() => {});
-    const html = await page.content().catch(() => null);
+    // Do not give an abandoned screenshot a path: a late response must not write.
+    const png = await withinDeadline(page.screenshot({ timeout: 1500 }), 1500, signal).catch(() => null);
+    signal?.throwIfAborted();
+    if (png) fs.writeFileSync(path.join(dir, `${name}.png`), png);
+    const html = await withinDeadline(page.content(), 1500, signal).catch(() => null);
+    signal?.throwIfAborted();
     if (html) fs.writeFileSync(path.join(dir, `${name}.html`), html);
     // Dọn SAU khi ghi xong: dump vừa tạo phải nằm trong số được giữ lại.
     pruneDumps(dir);
-    return name;
+    return png || html ? name : null;
   } catch {
+    signal?.throwIfAborted();
     return null;
   }
 }
@@ -133,15 +180,20 @@ export async function mustSee(
   page: Page,
   locator: Locator,
   what: string,
-  timeoutMs = 15000
+  timeoutMs = 15000,
+  signal?: AbortSignal
 ): Promise<Locator> {
+  signal?.throwIfAborted();
   const first = locator.first();
-  const ok = await first
-    .waitFor({ state: 'visible', timeout: timeoutMs })
+  const ok = await boundedDomRead(() => first.waitFor({ state: 'visible', timeout: timeoutMs }), 'visible:' + what, timeoutMs, signal)
     .then(() => true)
-    .catch(() => false);
+    .catch((error: unknown) => {
+      signal?.throwIfAborted();
+      if (error instanceof DomReadTimeoutError) throw error;
+      return false;
+    });
   if (!ok) {
-    throw new StepError(`Không thấy ${what}`, await dump(page, `missing_${what}`));
+    throw new StepError(`Không thấy ${what}`, await dump(page, `missing_${what}`, signal));
   }
   return first;
 }
@@ -151,11 +203,15 @@ export async function mustSee(
  * cho ancestor không inert. `tools/verify-recorder.ts` đã chứng minh điều này
  * trên fixture, và nó chính là lý do "Edit on canvas" hỏng 10 lần.
  */
-export async function assertNotInert(locator: Locator, what: string): Promise<void> {
-  const blocked = await locator
-    .first()
-    .evaluate((el: Element) => !!el.closest('[inert]') || !!el.closest('[aria-hidden="true"]'))
-    .catch(() => false);
+export async function assertNotInert(locator: Locator, what: string, signal?: AbortSignal): Promise<void> {
+  const blocked = await boundedDomRead(
+    () => locator.first().evaluate((el: Element) => !!el.closest('[inert]') || !!el.closest('[aria-hidden="true"]')),
+    'inert-check', 1000, signal
+  ).catch((error: unknown) => {
+    signal?.throwIfAborted();
+    if (error instanceof DomReadTimeoutError) throw error;
+    return false;
+  });
   if (blocked) {
     throw new StepError(`${what} đang trong vùng inert/aria-hidden — click sẽ không tới đích`);
   }
@@ -164,10 +220,9 @@ export async function assertNotInert(locator: Locator, what: string): Promise<vo
 /**
  * `visible` KHÔNG có nghĩa là click tới được.
  *
- * `humanClick` bắn toạ độ thô qua `page.mouse` (bắt buộc, vì Shark Risk Control
- * chấm điểm quỹ đạo chuột), và `page.mouse` không kiểm element nào đang nằm
- * trên. Element bị che vẫn "visible", vẫn không inert, click vẫn chạy — chỉ là
- * nó rơi vào element phủ bên trên và KHÔNG có lỗi nào được ném.
+ * `humanClick` dùng locator click với actionability của trình duyệt; helper
+ * không còn tự bắn quỹ đạo qua `page.mouse`. Raw mouse không kiểm element nào
+ * đang nằm trên, vì vậy element bị che vẫn "visible" và click mù không ném lỗi.
  *
  * Đó là nguyên nhân 22/22 lượt `capcut_web_design_studio_canvas_edit` thất bại
  * ngày 2026-09-02. Đo trực tiếp trên account rvfyafux88495 (port 60345, cửa sổ
@@ -179,8 +234,8 @@ export async function assertNotInert(locator: Locator, what: string): Promise<vo
  * Hàm này hỏi chính trang chứ không suy đoán: điểm giữa element trả về đúng nó
  * (hoặc con nó) hay không. Không kiểm được cũng NÉM — thà dừng còn hơn click mù.
  */
-export async function assertHittable(page: Page, locator: Locator, what: string): Promise<void> {
-  const hit = await locator
+export async function assertHittable(page: Page, locator: Locator, what: string, signal?: AbortSignal): Promise<void> {
+  const hit = await boundedDomRead(() => locator
     .first()
     .evaluate((el: Element): { ok: boolean; blocker: string } => {
       const r = el.getBoundingClientRect();
@@ -193,8 +248,12 @@ export async function assertHittable(page: Page, locator: Locator, what: string)
       const label = labelled?.getAttribute('aria-label');
       const cls = (top.getAttribute('class') ?? '').split(' ')[0];
       return { ok: false, blocker: label ?? `${top.tagName.toLowerCase()}.${cls}` };
-    })
-    .catch((e: unknown) => ({ ok: false, blocker: `không kiểm được (${(e as Error).message})` }));
+    }), 'hit-test:' + what, 1000, signal)
+    .catch((e: unknown) => {
+      signal?.throwIfAborted();
+      if (e instanceof DomReadTimeoutError) throw e;
+      return { ok: false, blocker: `không kiểm được (${(e as Error).message})` };
+    });
 
   if (!hit.ok) {
     throw new StepError(
@@ -205,21 +264,21 @@ export async function assertHittable(page: Page, locator: Locator, what: string)
 }
 
 /** Chờ tới khi một vùng thoát khỏi inert, tức là panel đã mở ra thật. */
-export async function waitNotInert(page: Page, selector: string, timeoutMs: number): Promise<void> {
+export async function waitNotInert(page: Page, selector: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const open = await page
+    const open = await boundedDomRead(() => page
       .evaluate((sel: string) => {
         const el = document.querySelector(sel);
         return !!el && !el.hasAttribute('inert') && el.getAttribute('aria-hidden') !== 'true';
-      }, selector)
-      .catch(() => false);
+      }, selector), 'wait-not-inert', Math.min(1000, deadline - Date.now()), signal);
     if (open) return;
-    await new Promise((r) => setTimeout(r, 300));
+    await abortableDelay(Math.max(0, Math.min(300, deadline - Date.now())), signal ?? new AbortController().signal);
   }
   throw new StepError(
     `Vùng ${selector} không thoát khỏi inert sau ${timeoutMs}ms`,
-    await dump(page, 'still_inert')
+    await dump(page, 'still_inert', signal)
   );
 }
 
@@ -246,4 +305,3 @@ export function attachNetDiag(context: BrowserContext, onIssue: (msg: string) =>
   context.on('page', hook);
   return issues;
 }
-

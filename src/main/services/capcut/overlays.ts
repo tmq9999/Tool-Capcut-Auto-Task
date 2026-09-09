@@ -45,7 +45,7 @@ import type { Page } from 'playwright-core';
 
 import { dump, StepError } from './diag';
 import { clickIfVisible, foregroundPage } from './human';
-import { createDirectUiInteraction } from './uiInteractionScheduler';
+import { isDomReadTimeout } from './cancellation';
 import type { AccountUiInteraction } from './types';
 import type { LogFn } from './login';
 
@@ -68,6 +68,17 @@ const BLOCKING_MASK = '.lv-modal-mask[style*="display: block"]';
 const SURVEY_SKIP =
   '.skip-mrkR37, button:has-text("Skip"), div[role="button"]:text-is("Skip"), button:has-text("Not now")';
 
+function requireInteraction(ui: AccountUiInteraction, signal: AbortSignal): void {
+  if (!signal) throw new Error('ABORT_SIGNAL_REQUIRED');
+  if (!ui) throw new Error('UI_INTERACTION_REQUIRED');
+  signal.throwIfAborted();
+}
+
+function rethrowInterrupted(error: unknown, signal: AbortSignal): void {
+  signal.throwIfAborted();
+  if (isDomReadTimeout(error)) throw error;
+}
+
 /** Còn mask nào đang phủ trang không? */
 async function isSurveyBlocking(page: Page): Promise<boolean> {
   return (await page.locator(BLOCKING_MASK).count().catch(() => 0)) > 0;
@@ -87,19 +98,17 @@ async function isSurveyBlocking(page: Page): Promise<boolean> {
 export async function skipOnboardingSurvey(
   page: Page,
   log: LogFn,
-  ui?: AccountUiInteraction,
-  signal?: AbortSignal,
+  ui: AccountUiInteraction,
+  signal: AbortSignal,
   maxSteps = 3
 ): Promise<boolean> {
+  requireInteraction(ui, signal);
   let clicks = 0;
 
   const succeed = (): boolean => {
     if (clicks > 0) log(`   → Đã bỏ khảo sát onboarding sau ${clicks} lần Skip`);
     return true;
   };
-
-  const targetSig = signal ?? new AbortController().signal;
-  const targetUi = ui ?? createDirectUiInteraction(targetSig);
 
   for (let step = 0; step < maxSteps; step += 1) {
     if (!(await isSurveyBlocking(page))) return succeed();
@@ -109,11 +118,14 @@ export async function skipOnboardingSurvey(
 
     const clicked = await foregroundPage(
       page,
-      { signal: targetSig, stage: 'overlay:survey-skip', ui: targetUi },
+      { signal, stage: 'overlay:survey-skip', ui },
       () => skip.click({ timeout: 8000 })
     )
       .then(() => true)
-      .catch(() => false);
+      .catch((error: unknown) => {
+        rethrowInterrupted(error, signal);
+        return false;
+      });
     if (!clicked) break;
     clicks += 1;
 
@@ -123,7 +135,7 @@ export async function skipOnboardingSurvey(
       .locator(BLOCKING_MASK)
       .first()
       .waitFor({ state: 'detached', timeout: 4000 })
-      .catch(() => {});
+      .catch((error: unknown) => { rethrowInterrupted(error, signal); });
   }
 
   if (!(await isSurveyBlocking(page))) return succeed();
@@ -159,21 +171,19 @@ export async function skipOnboardingSurvey(
 export async function closeBlockingPricingModal(
   page: Page,
   log: LogFn,
-  ui?: AccountUiInteraction,
-  signal?: AbortSignal
+  ui: AccountUiInteraction,
+  signal: AbortSignal
 ): Promise<boolean> {
+  requireInteraction(ui, signal);
   const modal = page.locator('[class*="subscriptionModal"]').first();
   if ((await modal.count().catch(() => 0)) === 0) return true;
   if (!(await modal.isVisible({ timeout: 500 }).catch(() => false))) return true;
 
-  const targetSig = signal ?? new AbortController().signal;
-  const targetUi = ui ?? createDirectUiInteraction(targetSig);
-
   await foregroundPage(
     page,
-    { signal: targetSig, stage: 'overlay:pricing-escape', ui: targetUi },
+    { signal, stage: 'overlay:pricing-escape', ui },
     () => page.keyboard.press('Escape')
-  ).catch(() => {});
+  ).catch((error: unknown) => { rethrowInterrupted(error, signal); });
   await page.waitForTimeout(900);
 
   if (await modal.isVisible({ timeout: 500 }).catch(() => false)) {
@@ -183,7 +193,7 @@ export async function closeBlockingPricingModal(
         '[class*="subscriptionModal"] [aria-label="Close"], [class*="subscriptionModal"] [class*="close"]'
       ),
       2500,
-      { signal: targetSig, stage: 'overlay:pricing-close', ui: targetUi }
+      { signal, stage: 'overlay:pricing-close', ui }
     );
     await page.waitForTimeout(600);
   }
@@ -223,24 +233,24 @@ const PAGE_ERROR_TEXT = /页面异常|Page (error|exception)/;
 async function closePageErrorModal(
   page: Page,
   log: LogFn,
-  ui?: AccountUiInteraction,
-  signal?: AbortSignal
+  ui: AccountUiInteraction,
+  signal: AbortSignal
 ): Promise<boolean> {
+  requireInteraction(ui, signal);
   const wrapper = page.locator('.lv-modal-wrapper').filter({ hasText: PAGE_ERROR_TEXT }).first();
   if ((await wrapper.count().catch(() => 0)) === 0) return true;
-
-  const targetSig = signal ?? new AbortController().signal;
-  const targetUi = ui ?? createDirectUiInteraction(targetSig);
 
   const refresh = wrapper.getByRole('button', { name: /Refresh|刷新/i }).first();
   if (await refresh.isVisible({ timeout: 800 }).catch(() => false)) {
     await foregroundPage(
       page,
-      { signal: targetSig, stage: 'overlay:page-error-refresh', ui: targetUi },
+      { signal, stage: 'overlay:page-error-refresh', ui },
       () => refresh.click({ timeout: 5000 })
-    ).catch(() => {});
+    ).catch((error: unknown) => { rethrowInterrupted(error, signal); });
   } else {
-    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch((error: unknown) => {
+      rethrowInterrupted(error, signal);
+    });
   }
   await page.waitForTimeout(4000);
 
@@ -272,9 +282,10 @@ async function closePageErrorModal(
 export async function ensurePageUsable(
   page: Page,
   log: LogFn,
-  ui?: AccountUiInteraction,
-  signal?: AbortSignal
+  ui: AccountUiInteraction,
+  signal: AbortSignal
 ): Promise<boolean> {
+  requireInteraction(ui, signal);
   if ((await page.locator(BLOCKING_MASK).count().catch(() => 0)) === 0) return true;
 
   await skipOnboardingSurvey(page, log, ui, signal);

@@ -3,7 +3,8 @@ import { DomReadTimeoutError } from '../cancellation';
 import type { UiSchedulerEvent } from '../types';
 import {
   RunUiInteractionScheduler,
-  createDirectUiInteraction
+  createDirectUiInteraction,
+  mapUiSchedulerEventToEvidence
 } from '../uiInteractionScheduler';
 
 function createDeferred<T>() {
@@ -445,7 +446,8 @@ describe('RunUiInteractionScheduler', () => {
   });
 
   it('releases normally after an ordinary non-session error', async () => {
-    const scheduler = new RunUiInteractionScheduler();
+    const events: UiSchedulerEvent[] = [];
+    const scheduler = new RunUiInteractionScheduler({ onEvent: event => events.push(event) });
     const sig = new AbortController().signal;
     const intA = scheduler.forSession({ sessionAlias: 'session-a', signal: sig });
     const intB = scheduler.forSession({ sessionAlias: 'session-b', signal: sig });
@@ -464,6 +466,169 @@ describe('RunUiInteractionScheduler', () => {
 
     expect(bStarted).toBe(true);
     expect(scheduler.getSnapshot().quarantinedAlias).toBeNull();
+    expect(events.filter(event => event.type === 'finished')).toEqual([
+      expect.objectContaining({ type: 'finished', label: 'op-a', outcome: 'rejected', holdMs: expect.any(Number) }),
+      expect.objectContaining({ type: 'finished', label: 'op-b', outcome: 'resolved' })
+    ]);
+    const rejected = events.find(event => event.type === 'finished' && event.outcome === 'rejected');
+    expect(rejected && mapUiSchedulerEventToEvidence('run-safe', rejected)).toMatchObject({
+      type: 'ui-finished', outcome: 'rejected', holdMs: expect.any(Number)
+    });
+  });
+
+  it('poisons queued editor and future work after a foreground timeout', async () => {
+    const scheduler = new RunUiInteractionScheduler();
+    const otherScheduler = new RunUiInteractionScheduler();
+    const signal = new AbortController().signal;
+    const ui = scheduler.forSession({ sessionAlias: 'session-a', signal });
+    let releaseEditor!: () => void;
+    const editorHold = ui.editor('editor-hold', () => new Promise<void>(resolve => {
+      releaseEditor = resolve;
+    }));
+    const editor = vi.fn(async () => {});
+    const future = vi.fn(async () => {});
+    const queuedEditor = ui.editor('queued-editor', editor).catch(error => error);
+    const timedOut = ui.foreground('timed-out-foreground', async () => {
+      throw new DomReadTimeoutError('timed-out-foreground');
+    });
+
+    await expect(timedOut).rejects.toThrow('timed-out-foreground');
+    expect(await queuedEditor).toBeInstanceOf(DomReadTimeoutError);
+    await expect(ui.foreground('future', future)).rejects.toBeInstanceOf(DomReadTimeoutError);
+    expect(editor).not.toHaveBeenCalled();
+    expect(future).not.toHaveBeenCalled();
+
+    const peer = vi.fn(async () => 'peer-ok');
+    await expect(otherScheduler.forSession({ sessionAlias: 'session-b', signal })
+      .foreground('peer', peer)).resolves.toBe('peer-ok');
+    expect(peer).toHaveBeenCalledOnce();
+    releaseEditor();
+    await editorHold;
+  });
+
+  it('retains an already-active editor after cross-lane poison until exact stop', async () => {
+    const scheduler = new RunUiInteractionScheduler();
+    const signal = new AbortController().signal;
+    const ui = scheduler.forSession({ sessionAlias: 'session-a', signal });
+    let releaseEditor!: () => void;
+    const editor = ui.editor('active-editor', () => new Promise<void>(resolve => {
+      releaseEditor = resolve;
+    }));
+
+    await expect(ui.foreground('timed-out-foreground', async () => {
+      throw new DomReadTimeoutError('timed-out-foreground');
+    })).rejects.toThrow('timed-out-foreground');
+    releaseEditor();
+    await editor;
+
+    expect(scheduler.snapshot().editor.active).toBe(1);
+    scheduler.confirmProfileStopped('session-a');
+    expect(scheduler.snapshot().editor.active).toBe(0);
+  });
+
+  it('does not let an editor response after exact stop release a peer owner', async () => {
+    const scheduler = new RunUiInteractionScheduler();
+    const signal = new AbortController().signal;
+    const ui = scheduler.forSession({ sessionAlias: 'session-a', signal });
+    let releaseOld!: () => void;
+    const oldEditor = ui.editor('old-editor', () => new Promise<void>(resolve => {
+      releaseOld = resolve;
+    }));
+
+    await expect(ui.foreground('timed-out-foreground', async () => {
+      throw new DomReadTimeoutError('timed-out-foreground');
+    })).rejects.toThrow('timed-out-foreground');
+    scheduler.confirmProfileStopped('session-a');
+    expect(scheduler.snapshot().editor.active).toBe(0);
+
+    let releasePeer!: () => void;
+    const peerStarted = vi.fn();
+    const peerEditor = scheduler.forSession({ sessionAlias: 'session-b', signal })
+      .editor('peer-editor', () => new Promise<void>(resolve => {
+        peerStarted();
+        releasePeer = resolve;
+      }));
+    await vi.waitFor(() => expect(peerStarted).toHaveBeenCalledOnce());
+    expect(scheduler.snapshot().editor.active).toBe(1);
+
+    releaseOld();
+    await oldEditor;
+    expect(scheduler.snapshot().editor.active).toBe(1);
+    releasePeer();
+    await peerEditor;
+    expect(scheduler.snapshot().editor.active).toBe(0);
+  });
+
+  it('poisons queued foreground after an editor timeout', async () => {
+    const scheduler = new RunUiInteractionScheduler();
+    const signal = new AbortController().signal;
+    const ui = scheduler.forSession({ sessionAlias: 'session-a', signal });
+    let releaseForeground!: () => void;
+    const foregroundHold = ui.foreground('foreground-hold', () => new Promise<void>(resolve => {
+      releaseForeground = resolve;
+    }));
+    const queuedForegroundCallback = vi.fn(async () => {});
+    const queuedForeground = ui.foreground('queued-foreground', queuedForegroundCallback).catch(error => error);
+
+    await expect(ui.editor('timed-out-editor', async () => {
+      throw new DomReadTimeoutError('timed-out-editor');
+    })).rejects.toThrow('timed-out-editor');
+    expect(await queuedForeground).toBeInstanceOf(DomReadTimeoutError);
+    expect(queuedForegroundCallback).not.toHaveBeenCalled();
+    releaseForeground();
+    await foregroundHold;
+  });
+
+  it('allows an editor operation to enter its own foreground lane', async () => {
+    const scheduler = new RunUiInteractionScheduler();
+    const signal = new AbortController().signal;
+    const ui = scheduler.forSession({ sessionAlias: 'session-a', signal });
+    const order: string[] = [];
+
+    await ui.editor('editor', async () => {
+      order.push('editor-start');
+      await ui.foreground('nested-foreground', async () => { order.push('foreground'); });
+      order.push('editor-end');
+    });
+
+    expect(order).toEqual(['editor-start', 'foreground', 'editor-end']);
+  });
+
+  it('closes a no-resource session without emitting profile-stop', async () => {
+    const events: UiSchedulerEvent[] = [];
+    const scheduler = new RunUiInteractionScheduler({ onEvent: event => events.push(event) });
+    const signal = new AbortController().signal;
+    const ui = scheduler.forSession({ sessionAlias: 'session-a', signal });
+    const callback = vi.fn(async () => {});
+
+    scheduler.closeSession('session-a');
+
+    await expect(ui.foreground('future', callback)).rejects.toThrow('UI_SESSION_CLOSED');
+    expect(callback).not.toHaveBeenCalled();
+    expect(events.some(event => event.type === 'profile-stopped')).toBe(false);
+    expect(scheduler.snapshot()).toMatchObject({
+      foreground: { active: 0, queued: 0 },
+      editor: { active: 0, queued: 0 },
+      quarantinedSessionAliases: []
+    });
+  });
+
+  it('drains queued callbacks when a no-resource session is closed', async () => {
+    const scheduler = new RunUiInteractionScheduler();
+    const signal = new AbortController().signal;
+    let release!: () => void;
+    const active = scheduler.forSession({ sessionAlias: 'session-peer', signal })
+      .foreground('active', () => new Promise<void>(resolve => { release = resolve; }));
+    const callback = vi.fn(async () => {});
+    const queued = scheduler.forSession({ sessionAlias: 'session-a', signal })
+      .foreground('queued', callback);
+
+    scheduler.closeSession('session-a');
+
+    await expect(queued).rejects.toThrow('UI_SESSION_CLOSED');
+    expect(callback).not.toHaveBeenCalled();
+    release();
+    await active;
   });
 
   it('does not starve a foreground waiter behind later tickets', async () => {
@@ -605,5 +770,14 @@ describe('RunUiInteractionScheduler', () => {
 
     expect(opFCount).toBe(0);
     expect(opECount).toBe(0);
+  });
+
+  it('propagates session focus mode and defaults direct interactions to native', () => {
+    const signal = new AbortController().signal;
+    const scheduler = new RunUiInteractionScheduler();
+    expect(scheduler.forSession({ sessionAlias: 'target-session', signal, focusMode: 'target' }).focusMode)
+      .toBe('target');
+    expect(createDirectUiInteraction(signal).focusMode).toBe('native');
+    expect(createDirectUiInteraction(signal, 'target').focusMode).toBe('target');
   });
 });

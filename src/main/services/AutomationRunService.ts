@@ -9,10 +9,15 @@ import { abortableDelay } from './capcut/cancellation';
 import {
   RunUiInteractionScheduler,
   createDirectUiInteraction,
-  mapUiSchedulerEventToEvidence
+  mapUiSchedulerEventToEvidence,
+  type UiSchedulerSnapshot
 } from './capcut/uiInteractionScheduler';
 import { createRunTelemetry, type RunTelemetry } from './capcut/runTelemetry';
-import type { AutomationEvidenceTerminalEvent } from '../../shared/schemas/automation-evidence.schema';
+import {
+  EvidenceTaskKeySchema,
+  type AutomationEvidenceNonTerminalEvent,
+  type AutomationEvidenceTerminalEvent
+} from '../../shared/schemas/automation-evidence.schema';
 import type {
   AccountUiInteraction,
   CapcutAuthAttempt,
@@ -22,12 +27,14 @@ import type {
 } from './capcut/types';
 import type { LogBus } from './LogBus';
 import type { AcquiredProxyLease } from './ProxyLeaseManager';
+import type { ObservationIdentity, ObservationScope } from '../providers/ObservedHttpClient';
 import type {
   AutomationWorkItem,
   AutomationWorkSource,
   AutomationWorkSourceFactory,
   SourceReadiness
 } from './AutomationWorkSource';
+import type { DiagnosticMutationContext } from './EmailPurchaseService';
 import type {
   AutomationRunConfigDTO,
   AutomationRunCountersDTO,
@@ -35,11 +42,14 @@ import type {
   AutomationRunState,
   AutomationTerminalCode,
   AutomationTerminalReasonDTO,
-  BrowserRuntime
+  BrowserRuntime,
+  RunHealthRequestDTO,
+  RunHealthResponseDTO
 } from '../../shared/schemas/automation.schema';
 import {
   IMPLEMENTED_BROWSER_RUNTIMES,
-  isBrowserImplemented
+  isBrowserImplemented,
+  RunHealthRequestSchema
 } from '../../shared/schemas/automation.schema';
 import type {
   AccountCreateInputDTO,
@@ -162,7 +172,7 @@ export interface CapcutTaskRunner {
     sessionAlias?: string;
     sessionStartedAt?: number;
     signal: AbortSignal;
-    ui?: AccountUiInteraction;
+    ui: AccountUiInteraction;
     /** Nguồn OTP của riêng luồng này; chỉ đường ĐĂNG KÝ cần. */
     getOtp?: () => Promise<string>;
     /** `retryCount` của Dashboard, đã đổi sang số lượt quét lại nhiệm vụ. */
@@ -173,6 +183,7 @@ export interface CapcutTaskRunner {
     onTaskCheckpoint: (checkpoint: {
       rows: CapcutAccountResult['tasks'];
       receipt: CapcutVerificationReceipt;
+      unsettledProofs: readonly UnsettledTaskProof[];
     }) => Promise<void>;
     log: (status: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR', step: string, message: string) => void;
   }): Promise<CapcutUiAccountResult>;
@@ -215,6 +226,7 @@ export interface ICapcutTaskProgressSink {
   record(accountId: string, checkpoint: {
     rows: CapcutAccountResult['tasks'];
     receipt: CapcutVerificationReceipt;
+    unsettledProofs: readonly UnsettledTaskProof[];
   }): Promise<void>;
   recordLegacy?(accountId: string, rows: CapcutAccountResult['tasks']): void;
 }
@@ -230,6 +242,8 @@ export interface AutomationRunCollaborators {
   capcut?: CapcutTaskRunner;
   httpOnlyRunner?: HttpOnlyAccountRunner;
   taskProgress?: ICapcutTaskProgressSink;
+  observation?: ObservationScope;
+  mutationContext?: DiagnosticMutationContext;
 }
 
 export const SESSION_LAUNCH_STOP_GRACE_MS = 30_000;
@@ -243,10 +257,20 @@ export interface AutomationRunDeps {
   profileStopTimeoutMs?: number;
   userDataDir?: string;
   createTelemetry?: (runId: string) => RunTelemetry;
+  onTerminalSnapshot?: (snapshot: AutomationRunTerminalSnapshot) => void;
+}
+
+export interface AutomationRunTerminalSnapshot {
+  schedulers: Array<{ sessionAlias: string; snapshot: UiSchedulerSnapshot }>;
+  activeThreads: number;
+  activeProfiles: number;
+  activeProxies: number;
+  activeMailReservations: number;
 }
 
 type ThreadOutcome =
   | { kind: 'completed'; status: 'done'; step: string }
+  | { kind: 'skipped'; status: 'done'; step: string }
   | { kind: 'failed'; status: 'error'; step: string }
   | { kind: 'stopped'; status: 'stopped'; step: string };
 
@@ -264,6 +288,7 @@ export interface RunningThreadInfo {
 
 export interface BrowserSessionRuntime {
   alias: string;
+  provider?: string;
   startedAt: number;
   launchPromise?: Promise<void>;
   stopRequested: boolean;
@@ -277,13 +302,17 @@ export interface BrowserSessionRuntime {
   profileStopPromise?: Promise<boolean>;
   stopPromise?: Promise<boolean>;
   stopFailed?: boolean;
+  stopOutcomeLocked?: boolean;
+  profileStartRecorded?: boolean;
 }
 
 interface ThreadRuntime {
   runId: string;
   workerAlias: string;
+  accountAlias: string;
   accountId: string;
   email: string;
+  emailProvider: string;
   capcutPassword: string;
   isExistingAccount?: boolean;
   purchasedEmailId?: string;
@@ -425,7 +454,7 @@ export class AutomationRunService {
   private readonly nextId: () => string;
   private readonly sessionLaunchStopGraceMs: number;
   private readonly profileStopTimeoutMs: number;
-  private uiScheduler: RunUiInteractionScheduler | null = null;
+  private readonly uiSchedulers = new Map<string, RunUiInteractionScheduler>();
   private telemetry: RunTelemetry | null = null;
   private readonly listeners = new Set<(progress: AutomationRunProgressDTO) => void>();
 
@@ -442,7 +471,10 @@ export class AutomationRunService {
   };
 
   private activeRun: Promise<AutomationRunSummary> | null = null;
-  private starting: Promise<{ runId: string }> | null = null;
+  private healthRun: Promise<RunHealthResponseDTO> | null = null;
+  private healthAbort: AbortController | null = null;
+  private healthUncertainProfiles = 0;
+  private starting: Promise<{ runId: string; artifactBasename?: string }> | null = null;
   private stopping: Promise<void> | null = null;
   private lastSummary: AutomationRunSummary | null = null;
   private runAbort: AbortController | null = null;
@@ -451,10 +483,24 @@ export class AutomationRunService {
   private terminalState: 'blocked' | 'failed' | 'stopped' | null = null;
   private readonly iterationAbort = new Map<string, AbortController>();
   private cleanupFailures = 0;
+  private skippedAccounts = 0;
+  private mailboxAcquisitions = 0;
+  private accountSequence = 0;
+  private readonly sessionSequences = new Map<string, number>();
+  private evidenceMode: 'new' | 'resume' | 'health' = 'new';
+  private evidenceStage: 1 | 3 | 5 | 10 | null = null;
+  private sourceForEvidence: AutomationWorkSource | null = null;
+  private activeProfileCount = 0;
+  private activeProxyCount = 0;
+  private activeMailReservationCount = 0;
   private startedProfiles: string[] = [];
   private readonly activeThreads = new Map<string, ThreadRuntime>();
   private runningResolvers: Array<() => void> = [];
   private firstWaveDone = false;
+
+  private observe<T>(identity: Readonly<ObservationIdentity>, operation: () => Promise<T>): Promise<T> {
+    return this.deps.observation?.withObservationScope(identity, operation) ?? operation();
+  }
 
   constructor(
     private readonly deps: AutomationRunCollaborators,
@@ -470,6 +516,11 @@ export class AutomationRunService {
     return this.telemetry;
   }
 
+  getUserDataDir(): string {
+    if (!this.runtime.userDataDir) throw new Error('RUNTIME_USER_DATA_UNAVAILABLE');
+    return this.runtime.userDataDir;
+  }
+
   subscribe(listener: (progress: AutomationRunProgressDTO) => void): () => void {
     this.listeners.add(listener);
     return () => {
@@ -482,7 +533,268 @@ export class AutomationRunService {
   }
 
   isRunning(): boolean {
-    return this.activeRun !== null || this.starting !== null || this.stopping !== null;
+    return this.activeRun !== null || this.healthRun !== null || this.healthUncertainProfiles > 0 ||
+      this.starting !== null || this.stopping !== null || this.uiSchedulers.size > 0;
+  }
+
+  private createUiScheduler(runId: string, onEvidenceFailure?: () => void): RunUiInteractionScheduler {
+    return new RunUiInteractionScheduler({
+      editorLaneLimit: 1,
+      onEvent: (event) => {
+        if (event.type === 'profile-stopped') return;
+        try {
+          if (this.telemetry && runId === this.progress.runId) {
+            this.recordEvidence(mapUiSchedulerEventToEvidence(runId, event));
+          }
+        } catch {
+          onEvidenceFailure?.();
+        }
+      }
+    });
+  }
+
+  private retireUiScheduler(sessionAlias: string, scheduler: RunUiInteractionScheduler): void {
+    if (this.uiSchedulers.get(sessionAlias) !== scheduler) return;
+    scheduler.closeSession(sessionAlias);
+    const snapshot = scheduler.snapshot();
+    if (snapshot.foreground.active === 0 && snapshot.foreground.queued === 0 &&
+        snapshot.editor.active === 0 && snapshot.editor.queued === 0) {
+      this.uiSchedulers.delete(sessionAlias);
+    }
+  }
+
+  private shutdownAllUiSchedulers(
+    reason: { code: 'RESOURCE_CLEANUP_FAILED' | 'RUN_ABORTED'; message: string }
+  ): void {
+    for (const scheduler of this.uiSchedulers.values()) scheduler.shutdown(reason);
+  }
+
+  runHealthCheck(input: RunHealthRequestDTO): Promise<RunHealthResponseDTO> {
+    const parsedInput = RunHealthRequestSchema.safeParse(input);
+    if (!parsedInput.success) {
+      return Promise.reject(new ProviderError('CONFIG_ERROR', 'Cấu hình health check không hợp lệ.'));
+    }
+    input = parsedInput.data;
+    if (this.isRunning() || this.activeThreads.size > 0) {
+      return Promise.reject(new ProviderError('CONFIG_ERROR', 'Đang có phiên chạy; không thể chạy health đồng thời.'));
+    }
+    const launcher = this.deps.launcher?.();
+    if (!launcher) {
+      return Promise.reject(new ProviderError('CONFIG_ERROR', 'Không có browser launcher cho health check.'));
+    }
+    const runId = this.nextId();
+    const telemetry = this.runtime.createTelemetry?.(runId) ?? createRunTelemetry({
+      userDataDir: this.getUserDataDir(),
+      runId
+    });
+    const artifactBasename = telemetry.artifactBasename();
+    const abort = new AbortController();
+    this.healthAbort = abort;
+    let evidenceFailed = false;
+    const abortHealthOwnership = (message: string): void => {
+      const reason = { code: 'RESOURCE_CLEANUP_FAILED' as const, message };
+      abort.abort(Object.assign(new Error(message), { code: reason.code }));
+      this.shutdownAllUiSchedulers(reason);
+    };
+
+    const operation = (async (): Promise<RunHealthResponseDTO> => {
+      let attempted = 0;
+      let healthy = 0;
+      let stopped = 0;
+      let cleanupFailures = 0;
+      let activeProfiles = 0;
+      let runFailed = false;
+      const snapshot = (): void => telemetry.record({
+        schemaVersion: 1,
+        runId,
+        at: new Date().toISOString(),
+        type: 'resource-snapshot',
+        activeWorkers: activeProfiles,
+        activeProfiles,
+        activeProxies: 0,
+        activeMailReservations: 0
+      });
+
+      telemetry.record({
+        schemaVersion: 1,
+        runId,
+        at: new Date().toISOString(),
+        type: 'run-start',
+        mode: 'health',
+        headed: true,
+        uiScope: 'session-target',
+        stage: input.rolloutStage,
+        workerTarget: input.threadCount,
+        maxBillablePurchases: 0
+      });
+      snapshot();
+
+      const results = await Promise.allSettled(Array.from({ length: input.threadCount }, async (_unused, index) => {
+        const workerAlias = `worker-${index + 1}`;
+        const sessionAlias = `${workerAlias}-session-1`;
+        const scheduler = new RunUiInteractionScheduler({
+          editorLaneLimit: 1,
+          onEvent: (event) => {
+            if (event.type === 'profile-stopped' || evidenceFailed) return;
+            try {
+              telemetry.record(mapUiSchedulerEventToEvidence(runId, event));
+            } catch {
+              evidenceFailed = true;
+              abortHealthOwnership('Health evidence failed');
+            }
+          }
+        });
+        this.uiSchedulers.set(sessionAlias, scheduler);
+        const identity = { sessionAlias, signal: abort.signal, focusMode: 'target' as const };
+        const ui = scheduler.forSession(identity);
+        attempted += 1;
+        let profileId: string | undefined;
+        let profileRecorded = false;
+        let launchTimedOut = false;
+        let iterationClosed = false;
+        const adoptProfile = (id: string): void => {
+          profileId = id;
+          if (profileRecorded) return;
+          profileRecorded = true;
+          if (iterationClosed && launchTimedOut) {
+            void withTimeout(
+              this.observe({
+                runId,
+                workerAlias,
+                accountAlias: 'unassigned',
+                sessionAlias,
+                provider: 'multilogin',
+                operation: 'profile-stop'
+              }, () => launcher.stop(id)),
+              this.profileStopTimeoutMs,
+              new Error('Late health profile stop timeout')
+            ).then(
+              () => {
+                this.healthUncertainProfiles = Math.max(0, this.healthUncertainProfiles - 1);
+                scheduler.confirmProfileStopped(sessionAlias);
+                this.retireUiScheduler(sessionAlias, scheduler);
+              },
+              () => {}
+            );
+            return;
+          }
+          activeProfiles += 1;
+          telemetry.record({
+            schemaVersion: 1, runId, workerAlias, sessionAlias,
+            at: new Date().toISOString(), type: 'profile-start'
+          });
+          snapshot();
+        };
+        try {
+          const launchOp = this.observe({
+            runId,
+            workerAlias,
+            accountAlias: 'unassigned',
+            sessionAlias,
+            provider: 'multilogin',
+            operation: 'profile-launch'
+          }, () => launcher.launch({
+              headless: false,
+              signal: abort.signal,
+              ui,
+              onProfileStarted: adoptProfile
+            }));
+          void launchOp.then(
+            (launched) => {
+              try {
+                adoptProfile(launched.profileId);
+              } catch {
+                evidenceFailed = true;
+                abortHealthOwnership('Health profile evidence failed');
+              }
+            },
+            () => {
+              if (iterationClosed && launchTimedOut && !profileId) {
+                this.healthUncertainProfiles = Math.max(0, this.healthUncertainProfiles - 1);
+                this.retireUiScheduler(sessionAlias, scheduler);
+              }
+            }
+          );
+          const launched = await withTimeout(
+            launchOp,
+            this.sessionLaunchStopGraceMs,
+            new Error('Health launch timeout')
+          );
+          adoptProfile(launched.profileId);
+          healthy += 1;
+        } catch (error: unknown) {
+          launchTimedOut = error instanceof Error && error.message === 'Health launch timeout';
+          if (launchTimedOut && !profileId) {
+            this.healthUncertainProfiles += 1;
+            cleanupFailures += 1;
+            abortHealthOwnership('Health launch ownership did not settle before timeout');
+          }
+          throw error;
+        } finally {
+          iterationClosed = true;
+          if (profileId) {
+            try {
+              await withTimeout(
+                this.observe({
+                  runId,
+                  workerAlias,
+                  accountAlias: 'unassigned',
+                  sessionAlias,
+                  provider: 'multilogin',
+                  operation: 'profile-stop'
+                }, () => launcher.stop(profileId!)),
+                this.profileStopTimeoutMs,
+                new Error('Profile stop timeout')
+              );
+              activeProfiles = Math.max(0, activeProfiles - 1);
+              stopped += 1;
+              scheduler.confirmProfileStopped(sessionAlias);
+              this.retireUiScheduler(sessionAlias, scheduler);
+              telemetry.record({
+                schemaVersion: 1, runId, workerAlias, sessionAlias,
+                at: new Date().toISOString(), type: 'profile-stop', outcome: 'confirmed'
+              });
+              snapshot();
+            } catch {
+              cleanupFailures += 1;
+              this.healthUncertainProfiles += 1;
+              abortHealthOwnership('Health profile cleanup failed');
+              telemetry.record({
+                schemaVersion: 1, runId, workerAlias, sessionAlias,
+                at: new Date().toISOString(), type: 'profile-stop', outcome: 'failed',
+                code: 'RESOURCE_CLEANUP_FAILED'
+              });
+            }
+          }
+          if (!profileId && !launchTimedOut) {
+            this.retireUiScheduler(sessionAlias, scheduler);
+          }
+        }
+      }));
+      runFailed = evidenceFailed || cleanupFailures > 0 || results.some((result) => result.status === 'rejected');
+
+      telemetry.record({
+        schemaVersion: 1, runId, at: new Date().toISOString(), type: 'health-summary',
+        attempted, healthy, stopped, cleanupFailures
+      });
+      await telemetry.close({
+        schemaVersion: 1, runId, at: new Date().toISOString(), type: 'terminal',
+        mode: 'health', stage: input.rolloutStage, mailboxAcquisitions: 0,
+        state: !runFailed && cleanupFailures === 0 && healthy === attempted ? 'completed' : 'failed',
+        code: cleanupFailures > 0
+          ? 'RESOURCE_CLEANUP_FAILED'
+          : runFailed || healthy !== attempted ? 'INTERNAL_ERROR' : 'HEALTH_CHECK_COMPLETED',
+        accepted: 0, completed: 0, failed: 0, stopped: 0, skipped: 0,
+        cleanupFailures, purchaseAttempted: 0, purchaseConfirmed: 0, purchaseAmbiguous: 0
+      });
+      if (runFailed) throw new Error('HEALTH_CHECK_FAILED');
+      return { runId, artifactBasename, attempted, healthy, stopped, cleanupFailures };
+    })().finally(() => {
+      this.healthAbort = null;
+      this.healthRun = null;
+    });
+    this.healthRun = operation;
+    return operation;
   }
 
   private publish(
@@ -508,6 +820,38 @@ export class AutomationRunService {
     this.publish(this.progress.state, this.progress.message, {
       [key]: this.progress[key] + 1
     });
+  }
+
+  private recordResourceSnapshot(): void {
+    this.recordEvidence({
+      schemaVersion: 1,
+      runId: this.progress.runId,
+      at: new Date().toISOString(),
+      type: 'resource-snapshot',
+      activeWorkers: this.progress.workersActive,
+      activeProfiles: this.activeProfileCount,
+      activeProxies: this.activeProxyCount,
+      activeMailReservations: this.activeMailReservationCount
+    });
+  }
+
+  private recordEvidence(event: AutomationEvidenceNonTerminalEvent): void {
+    if (!this.telemetry) return;
+    try {
+      this.telemetry.record(event);
+    } catch {
+      const failure = new AutomationTerminalError(
+        'failed',
+        { code: 'INTERNAL_ERROR' },
+        'Không ghi được bằng chứng rollout.'
+      );
+      this.shutdownAllUiSchedulers({
+        code: 'RUN_ABORTED',
+        message: failure.message
+      });
+      this.acceptTerminalError(failure);
+      throw failure;
+    }
   }
 
   private log(
@@ -586,8 +930,18 @@ export class AutomationRunService {
       automationStep: outcome.step
     });
     if (outcome.kind === 'completed') this.increment('accountsCompleted');
+    if (outcome.kind === 'skipped') this.skippedAccounts += 1;
     if (outcome.kind === 'failed') this.increment('accountsFailed');
     if (outcome.kind === 'stopped') this.increment('accountsStopped');
+    this.recordEvidence({
+      schemaVersion: 1,
+      runId: thread.runId,
+      workerAlias: thread.workerAlias,
+      accountAlias: thread.accountAlias,
+      at: new Date().toISOString(),
+      type: 'account-terminal',
+      outcome: outcome.kind
+    });
   }
 
   private acceptTerminalError(error: unknown): void {
@@ -598,6 +952,7 @@ export class AutomationRunService {
       this.terminalState = error.state;
       this.acquisitionAbort?.abort(error);
       if (error.state === 'failed') {
+        this.shutdownAllUiSchedulers({ code: 'RUN_ABORTED', message: error.message });
         for (const controller of this.iterationAbort.values()) {
           controller.abort(error);
         }
@@ -634,16 +989,25 @@ export class AutomationRunService {
     this.publish('failed', message, { terminalReason: reason });
   }
 
-  private startProfileStop(session: BrowserSessionRuntime, profileId: string): Promise<boolean> {
+  private startProfileStop(
+    thread: ThreadRuntime,
+    session: BrowserSessionRuntime,
+    profileId: string
+  ): Promise<boolean> {
     if (session.profileStopPromise) return session.profileStopPromise;
     const stopOp = (async (): Promise<boolean> => {
       try {
-        if (session.launcher) {
-          await session.launcher.stop(profileId);
-        } else {
-          await this.deps.browser.stopProfile(profileId);
-        }
-        session.stopFailed = false;
+        await this.observe({
+          runId: thread.runId,
+          workerAlias: thread.workerAlias,
+          accountAlias: thread.accountAlias,
+          sessionAlias: session.alias,
+          provider: session.provider ?? 'multilogin',
+          operation: 'profile-stop'
+        }, () => session.launcher
+          ? session.launcher.stop(profileId)
+          : this.deps.browser.stopProfile(profileId));
+        if (!session.stopOutcomeLocked) session.stopFailed = false;
         return true;
       } catch {
         session.stopFailed = true;
@@ -684,6 +1048,9 @@ export class AutomationRunService {
 
     // If after launch settled, no profile was ever started
     if (!session.profileId) {
+      if (session.scheduler) {
+        this.retireUiScheduler(session.alias, session.scheduler);
+      }
       if (thread.session === session) {
         thread.session = undefined;
       }
@@ -692,7 +1059,7 @@ export class AutomationRunService {
 
     // 2. We have a profileId. Start profile stop if not already started.
     const profileId = session.profileId;
-    const stopOp = this.startProfileStop(session, profileId);
+    const stopOp = this.startProfileStop(thread, session, profileId);
 
     // 3. Await profile stop with profileStopTimeoutMs
     let stopSuccess = false;
@@ -709,21 +1076,23 @@ export class AutomationRunService {
     if (stopSuccess) {
       session.stopFailed = false;
       session.scheduler?.confirmProfileStopped(session.alias);
-      try {
-        this.telemetry?.record({
+      this.recordEvidence({
           schemaVersion: 1,
           runId: thread.runId,
           workerAlias: thread.workerAlias,
           sessionAlias: session.alias,
+          accountAlias: thread.accountAlias,
           at: new Date().toISOString(),
           type: 'profile-stop',
           outcome: 'confirmed'
         });
-      } catch {
-        // Telemetry error ignored
-      }
+      this.activeProfileCount = Math.max(0, this.activeProfileCount - 1);
+      this.recordResourceSnapshot();
       if (thread.session === session) {
         thread.session = undefined;
+      }
+      if (session.scheduler) {
+        this.retireUiScheduler(session.alias, session.scheduler);
       }
       return true;
     }
@@ -741,21 +1110,19 @@ export class AutomationRunService {
     message: string
   ): boolean {
     session.stopFailed = true;
+    session.stopOutcomeLocked = true;
     this.noteCleanupFailure(thread, 'browser-profile');
-    try {
-      this.telemetry?.record({
+    this.recordEvidence({
         schemaVersion: 1,
         runId: thread.runId,
         workerAlias: thread.workerAlias,
         sessionAlias: session.alias,
+        accountAlias: thread.accountAlias,
         at: new Date().toISOString(),
         type: 'profile-stop',
         outcome: 'failed',
         code: 'RESOURCE_CLEANUP_FAILED'
       });
-    } catch {
-      // Telemetry error ignored
-    }
 
     const terminalError = new AutomationTerminalError(
       'failed',
@@ -766,18 +1133,15 @@ export class AutomationRunService {
       message
     );
 
-    if (session.scheduler) {
-      session.scheduler.shutdown(terminalError);
-    } else if (this.uiScheduler) {
-      this.uiScheduler.shutdown(terminalError);
-    }
+    this.shutdownAllUiSchedulers({
+      code: 'RESOURCE_CLEANUP_FAILED',
+      message
+    });
 
-    if (this.stopping || this.activeThreads.size > 1 || thread.outcome?.kind !== 'completed') {
-      for (const controller of this.iterationAbort.values()) {
-        controller.abort(terminalError);
-      }
-      this.acceptTerminalError(terminalError);
+    for (const controller of this.iterationAbort.values()) {
+      controller.abort(terminalError);
     }
+    this.acceptTerminalError(terminalError);
 
     return false;
   }
@@ -801,11 +1165,17 @@ export class AutomationRunService {
     item: AutomationWorkItem | null,
     committed: boolean,
     thread: ThreadRuntime | undefined,
-    lease: AcquiredProxyLease | undefined
+    lease: AcquiredProxyLease | undefined,
+    acquisitionIdentity?: Readonly<ObservationIdentity>
   ): Promise<void> {
+    const cleanupSessionAlias = thread?.session?.alias ?? 'unassigned';
     if (item && item.kind !== 'existing' && !committed) {
       try {
         source.release(item);
+        if (this.activeMailReservationCount > 0) {
+          this.activeMailReservationCount -= 1;
+          this.recordResourceSnapshot();
+        }
       } catch {
         this.noteCleanupFailure(thread, 'mailbox-reservation');
       }
@@ -823,10 +1193,36 @@ export class AutomationRunService {
 
     if (lease) {
       try {
-        await this.deps.proxies.release(lease);
+        const cleanupIdentity = thread
+          ? {
+              runId: thread.runId,
+              workerAlias: thread.workerAlias,
+              accountAlias: thread.accountAlias,
+              sessionAlias: cleanupSessionAlias,
+              provider: 'kiotproxy',
+              operation: 'proxy-release'
+            } as const
+          : {
+              ...(acquisitionIdentity ?? {
+                runId: this.progress.runId,
+                workerAlias: null,
+                acquisitionAlias: null,
+                accountAlias: null,
+                sessionAlias: null,
+                authorityRef: 'cleanup'
+              }),
+              provider: 'kiotproxy',
+              operation: 'proxy-release'
+            } as const;
+        await this.observe(cleanupIdentity, () => this.deps.proxies.release(lease));
+        this.activeProxyCount = Math.max(0, this.activeProxyCount - 1);
+        this.recordResourceSnapshot();
       } catch {
         this.noteCleanupFailure(thread, 'proxy-lease');
       }
+    } else if (thread?.directProxy) {
+      this.activeProxyCount = Math.max(0, this.activeProxyCount - 1);
+      this.recordResourceSnapshot();
     }
   }
 
@@ -880,8 +1276,10 @@ export class AutomationRunService {
     const runtime: ThreadRuntime = {
       runId,
       workerAlias,
+      accountAlias: `account-${++this.accountSequence}`,
       accountId,
       email: item.email,
+      emailProvider: item.emailProvider,
       capcutPassword,
       isExistingAccount: isExisting,
       purchasedEmailId: item.kind === 'new' ? item.purchasedEmailId : undefined,
@@ -907,7 +1305,14 @@ export class AutomationRunService {
     const launchOp = (async () => {
       if (launcher) {
         session.launcher = launcher;
-        const started = await launcher.launch({
+        const started = await this.observe({
+          runId: thread.runId,
+          workerAlias: thread.workerAlias,
+          accountAlias: thread.accountAlias,
+          sessionAlias: session.alias,
+          provider: 'multilogin',
+          operation: 'profile-launch'
+        }, () => launcher.launch({
           proxy: toLauncherProxy(proxy),
           headless: config.headless,
           signal,
@@ -917,15 +1322,25 @@ export class AutomationRunService {
             if (!this.startedProfiles.includes(profileId)) {
               this.startedProfiles.push(profileId);
             }
+            if (!session.profileStartRecorded) {
+              session.profileStartRecorded = true;
+              this.activeProfileCount += 1;
+              this.recordEvidence({
+                schemaVersion: 1, runId: thread.runId, workerAlias: thread.workerAlias,
+                sessionAlias: session.alias, accountAlias: thread.accountAlias,
+                at: new Date().toISOString(), type: 'profile-start'
+              });
+              this.recordResourceSnapshot();
+            }
             if (session.stopRequested) {
-              void this.startProfileStop(session, profileId);
+              void this.startProfileStop(thread, session, profileId);
             }
           }
-        });
+        }));
         if (session.stopRequested) {
           if (started.profileId) {
             session.profileId = started.profileId;
-            void this.startProfileStop(session, started.profileId);
+            void this.startProfileStop(thread, session, started.profileId);
           }
           return;
         }
@@ -937,7 +1352,14 @@ export class AutomationRunService {
           this.startedProfiles.push(started.profileId);
         }
       } else {
-        const started = await this.deps.browser.startProfile({
+        const started = await this.observe({
+          runId: thread.runId,
+          workerAlias: thread.workerAlias,
+          accountAlias: thread.accountAlias,
+          sessionAlias: session.alias,
+          provider: config.browser,
+          operation: 'profile-launch'
+        }, () => this.deps.browser.startProfile({
           headless: config.headless,
           proxy,
           browser: config.browser,
@@ -947,15 +1369,25 @@ export class AutomationRunService {
             if (!this.startedProfiles.includes(profileId)) {
               this.startedProfiles.push(profileId);
             }
+            if (!session.profileStartRecorded) {
+              session.profileStartRecorded = true;
+              this.activeProfileCount += 1;
+              this.recordEvidence({
+                schemaVersion: 1, runId: thread.runId, workerAlias: thread.workerAlias,
+                sessionAlias: session.alias, accountAlias: thread.accountAlias,
+                at: new Date().toISOString(), type: 'profile-start'
+              });
+              this.recordResourceSnapshot();
+            }
             if (session.stopRequested) {
-              void this.startProfileStop(session, profileId);
+              void this.startProfileStop(thread, session, profileId);
             }
           }
-        });
+        }));
         if (session.stopRequested) {
           if (started.profileId) {
             session.profileId = started.profileId;
-            void this.startProfileStop(session, started.profileId);
+            void this.startProfileStop(thread, session, started.profileId);
           }
           return;
         }
@@ -1052,7 +1484,14 @@ export class AutomationRunService {
         signal.throwIfAborted();
         attempt += 1;
         try {
-          const code = await this.deps.emailOtp.readOtp(purchasedEmailId);
+          const code = await this.observe({
+            runId: thread.runId,
+            workerAlias: thread.workerAlias,
+            accountAlias: thread.accountAlias,
+            sessionAlias: thread.session?.alias ?? 'unassigned',
+            provider: thread.emailProvider,
+            operation: 'read-otp'
+          }, () => this.deps.emailOtp.readOtp(purchasedEmailId));
           if (code) {
             say('SUCCESS', 'Đã nhận mã xác minh sau ' + waited() + ' (' + attempt + ' lượt đọc)');
             return code;
@@ -1096,15 +1535,22 @@ export class AutomationRunService {
     config: AutomationRunConfigDTO,
     signal: AbortSignal
   ): Promise<BrowserSessionRuntime> {
-    const alias = `${thread.workerAlias}-session-${++thread.sessionSequence}`;
+    const sequence = (this.sessionSequences.get(thread.workerAlias) ?? 0) + 1;
+    this.sessionSequences.set(thread.workerAlias, sequence);
+    thread.sessionSequence = sequence;
+    const alias = `${thread.workerAlias}-session-${sequence}`;
+    const scheduler = !config.headless && (config.missionTransport ?? 'ui') !== 'http-only'
+      ? this.createUiScheduler(thread.runId)
+      : undefined;
+    if (scheduler) this.uiSchedulers.set(alias, scheduler);
+    const identity = { sessionAlias: alias, signal, focusMode: 'target' as const };
     const session: BrowserSessionRuntime = {
       alias,
+      provider: config.browser,
       startedAt: Date.now(),
       stopRequested: false,
-      ui: this.uiScheduler
-        ? this.uiScheduler.forSession({ sessionAlias: alias, signal })
-        : createDirectUiInteraction(signal),
-      scheduler: this.uiScheduler ?? undefined
+      ui: scheduler ? scheduler.forSession(identity) : createDirectUiInteraction(signal),
+      scheduler
     };
     thread.session = session;
     this.activeThreads.set(thread.accountId, thread);
@@ -1160,6 +1606,7 @@ export class AutomationRunService {
       onTaskCheckpoint: async (checkpoint: {
         rows: CapcutAccountResult['tasks'];
         receipt: CapcutVerificationReceipt;
+        unsettledProofs: readonly UnsettledTaskProof[];
       }) => {
         if (thread.session !== session) {
           this.log(
@@ -1172,16 +1619,16 @@ export class AutomationRunService {
           return;
         }
 
-        const uniqueTasks = new Map<string, { key: string; status: number }>();
-        for (const r of checkpoint.rows) {
-          uniqueTasks.set(r.key, { key: r.key, status: r.status });
+        if (this.deps.taskProgress) {
+          await this.deps.taskProgress.record(thread.accountId, checkpoint);
         }
-        try {
-          this.telemetry?.record({
+
+        if (this.telemetry) this.recordEvidence({
             schemaVersion: 1,
             runId: thread.runId,
             workerAlias: thread.workerAlias,
             sessionAlias: session.alias,
+            accountAlias: thread.accountAlias,
             at: new Date().toISOString(),
             type: 'task-checkpoint',
             fresh: checkpoint.receipt.fresh,
@@ -1190,15 +1637,11 @@ export class AutomationRunService {
             requiredAfter: checkpoint.receipt.requiredAfter,
             serverTotal: checkpoint.receipt.serverTotal,
             serverDone: checkpoint.receipt.serverDone,
-            tasks: Array.from(uniqueTasks.values())
+            tasks: checkpoint.rows.map((row) => ({
+              key: EvidenceTaskKeySchema.parse(row.key),
+              status: row.status
+            }))
           });
-        } catch {
-          // Telemetry error ignored
-        }
-
-        if (this.deps.taskProgress) {
-          await this.deps.taskProgress.record(thread.accountId, checkpoint);
-        }
       },
       log: (status: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR', step: string, message: string) =>
         this.log(status, thread.email, step, message, thread.accountId)
@@ -1217,23 +1660,26 @@ export class AutomationRunService {
         ...(result.subscription ? { subscription: result.subscription } : {})
       });
       return {
-        kind: 'completed',
+        kind: (config.missionTransport ?? 'ui') === 'http-only' ? 'completed' : 'skipped',
         status: 'done',
         step: thread.outcomeStep
       };
     }
 
     const uiResult = result as Partial<CapcutUiAccountResult>;
-    if (uiResult.verification === undefined) {
+    const missionTransport = config.missionTransport ?? 'ui';
+    if (missionTransport === 'http-only') {
       this.recordTaskProgress(thread, result.tasks);
     }
-    const full = config.missionTransport === 'http-only' || uiResult.verification === undefined
+    const full = missionTransport === 'http-only'
       ? result.missing.length === 0
       : Boolean(
           uiResult.verification &&
           uiResult.verification.complete &&
           uiResult.verification.fresh &&
-          uiResult.verification.final
+          uiResult.verification.final &&
+          uiResult.verification.serverTotal > 0 &&
+          result.tasks.length > 0
         );
     thread.outcomeStep = full
       ? 'Đủ ' + result.done + '/' + result.total + ' nhiệm vụ'
@@ -1299,8 +1745,7 @@ export class AutomationRunService {
     const session = thread.session;
     const uiRunner = this.deps.capcut;
     if (config.missionTransport !== 'http-only' && (!uiRunner || !session?.page || !session?.context)) {
-      await this.holdForThread(config.testDurationMs, iterationSignal);
-      return { kind: 'completed', status: 'done', step: thread.outcomeStep ?? 'Hoàn tất' };
+      return { kind: 'failed', status: 'error', step: 'Thiếu UI runner hoặc browser session' };
     }
 
     const password = thread.capcutPassword;
@@ -1322,8 +1767,7 @@ export class AutomationRunService {
         'Không đọc được mật khẩu CapCut của account — giữ browser thay vì làm nhiệm vụ.',
         thread.accountId
       );
-      await this.holdForThread(config.testDurationMs, iterationSignal);
-      return { kind: 'completed', status: 'done', step: thread.outcomeStep ?? 'Hoàn tất' };
+      return { kind: 'failed', status: 'error', step: 'Thiếu mật khẩu CapCut' };
     }
 
     this.deps.accounts.update(thread.accountId, { automationStep: 'Đang làm nhiệm vụ' });
@@ -1377,8 +1821,7 @@ export class AutomationRunService {
             error instanceof AutomationTerminalError &&
             error.reason.code === 'TASK_CHECKPOINT_PERSISTENCE_FAILED'
           ) {
-            try {
-              this.telemetry?.record({
+            this.recordEvidence({
                 schemaVersion: 1,
                 runId: thread.runId,
                 workerAlias: thread.workerAlias,
@@ -1387,9 +1830,6 @@ export class AutomationRunService {
                 type: 'persistence-failure',
                 code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED'
               });
-            } catch {
-              // Telemetry error ignored
-            }
             const stopped = await this.stopSession(thread, currentSession);
             if (stopped) {
               this.acceptTerminalError(error);
@@ -1478,16 +1918,31 @@ export class AutomationRunService {
     initialWave: InitialWaveBarrier | null
   ): Promise<void> {
     let firstIteration = true;
+    let acquisitionSequence = 0;
     while (!acquisitionSignal.aborted && !this.terminalIntent) {
       if (source.isExhausted?.()) {
         if (firstIteration) this.releaseRunningWaiters();
         return;
       }
+      acquisitionSequence += 1;
+      const acquisitionIdentity = {
+        runId: this.progress.runId,
+        workerAlias: workerId,
+        acquisitionAlias: this.progress.runId + ':' + workerId + ':' + acquisitionSequence,
+        accountAlias: 'unassigned',
+        sessionAlias: 'unassigned',
+        authorityRef: 'automation-run'
+      } as const;
+      const durableAcquisitionIdentity = this.deps.mutationContext ? {
+        ownerRef: acquisitionIdentity.acquisitionAlias,
+        runId: acquisitionIdentity.runId,
+        stepAttemptId: acquisitionIdentity.acquisitionAlias
+      } : undefined;
       let item: AutomationWorkItem | null =
         source.kind === 'finite'
           ? await measureStage(
               'email-acquisition',
-              () => source.next(workerId, acquisitionSignal),
+              () => this.observe(acquisitionIdentity, () => source.next(workerId, acquisitionSignal, durableAcquisitionIdentity)),
               (message) => this.log('INFO', workerId, 'Timing', message)
             )
           : null;
@@ -1515,7 +1970,7 @@ export class AutomationRunService {
           this.log('INFO', item?.email ?? workerId, 'Proxy', 'Đang xin proxy key...');
           lease = await measureStage(
             'proxy-acquisition',
-            () => this.deps.proxies.acquire(acquisitionSignal),
+            () => this.observe(acquisitionIdentity, () => this.deps.proxies.acquire(acquisitionSignal)),
             (message) =>
               this.log(
                 'INFO',
@@ -1525,22 +1980,29 @@ export class AutomationRunService {
                 thread?.accountId
               )
           );
+          this.activeProxyCount += 1;
+          this.recordResourceSnapshot();
           this.log('SUCCESS', item?.email ?? workerId, 'Proxy', 'Đã nhận proxy ' + lease.ip + ':' + lease.port);
         }
         if (source.kind === 'continuous') {
           item = await measureStage(
             'email-acquisition',
-            () => source.next(workerId, acquisitionSignal),
+            () => this.observe(acquisitionIdentity, () => source.next(workerId, acquisitionSignal, durableAcquisitionIdentity)),
             (message) => this.log('INFO', workerId, 'Timing', message)
           );
         }
         if (!item) {
           if (firstIteration) this.releaseRunningWaiters();
-          await this.cleanupIteration(source, item, committed, thread, lease);
+          await this.cleanupIteration(source, item, committed, thread, lease, acquisitionIdentity);
           this.publish(this.progress.state, this.progress.message, {
             workersActive: Math.max(0, this.progress.workersActive - 1)
           });
           return;
+        }
+        if (item.kind === 'new') {
+          this.activeMailReservationCount += 1;
+          this.mailboxAcquisitions += 1;
+          this.recordResourceSnapshot();
         }
         // A provider block aborts acquisition only and lets this acquired item
         // continue; an explicit whole-run Stop must release it before account use.
@@ -1560,10 +2022,30 @@ export class AutomationRunService {
               this.progress.runId,
               workerId
             );
-            this.increment('accountsAccepted');
-            const iterationSignal = this.iterationAbort.get(thread.accountId)?.signal;
-            if (!iterationSignal) throw new Error('Iteration cancellation owner was lost.');
             try {
+              if (thread.directProxy) {
+                this.activeProxyCount += 1;
+                this.recordResourceSnapshot();
+              }
+              this.increment('accountsAccepted');
+              if (item!.kind === 'new') {
+                this.recordEvidence({
+                  schemaVersion: 1,
+                  runId: thread.runId,
+                  workerAlias: thread.workerAlias,
+                  accountAlias: thread.accountAlias,
+                  at: new Date().toISOString(),
+                  type: 'mailbox-acquired'
+                });
+              }
+              const iterationSignal = this.iterationAbort.get(thread.accountId)?.signal;
+              if (!iterationSignal) throw new Error('Iteration cancellation owner was lost.');
+              // Bind a purchased mailbox to its newly-created account before any
+              // browser/profile launch. The durable owner identity is carried by
+              // the work item and cannot be regenerated by a retry.
+              if (item!.kind === 'new' && item!.purchasedEmailId) {
+                source.bind?.(item!, thread.accountId);
+              }
               if (config.missionTransport === 'http-only') {
                 this.activeThreads.set(thread.accountId, thread);
                 this.deps.accounts.update(thread.accountId, {
@@ -1580,6 +2062,8 @@ export class AutomationRunService {
               if (item!.kind === 'new' && item!.purchasedEmailId) {
                 source.commit(item!, thread.accountId);
                 committed = true;
+                this.activeMailReservationCount = Math.max(0, this.activeMailReservationCount - 1);
+                this.recordResourceSnapshot();
               }
               const outcome = await this.runThreadWorkload(thread!, config, iterationSignal);
               this.recordOutcome(thread!, outcome);
@@ -1587,16 +2071,18 @@ export class AutomationRunService {
               if (firstIteration) {
                 this.releaseRunningWaiters();
               }
-              if (err instanceof AutomationTerminalError) {
-                throw err;
+              if (!thread.outcome) {
+                const terminalFailure = err instanceof AutomationTerminalError && err.state === 'failed';
+                this.recordOutcome(
+                  thread,
+                  !terminalFailure && (this.runAbort?.signal.aborted === true ||
+                      this.iterationAbort.get(thread.accountId)?.signal.aborted === true
+                  )
+                    ? { kind: 'stopped', status: 'stopped', step: 'Đã dừng theo yêu cầu' }
+                    : { kind: 'failed', status: 'error', step: 'Lỗi khi khởi chạy hoặc xử lý' }
+                );
               }
-              this.recordOutcome(
-                thread!,
-                this.runAbort?.signal.aborted === true ||
-                    this.iterationAbort.get(thread!.accountId)?.signal.aborted === true
-                  ? { kind: 'stopped', status: 'stopped', step: 'Đã dừng theo yêu cầu' }
-                  : { kind: 'failed', status: 'error', step: 'Lỗi khi khởi chạy hoặc xử lý' }
-              );
+              if (err instanceof AutomationTerminalError) throw err;
             } finally {
               const timingLog = (message: string): void => {
                 this.log(
@@ -1611,7 +2097,7 @@ export class AutomationRunService {
               await measureStage(
                 'cleanup',
                 async () => {
-                  await this.cleanupIteration(source, item, committed, thread, lease);
+                  await this.cleanupIteration(source, item, committed, thread, lease, acquisitionIdentity);
                   if (this.cleanupFailures > cleanupFailuresBefore) {
                     throw new Error('sanitized cleanup failure');
                   }
@@ -1641,7 +2127,7 @@ export class AutomationRunService {
           this.acceptTerminalError(error);
         }
         if (!thread) {
-          await this.cleanupIteration(source, item, committed, thread, lease);
+          await this.cleanupIteration(source, item, committed, thread, lease, acquisitionIdentity);
           this.publish(this.progress.state, this.progress.message, {
             workersActive: Math.max(0, this.progress.workersActive - 1)
           });
@@ -1666,37 +2152,7 @@ export class AutomationRunService {
     config: AutomationRunConfigDTO,
     directProxies: BrowserProxySettings[]
   ): Promise<AutomationRunSummary> {
-    const missionTransport = config.missionTransport ?? 'ui';
-    this.uiScheduler = missionTransport !== 'http-only' && !config.headless
-      ? new RunUiInteractionScheduler({
-          editorLaneLimit: 1,
-          onEvent: (event) => {
-            try {
-              this.telemetry?.record(mapUiSchedulerEventToEvidence(this.progress.runId, event));
-            } catch {
-              // Telemetry error ignored
-            }
-          }
-        })
-      : null;
-
     try {
-      try {
-        this.telemetry?.record({
-          schemaVersion: 1,
-          runId: this.progress.runId,
-          at: new Date().toISOString(),
-          type: 'run-start',
-          mode: 'new',
-          headed: true,
-          stage: 1,
-          workerTarget: readiness.workerTarget,
-          maxBillablePurchases: config.mailLimit ?? 0
-        });
-      } catch {
-        // Telemetry record error ignored
-      }
-
       const workerTarget = readiness.workerTarget;
       const initialWave = source.kind === 'continuous' ? new InitialWaveBarrier(workerTarget) : null;
       const acquisitionSignal = this.acquisitionAbort!.signal;
@@ -1723,7 +2179,18 @@ export class AutomationRunService {
       }
 
       try {
-        await this.deps.proxies.releaseAll();
+        await this.observe({
+          runId: this.progress.runId,
+          workerAlias: null,
+          acquisitionAlias: null,
+          accountAlias: null,
+          sessionAlias: null,
+          provider: 'kiotproxy',
+          operation: 'proxy-release',
+          authorityRef: 'all'
+        }, () => this.deps.proxies.releaseAll());
+        this.activeProxyCount = 0;
+        this.recordResourceSnapshot();
       } catch {
         this.noteCleanupFailure(undefined, 'proxy-lease');
       }
@@ -1786,7 +2253,16 @@ export class AutomationRunService {
 
       return { ...this.progress, startedProfiles: [...this.startedProfiles] };
     } finally {
-      this.uiScheduler = null;
+      this.runtime.onTerminalSnapshot?.({
+        schedulers: Array.from(this.uiSchedulers, ([sessionAlias, scheduler]) => ({
+          sessionAlias,
+          snapshot: scheduler.snapshot()
+        })),
+        activeThreads: this.activeThreads.size,
+        activeProfiles: this.activeProfileCount,
+        activeProxies: this.activeProxyCount,
+        activeMailReservations: this.activeMailReservationCount
+      });
       if (this.telemetry) {
         const finalState: 'completed' | 'failed' | 'stopped' | 'blocked' =
           this.progress.state === 'completed' || this.progress.state === 'failed' ||
@@ -1795,7 +2271,7 @@ export class AutomationRunService {
             : (this.terminalState ?? 'failed');
 
         const terminalCode: AutomationTerminalCode =
-          this.terminalIntent?.code ?? (
+          this.progress.terminalReason?.code ?? this.terminalIntent?.code ?? (
             this.cleanupFailures > 0
               ? 'RESOURCE_CLEANUP_FAILED'
               : finalState === 'stopped'
@@ -1810,20 +2286,23 @@ export class AutomationRunService {
           runId: this.progress.runId,
           at: new Date().toISOString(),
           type: 'terminal',
+          mode: this.evidenceMode,
+          stage: this.evidenceStage,
+          mailboxAcquisitions: this.mailboxAcquisitions,
           state: finalState,
           code: terminalCode,
           accepted: this.progress.accountsAccepted,
           completed: this.progress.accountsCompleted,
           failed: this.progress.accountsFailed,
           stopped: this.progress.accountsStopped,
-          skipped: 0,
+          skipped: this.skippedAccounts,
           cleanupFailures: this.cleanupFailures,
-          purchaseAttempted: 0,
-          purchaseConfirmed: 0,
-          purchaseAmbiguous: 0
+          purchaseAttempted: this.sourceForEvidence?.purchaseStats().attempted ?? 0,
+          purchaseConfirmed: this.sourceForEvidence?.purchaseStats().confirmed ?? 0,
+          purchaseAmbiguous: this.sourceForEvidence?.purchaseStats().ambiguous ?? 0
         };
 
-        await this.telemetry.close(terminalEvent).catch(() => {});
+        await this.telemetry.close(terminalEvent);
       }
     }
   }
@@ -1849,10 +2328,6 @@ export class AutomationRunService {
     controller?.abort(new Error('stopThread requested'));
     let stopped = true;
     if (thread.session) {
-      if (thread.session.stopFailed) {
-        thread.session.profileStopPromise = undefined;
-        thread.session.stopPromise = undefined;
-      }
       stopped = await this.stopSession(thread, thread.session);
     }
     if (!thread.session) {
@@ -1864,23 +2339,38 @@ export class AutomationRunService {
     return stopped;
   }
 
-  start(config: AutomationRunConfigDTO): Promise<{ runId: string }> {
+  start(config: AutomationRunConfigDTO): Promise<{ runId: string; artifactBasename?: string }> {
     if (this.isRunning() || this.activeThreads.size > 0) {
       return Promise.reject(new ProviderError('CONFIG_ERROR', 'Đang có phiên hoặc profile chưa dừng, hãy dừng trước khi bắt đầu.'));
     }
-    this.uiScheduler = null;
+    if (this.uiSchedulers.size > 0) {
+      return Promise.reject(new ProviderError(
+        'CONFIG_ERROR',
+        'Còn scheduler/session chưa xác nhận thu hồi; không thể bắt đầu phiên mới.'
+      ));
+    }
     const runId = this.nextId();
-    this.telemetry = this.runtime.createTelemetry?.(runId) ?? (
-      this.runtime.userDataDir
-        ? createRunTelemetry({ userDataDir: this.runtime.userDataDir, runId })
-        : null
-    );
+    const headedRollout = config.headless === false && (config.missionTransport ?? 'ui') === 'ui' && config.rolloutStage !== undefined;
+    this.telemetry = headedRollout
+      ? this.runtime.createTelemetry?.(runId) ?? createRunTelemetry({ userDataDir: this.getUserDataDir(), runId })
+      : null;
+    const artifactBasename = this.telemetry?.artifactBasename();
     this.runAbort = new AbortController();
     this.acquisitionAbort = new AbortController();
     this.terminalIntent = null;
     this.terminalState = null;
     this.iterationAbort.clear();
     this.cleanupFailures = 0;
+    this.skippedAccounts = 0;
+    this.mailboxAcquisitions = 0;
+    this.accountSequence = 0;
+    this.sessionSequences.clear();
+    this.evidenceMode = config.emailSource.mode === 'existing' ? 'resume' : 'new';
+    this.evidenceStage = config.rolloutStage ?? null;
+    this.sourceForEvidence = null;
+    this.activeProfileCount = 0;
+    this.activeProxyCount = 0;
+    this.activeMailReservationCount = 0;
     this.startedProfiles = [];
     this.firstWaveDone = false;
     const runSignal = this.runAbort.signal;
@@ -1888,7 +2378,22 @@ export class AutomationRunService {
       try {
         return await this.prepareRun(config, runId, runSignal);
       } catch (error: unknown) {
-        if (!runSignal.aborted) throw error;
+        if (!runSignal.aborted) {
+          if (this.telemetry) {
+            await this.telemetry.close({
+              schemaVersion: 1, runId, at: new Date().toISOString(), type: 'terminal',
+              mode: this.evidenceMode, stage: this.evidenceStage, mailboxAcquisitions: this.mailboxAcquisitions,
+              state: 'failed', code: 'INTERNAL_ERROR', accepted: this.progress.accountsAccepted,
+              completed: this.progress.accountsCompleted, failed: this.progress.accountsFailed,
+              stopped: this.progress.accountsStopped, skipped: this.skippedAccounts,
+              cleanupFailures: this.cleanupFailures,
+              purchaseAttempted: this.sourceForEvidence?.purchaseStats().attempted ?? 0,
+              purchaseConfirmed: this.sourceForEvidence?.purchaseStats().confirmed ?? 0,
+              purchaseAmbiguous: this.sourceForEvidence?.purchaseStats().ambiguous ?? 0
+            });
+          }
+          throw error;
+        }
         this.publish('stopped', 'Đã dừng trước khi khởi chạy.', { terminalReason: this.terminalIntent ?? { code: 'USER_STOP' } });
         this.lastSummary = { ...this.progress, startedProfiles: [...this.startedProfiles] };
         if (this.telemetry) {
@@ -1897,6 +2402,9 @@ export class AutomationRunService {
             runId,
             at: new Date().toISOString(),
             type: 'terminal',
+            mode: this.evidenceMode,
+            stage: this.evidenceStage,
+            mailboxAcquisitions: this.mailboxAcquisitions,
             state: 'stopped',
             code: 'USER_STOP',
             accepted: 0,
@@ -1908,15 +2416,15 @@ export class AutomationRunService {
             purchaseAttempted: 0,
             purchaseConfirmed: 0,
             purchaseAmbiguous: 0
-          }).catch(() => {});
+          });
         }
-        return { runId };
+        return { runId, ...(artifactBasename ? { artifactBasename } : {}) };
       } finally {
         this.starting = null;
       }
     });
     this.starting = operation;
-    return operation;
+    return operation.then(() => ({ runId, ...(artifactBasename ? { artifactBasename } : {}) }));
   }
 
   private async prepareRun(config: AutomationRunConfigDTO, runId: string, runSignal: AbortSignal): Promise<{ runId: string }> {
@@ -2027,7 +2535,24 @@ export class AutomationRunService {
       }
     }
 
-    const source = this.deps.workSources.create(config, runId);
+    this.recordEvidence({
+      schemaVersion: 1, runId, at: new Date().toISOString(), type: 'run-start',
+      mode: this.evidenceMode, headed: true, stage: this.evidenceStage,
+      uiScope: config.headless === false && (config.missionTransport ?? 'ui') === 'ui'
+        ? 'session-target'
+        : undefined,
+      workerTarget, maxBillablePurchases: config.maxBillablePurchases ?? 0
+    });
+    this.recordResourceSnapshot();
+    const source = this.deps.workSources.create(config, runId, (event) => {
+      this.recordEvidence({
+        schemaVersion: 1, runId, at: new Date().toISOString(), type: 'purchase',
+        provider: event.provider, outcome: event.outcome,
+        attempted: event.stats.attempted, confirmed: event.stats.confirmed,
+        ambiguous: event.stats.ambiguous, budget: event.stats.budget
+      });
+    }, this.deps.mutationContext);
+    this.sourceForEvidence = source;
     let readiness: SourceReadiness;
     try {
       readiness = await measureStage(
@@ -2105,11 +2630,13 @@ export class AutomationRunService {
 
   stop(code: 'USER_STOP' | 'APP_SHUTDOWN' = 'USER_STOP'): Promise<void> {
     if (this.stopping) return this.stopping;
-    if (!this.starting && !this.activeRun && this.activeThreads.size === 0) return Promise.resolve();
+    if (!this.starting && !this.activeRun && !this.healthRun && this.activeThreads.size === 0) return Promise.resolve();
     this.terminalIntent = { code };
     this.publish('stopping', 'Đang dừng các browser của phiên chạy...');
     this.runAbort?.abort(new Error(code));
     this.acquisitionAbort?.abort(new Error(code));
+    this.healthAbort?.abort(new Error(code));
+    this.shutdownAllUiSchedulers({ code: 'RUN_ABORTED', message: code });
     for (const controller of this.iterationAbort.values()) {
       controller.abort(new Error(code));
     }
@@ -2117,10 +2644,6 @@ export class AutomationRunService {
       this.log('INFO', 'system', 'Stop', 'Đã nhận yêu cầu dừng; không nhận thêm công việc.');
       await Promise.all(Array.from(this.activeThreads.values()).map(async (thread) => {
         if (thread.session) {
-          if (thread.session.stopFailed) {
-            thread.session.profileStopPromise = undefined;
-            thread.session.stopPromise = undefined;
-          }
           await this.stopSession(thread, thread.session);
         }
         if (!thread.session) {
@@ -2129,8 +2652,9 @@ export class AutomationRunService {
       }));
       if (this.starting) await this.starting.catch(() => undefined);
       if (this.activeRun) await this.activeRun;
+      if (this.healthRun) await this.healthRun.catch(() => undefined);
       if (this.activeThreads.size > 0 || this.terminalState === 'failed') {
-        const message = 'Chưa dừng được ' + this.activeThreads.size + ' profile. Bấm Dừng để thử lại.';
+        const message = 'Chưa xác nhận dừng được ' + this.activeThreads.size + ' profile. Cần xử lý thủ công trước khi chạy lại.';
         const reason: AutomationTerminalReasonDTO = this.terminalIntent?.code === 'RESOURCE_CLEANUP_FAILED'
           ? this.terminalIntent
           : {

@@ -16,16 +16,24 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Locator, Page } from 'playwright-core';
 
-import { humanType, perCharDelayRange, type PerCharDelay } from '../human';
+import { humanType, perCharDelayRange, type PerCharDelay, type HumanInteractionOptions } from '../human';
 import { paceGapMs } from '../runTasks';
 import { fillEditor } from '../steps';
 import type { CapcutPace } from '../types';
+import { createDirectUiInteraction } from '../uiInteractionScheduler';
 
 /** Trang giả: chỉ ghi lại `delay` mà nhịp gõ đưa cho từng ký tự. */
-function stubTarget(): { page: Page; locator: Locator; delays: number[] } {
+function stubTarget(): { page: Page; locator: Locator; delays: number[]; options: HumanInteractionOptions } {
   const delays: number[] = [];
+  const signal = new AbortController().signal;
+  const options: HumanInteractionOptions = {
+    signal,
+    ui: createDirectUiInteraction(signal),
+    stage: 'mission',
+  };
 
   const page = {
+    bringToFront: async (): Promise<void> => {},
     keyboard: {
       type: async (_ch: string, options?: { delay?: number }): Promise<void> => {
         delays.push(options?.delay ?? 0);
@@ -33,15 +41,12 @@ function stubTarget(): { page: Page; locator: Locator; delays: number[] } {
     },
   } as unknown as Page;
 
-  // `boundingBox` trả null để `humanClick` đi nhánh click thường: test này đo
-  // nhịp gõ, không đo quỹ đạo chuột (quỹ đạo là bất biến khác, không đổi ở đây).
+  // Click locator được kiểm riêng; test này đo nhịp gõ từng ký tự.
   const locator = {
-    scrollIntoViewIfNeeded: async (): Promise<void> => {},
-    boundingBox: async (): Promise<null> => null,
     click: async (): Promise<void> => {},
   } as unknown as Locator;
 
-  return { page, locator, delays };
+  return { page, locator, delays, options };
 }
 
 /**
@@ -97,9 +102,9 @@ describe('perCharDelayRange — sàn 45–130ms mỗi ký tự', () => {
 
 describe('humanType — nhịp thật đưa cho từng ký tự', () => {
   it('typeDelayMinMs = 0: mọi ký tự vẫn ≥ 45ms và ≤ 130ms', async () => {
-    const { page, locator, delays } = stubTarget();
+    const { page, locator, delays, options } = stubTarget();
 
-    await runTyping(() => humanType(page, locator, 'hello', { minMs: 0, maxMs: 0 }));
+    await runTyping(() => humanType(page, locator, 'hello', { minMs: 0, maxMs: 0 }, options));
 
     expect(delays).toHaveLength(5);
     for (const delay of delays) {
@@ -109,9 +114,9 @@ describe('humanType — nhịp thật đưa cho từng ký tự', () => {
   });
 
   it('giá trị lớn hơn sàn đi thẳng vào page.keyboard.type', async () => {
-    const { page, locator, delays } = stubTarget();
+    const { page, locator, delays, options } = stubTarget();
 
-    await runTyping(() => humanType(page, locator, 'hello', { minMs: 400, maxMs: 700 }));
+    await runTyping(() => humanType(page, locator, 'hello', { minMs: 400, maxMs: 700 }, options));
 
     expect(delays).toHaveLength(5);
     for (const delay of delays) {
@@ -121,9 +126,9 @@ describe('humanType — nhịp thật đưa cho từng ký tự', () => {
   });
 
   it('không có pace thì y như cũ: rand(45, 130)', async () => {
-    const { page, locator, delays } = stubTarget();
+    const { page, locator, delays, options } = stubTarget();
 
-    await runTyping(() => humanType(page, locator, 'hello'));
+    await runTyping(() => humanType(page, locator, 'hello', undefined, options));
 
     expect(delays).toHaveLength(5);
     for (const delay of delays) {
@@ -135,18 +140,18 @@ describe('humanType — nhịp thật đưa cho từng ký tự', () => {
 
 describe('fillEditor — mission truyền nhịp xuống được', () => {
   it('nhịp của người dùng tới đúng từng ký tự', async () => {
-    const { page, locator, delays } = stubTarget();
+    const { page, locator, delays, options } = stubTarget();
     const perChar: PerCharDelay = { minMs: 500, maxMs: 500 };
 
-    await runTyping(() => fillEditor(page, locator, 'ab', perChar));
+    await runTyping(() => fillEditor(page, locator, 'ab', perChar, options));
 
     expect(delays).toEqual([500, 500]);
   });
 
   it('không truyền perChar thì vẫn là nhịp đã đo', async () => {
-    const { page, locator, delays } = stubTarget();
+    const { page, locator, delays, options } = stubTarget();
 
-    await runTyping(() => fillEditor(page, locator, 'ab'));
+    await runTyping(() => fillEditor(page, locator, 'ab', undefined, options));
 
     expect(delays).toHaveLength(2);
     expect(delays.every((delay) => delay >= 45 && delay <= 130)).toBe(true);

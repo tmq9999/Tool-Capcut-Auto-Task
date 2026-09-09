@@ -27,8 +27,13 @@ function apiFixture() {
 }
 function cdpFixture() {
   const browser = { close: vi.fn(async () => {}) };
+  const signal = new AbortController().signal;
   vi.mocked(attachOverCdp).mockResolvedValue({
-    browser: browser as unknown as Browser, page: {} as never, context: {} as never
+    browser: browser as unknown as Browser,
+    page: {} as never,
+    context: {} as never,
+    signal,
+    ui: createDirectUiInteraction(signal)
   });
   return browser;
 }
@@ -40,7 +45,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 
-import { RunUiInteractionScheduler } from '../../uiInteractionScheduler';
+import { createDirectUiInteraction, RunUiInteractionScheduler } from '../../uiInteractionScheduler';
 
 describe('launcher stop ownership', () => {
   it('runs the renderer health gate for headed API-v3 and xcli sessions', async () => {

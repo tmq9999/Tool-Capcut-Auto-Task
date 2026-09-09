@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { chromium, type Browser } from 'playwright-core';
 
-import { attachOverCdp, connectOverCdpWithRetry } from '../BrowserLauncher';
+import { attachOverCdp, configureHeadedWindowUnlocked, connectOverCdpWithRetry } from '../BrowserLauncher';
 import { createDirectUiInteraction } from '../../uiInteractionScheduler';
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('headed viewport before authentication', () => {
   function attachment(options: {
@@ -101,6 +101,32 @@ describe('headed viewport before authentication', () => {
     await attachOverCdp(45678, { headless: false, ui });
     expect(h.session.send).not.toHaveBeenCalledWith('Browser.setWindowBounds', expect.anything());
     expect(h.page.setViewportSize).not.toHaveBeenCalled();
+  });
+
+  it('configures a target-mode headed page without native activation', async () => {
+    const h = attachment({
+      viewport: { width: 1600, height: 1000 },
+      bounds: { width: 1616, height: 1100, windowState: 'normal' },
+      screen: { width: 1920, height: 1080 }
+    });
+    const ui = createDirectUiInteraction(new AbortController().signal, 'target');
+    await attachOverCdp(45678, { headless: false, ui });
+    expect(h.page.bringToFront).not.toHaveBeenCalled();
+    expect(h.session.send).toHaveBeenCalledWith('Browser.getWindowForTarget');
+  });
+
+  it('bounds native headed-window activation', async () => {
+    vi.useFakeTimers();
+    const signal = new AbortController().signal;
+    const setup = configureHeadedWindowUnlocked(
+      { bringToFront: () => new Promise<void>(() => {}) } as never,
+      {} as never,
+      { headless: false, signal, ui: createDirectUiInteraction(signal) }
+    ).catch(error => error);
+
+    await vi.advanceTimersByTimeAsync(5_001);
+
+    await expect(setup).resolves.toMatchObject({ code: 'DOM_READ_TIMEOUT' });
   });
 
   it('leaves headless viewport behavior untouched', async () => {

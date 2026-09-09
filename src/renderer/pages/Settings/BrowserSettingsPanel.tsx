@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Globe, Check, AlertCircle, Trash2 } from 'lucide-react';
 import { Panel } from '@renderer/components/ui/Panel';
 import { Select } from '@renderer/components/ui/Select';
@@ -43,6 +43,30 @@ export const BrowserSettingsPanel: React.FC<BrowserSettingsPanelProps> = ({
   const [multiloginEmail, setMultiloginEmail] = useState('');
   const [multiloginPassword, setMultiloginPassword] = useState('');
 
+  useEffect(() => {
+    if (drafts.multilogin.action === 'keep') {
+      setMultiloginEmail('');
+      setMultiloginPassword('');
+    }
+  }, [drafts.multilogin.action]);
+
+  const handleCredentialsChange = (newEmail: string, newPassword: string) => {
+    setMultiloginEmail(newEmail);
+    setMultiloginPassword(newPassword);
+    if (newEmail.trim().length > 0 || newPassword.trim().length > 0) {
+      onSetMultiloginDraft({
+        action: 'replace',
+        auth: {
+          mode: 'credentials',
+          email: newEmail.trim(),
+          password: newPassword,
+        },
+      });
+    } else {
+      onSetMultiloginDraft({ action: 'keep' });
+    }
+  };
+
   const gologinStatus = credentialStatuses.gologin;
   const multiloginStatus = credentialStatuses.multilogin;
 
@@ -68,10 +92,33 @@ export const BrowserSettingsPanel: React.FC<BrowserSettingsPanelProps> = ({
 
     if (settings.provider === 'multilogin') {
       const isConfigured = multiloginStatus?.isConfigured;
+      if (!isConfigured) {
+        return (
+          <span className="px-2 py-0.5 bg-surface-container-high text-on-surface-variant border border-panel-border rounded font-label-xs text-label-xs flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-on-surface-variant inline-block" />
+            <span>Chưa thiết lập</span>
+          </span>
+        );
+      }
+      if (multiloginStatus?.metadata.lastTestResult) {
+        const isOk = multiloginStatus.metadata.lastTestResult.code === 'OK';
+        return (
+          <span
+            className={`px-2 py-0.5 border rounded font-label-xs text-label-xs flex items-center gap-1 ${
+              isOk
+                ? 'bg-success/10 text-success border-success/25'
+                : 'bg-error/10 text-error border-error/25'
+            }`}
+          >
+            {isOk ? <Check className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}
+            <span>{isOk ? 'Connected' : 'Lỗi kết nối'}</span>
+          </span>
+        );
+      }
       return (
         <span className="px-2 py-0.5 bg-surface-container-high text-on-surface-variant border border-panel-border rounded font-label-xs text-label-xs flex items-center gap-1">
-          <span className={`w-1.5 h-1.5 rounded-full inline-block ${isConfigured ? 'bg-primary' : 'bg-on-surface-variant'}`} />
-          <span>{isConfigured ? 'Đã cấu hình' : 'Chưa thiết lập'}</span>
+          <span className="w-1.5 h-1.5 rounded-full inline-block bg-primary" />
+          <span>Đã cấu hình</span>
         </span>
       );
     }
@@ -245,7 +292,11 @@ export const BrowserSettingsPanel: React.FC<BrowserSettingsPanelProps> = ({
                       })
                     }
                     fontMono
-                    placeholder={multiloginStatus?.isConfigured ? 'Đã lưu: ••••••••' : 'Chưa thiết lập'}
+                    placeholder={
+                      multiloginStatus?.isConfigured
+                        ? 'Đã lưu: •••••••• (nhập để thay đổi)'
+                        : 'Dán automation token vào đây...'
+                    }
                   />
                 </div>
               ) : (
@@ -257,17 +308,12 @@ export const BrowserSettingsPanel: React.FC<BrowserSettingsPanelProps> = ({
                     <Input
                       type="email"
                       value={multiloginEmail}
-                      onChange={(e) => {
-                        const email = e.target.value;
-                        setMultiloginEmail(email);
-                        if (email && multiloginPassword) {
-                          onSetMultiloginDraft({
-                            action: 'replace',
-                            auth: { mode: 'credentials', email, password: multiloginPassword },
-                          });
-                        }
-                      }}
-                      placeholder="user@domain.com"
+                      onChange={(e) => handleCredentialsChange(e.target.value, multiloginPassword)}
+                      placeholder={
+                        multiloginStatus?.isConfigured
+                          ? 'Đã lưu cấu hình (nhập để thay đổi)'
+                          : 'user@domain.com'
+                      }
                     />
                   </div>
 
@@ -278,17 +324,12 @@ export const BrowserSettingsPanel: React.FC<BrowserSettingsPanelProps> = ({
                     <Input
                       type="password"
                       value={multiloginPassword}
-                      onChange={(e) => {
-                        const password = e.target.value;
-                        setMultiloginPassword(password);
-                        if (multiloginEmail && password) {
-                          onSetMultiloginDraft({
-                            action: 'replace',
-                            auth: { mode: 'credentials', email: multiloginEmail, password },
-                          });
-                        }
-                      }}
-                      placeholder="••••••••"
+                      onChange={(e) => handleCredentialsChange(multiloginEmail, e.target.value)}
+                      placeholder={
+                        multiloginStatus?.isConfigured
+                          ? 'Đã lưu: •••••••• (nhập để thay đổi)'
+                          : 'Nhập mật khẩu...'
+                      }
                     />
                   </div>
                 </div>
@@ -314,8 +355,8 @@ export const BrowserSettingsPanel: React.FC<BrowserSettingsPanelProps> = ({
                     })
                   }
                 >
-                  <option value="xcli">xcli — CLI Multilogin (đã chạy thật 13 account)</option>
-                  <option value="api-v3">api-v3 — REST /api/v3/profile/quick</option>
+                  <option value="api-v3">api-v3 — REST /api/v3/profile/quick (Mặc định)</option>
+                  <option value="xcli">xcli — CLI Multilogin</option>
                 </Select>
                 <p className="text-on-surface-variant text-xs font-label-xs">
                   {settings.multilogin.launcher === 'xcli'
@@ -353,6 +394,20 @@ export const BrowserSettingsPanel: React.FC<BrowserSettingsPanelProps> = ({
                   Kiểm tra kết nối
                 </Button>
               </div>
+
+              {drafts.multilogin.action === 'replace' ? (
+                <span className="text-warning text-xs font-label-xs block">
+                  Đang nhập thông tin Multilogin mới (chưa lưu). Bấm &quot;Kiểm tra kết nối&quot; để test trực tiếp thông tin này.
+                </span>
+              ) : multiloginStatus?.isConfigured ? (
+                <span className="text-on-surface-variant text-[11px] font-label-xs block">
+                  Hệ thống đang lưu cấu hình Multilogin. Bấm &quot;Kiểm tra kết nối&quot; để test tài khoản và launcher Multilogin đã lưu.
+                </span>
+              ) : (
+                <span className="text-on-surface-variant text-[11px] font-label-xs block">
+                  Chưa có thông tin Multilogin. Vui lòng nhập token hoặc email/mật khẩu rồi bấm &quot;Lưu cài đặt&quot;.
+                </span>
+              )}
             </div>
           )}
 

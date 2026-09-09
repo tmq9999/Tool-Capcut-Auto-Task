@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-electron/
 release/
+build/cycletls-bridge/
 
 # Local credentials for provider verification. Never commit.
 .env
@@ -18,3 +19,5 @@ release/
 # token thật trong request. Giữ trên đĩa để tra cứu, KHÔNG commit tới khi đã
 # thay hết giá trị thật bằng placeholder.
 API Services/
+Capture/
+tools/mlx-test-out.json

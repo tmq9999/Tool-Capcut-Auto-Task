@@ -10,6 +10,9 @@ import { MultiloginAuthService, type IMultiloginAuthApi } from '../MultiloginAut
 import { ProviderError } from '../../providers/ProviderError';
 import type { ICredentialVault } from '../../security/CredentialVault';
 import type { MultiloginTokens } from '../../providers/MultiloginProvider';
+import type { ObservationIdentity, ObservationScope } from '../../providers/ObservedHttpClient';
+import { ObservedHttpClient, type HttpObservationEvent } from '../../providers/ObservedHttpClient';
+import type { HttpClient } from '../../providers/HttpClient';
 
 class PlainVault implements ICredentialVault {
   isAvailable(): boolean { return true; }
@@ -47,8 +50,8 @@ let vault: PlainVault;
 let api: StubAuthApi;
 let now: number;
 
-function createService(): MultiloginAuthService {
-  return new MultiloginAuthService(credRepo, vault, api, { now: () => now });
+function createService(observation?: ObservationScope): MultiloginAuthService {
+  return new MultiloginAuthService(credRepo, vault, api, { now: () => now }, observation);
 }
 
 function storeAuth(payload: unknown): void {
@@ -74,6 +77,62 @@ afterEach(() => {
 });
 
 describe('MultiloginAuthService.getAccessToken', () => {
+  it('clears inherited account ownership through the real AsyncLocalStorage scope', async () => {
+    storeAuth({
+      mode: 'credentials', email: 'user@example.com', password: 'secret',
+      session: { jwtToken: 'old', refreshToken: 'refresh', issuedAt: now - 30 * 60_000 }
+    });
+    const events: HttpObservationEvent[] = [];
+    const raw: HttpClient = {
+      send: async () => ({ status: 200, ok: true, body: null, rawText: '' })
+    };
+    const observed = new ObservedHttpClient(raw, (event) => { events.push(event); });
+    const scopedApi: IMultiloginAuthApi = {
+      signIn: async () => ({ token: 'signed', refreshToken: 'signed-refresh' }),
+      refreshTokens: async () => {
+        await observed.send({ method: 'POST', url: 'https://api.multilogin.com/user/refresh_token' });
+        return { token: 'refreshed', refreshToken: 'rotated' };
+      }
+    };
+    const service = new MultiloginAuthService(
+      credRepo, vault, scopedApi, { now: () => now }, observed
+    );
+
+    await observed.withObservationScope({
+      runId: 'run-shared', workerAlias: 'worker-9', accountAlias: 'account-9',
+      sessionAlias: 'session-9'
+    }, () => service.getAccessToken());
+
+    expect(events[0].identity).toEqual({
+      scope: 'scoped', runId: 'run-shared', provider: 'multilogin', operation: 'token-refresh'
+    });
+  });
+
+  it('clears worker/account ownership for a shared token refresh', async () => {
+    storeAuth({
+      mode: 'credentials', email: 'user@example.com', password: 'secret',
+      session: { jwtToken: 'old', refreshToken: 'refresh', issuedAt: now - 30 * 60_000 }
+    });
+    const identities: Readonly<ObservationIdentity>[] = [];
+    const service = createService({
+      withObservationScope: async (identity, operation) => {
+        identities.push(identity);
+        return operation();
+      }
+    });
+
+    await service.getAccessToken();
+
+    expect(identities).toEqual([{
+      provider: 'multilogin',
+      operation: 'token-refresh',
+      workerAlias: null,
+      acquisitionAlias: null,
+      accountAlias: null,
+      sessionAlias: null
+    }]);
+  });
+
   it('fails with CONFIG_ERROR when Multilogin has not been configured', async () => {
     const service = createService();
     await expect(service.getAccessToken()).rejects.toMatchObject({ code: 'CONFIG_ERROR' });

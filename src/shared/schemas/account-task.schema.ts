@@ -29,12 +29,22 @@ export const AccountTasksRequestSchema = z.object({
 }).strict();
 export type AccountTasksRequestDTO = z.infer<typeof AccountTasksRequestSchema>;
 
+export const AccountTaskVerificationSchema = z.object({
+  state: z.enum(['verified', 'partial', 'stale', 'missing']),
+  runId: z.string().nullable(),
+  observedAt: z.string().nullable(),
+  serverTotal: z.number().int().min(0),
+  serverDone: z.number().int().min(0)
+}).strict();
+export type AccountTaskVerificationDTO = z.infer<typeof AccountTaskVerificationSchema>;
+
 export const AccountTasksResponseSchema = z.object({
   items: z.array(AccountTaskItemSchema),
   /** Số nhiệm vụ CapCut ghi nhận đã xong. */
   doneCount: z.number().int().min(0),
   /** Tổng credit của những nhiệm vụ đã xong. */
-  creditsEarned: z.number().int().min(0)
+  creditsEarned: z.number().int().min(0),
+  verification: AccountTaskVerificationSchema
 }).strict();
 export type AccountTasksResponseDTO = z.infer<typeof AccountTasksResponseSchema>;
 

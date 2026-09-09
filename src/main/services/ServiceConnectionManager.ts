@@ -95,7 +95,16 @@ export class ServiceConnectionManager {
    * service without a probe is reported as not implemented and its cached
    * metadata is left untouched.
    */
-  async testConnection(serviceName: string): Promise<SanitizedDiagnosticResult> {
+  async testConnection(
+    serviceName: string,
+    draftSecret?: string,
+    multiloginDraft?: {
+      mode: 'token' | 'credentials';
+      automationToken?: string;
+      email?: string;
+      password?: string;
+    }
+  ): Promise<SanitizedDiagnosticResult> {
     const timestamp = new Date(this.clock.now()).toISOString();
     const provider = this.providerRegistry.get(serviceName);
 
@@ -107,9 +116,11 @@ export class ServiceConnectionManager {
       };
     }
 
+    const isDraft = typeof draftSecret === 'string' || multiloginDraft !== undefined;
+
     let result: SanitizedDiagnosticResult;
     try {
-      result = await provider.testConnection();
+      result = await provider.testConnection(draftSecret ?? multiloginDraft);
     } catch (err: unknown) {
       result = err instanceof ProviderError
         ? err.toDiagnostic(timestamp)
@@ -121,7 +132,7 @@ export class ServiceConnectionManager {
     }
 
     const existing = this.credRepo.getCredential(serviceName);
-    if (existing) {
+    if (existing && !isDraft) {
       const metadata: CredentialDiagnosticMetadata = {
         ...existing.metadata,
         status: ServiceConnectionManager.toDiagnosticStatus(result.code),
@@ -136,9 +147,9 @@ export class ServiceConnectionManager {
       }
 
       this.credRepo.updateMetadata(serviceName, metadata);
+      this.getDiagnosticStatuses();
     }
 
-    this.getDiagnosticStatuses();
     return result;
   }
 }

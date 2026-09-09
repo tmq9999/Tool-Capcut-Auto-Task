@@ -11,6 +11,7 @@ import {
   type ProxyLeaseRepository,
   type ProxyProtocol
 } from '../repositories/ProxyLeaseRepository';
+import type { ObservationIdentity, ObservationScope } from '../providers/ObservedHttpClient';
 
 /** The slice of KiotProxyProvider the lease manager depends on. */
 export interface IKiotProxyLeaseApi {
@@ -41,6 +42,7 @@ export interface ProxyLeaseManagerDeps {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   nextId?: () => string;
+  observation?: ObservationScope;
 }
 
 export interface AcquiredProxyLease extends KiotProxyLease {
@@ -69,6 +71,7 @@ export class ProxyLeaseManager {
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly nextId: () => string;
+  private readonly observation?: ObservationScope;
 
   constructor(
     private readonly api: IKiotProxyLeaseApi,
@@ -79,6 +82,11 @@ export class ProxyLeaseManager {
     this.now = deps.now ?? (() => Date.now());
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.nextId = deps.nextId ?? (() => crypto.randomUUID());
+    this.observation = deps.observation;
+  }
+
+  private observe<T>(identity: Readonly<ObservationIdentity>, operation: () => Promise<T>): Promise<T> {
+    return this.observation?.withObservationScope(identity, operation) ?? operation();
   }
 
   private async loadKeys(): Promise<string[]> {
@@ -91,7 +99,8 @@ export class ProxyLeaseManager {
       return this.cachedKeys;
     }
 
-    const keys = await this.api.listKeys(this.options.apiToken);
+    const keys = await this.observe({ provider: 'kiotproxy', operation: 'proxy-list' }, () =>
+      this.api.listKeys(this.options.apiToken));
     this.cachedKeys = keys.map((entry) => entry.keyValue);
     return this.cachedKeys;
   }
@@ -117,7 +126,8 @@ export class ProxyLeaseManager {
    */
   private async readCurrentIp(keyValue: string): Promise<string | null> {
     try {
-      const current = await this.api.getCurrentProxy(keyValue, this.options.protocol ?? 'http');
+      const current = await this.observe({ provider: 'kiotproxy', operation: 'proxy-current' }, () =>
+        this.api.getCurrentProxy(keyValue, this.options.protocol ?? 'http'));
       return current.ip;
     } catch {
       return null;
@@ -131,10 +141,11 @@ export class ProxyLeaseManager {
 
     let lease: KiotProxyLease;
     try {
-      lease = await this.api.getNewProxy(keyValue, {
-        protocol: this.options.protocol ?? 'http',
-        region: this.options.region
-      });
+      lease = await this.observe({ provider: 'kiotproxy', operation: 'proxy-acquire' }, () =>
+        this.api.getNewProxy(keyValue, {
+          protocol: this.options.protocol ?? 'http',
+          region: this.options.region
+        }));
     } catch (err: unknown) {
       this.busyKeys.delete(keyValue);
       if (err instanceof ProxyKeyUnavailableError) {
@@ -254,7 +265,8 @@ export class ProxyLeaseManager {
     this.busyKeys.delete(lease.keyValue);
     this.cooldownUntil.delete(lease.keyValue);
     try {
-      await this.api.releaseKey(lease.keyValue);
+      await this.observe({ provider: 'kiotproxy', operation: 'proxy-release' }, () =>
+        this.api.releaseKey(lease.keyValue));
     } catch {
       // Releasing is best effort: the gateway may have rotated the key already.
     }

@@ -13,9 +13,9 @@
 # Multilogin mở, nên bản đóng gói không cần Chromium kèm theo.
 # =============================================================================
 
-appId: com.automanager.desktop
-productName: AutoManager
-copyright: AutoManager
+appId: com.capcut.automation
+productName: CapCut Automation
+copyright: CapCut Automation
 
 directories:
   output: release
@@ -32,6 +32,14 @@ asarUnpack:
   - node_modules/bindings/**
   - node_modules/file-uri-to-path/**
   - node_modules/playwright-core/**
+
+# HTTP-only uses the pinned CycleTLS Go engine through a loopback-only launcher.
+# Never package the npm wrapper's wildcard-listening native executables.
+extraResources:
+  - from: build/cycletls-bridge/index.exe
+    to: cycletls-bridge/index.exe
+  - from: node_modules/cycletls/LICENSE
+    to: licenses/CycleTLS-LICENSE.txt
 
 # electron-builder tự rebuild native dep theo ABI của Electron đích — nhưng
 # @electron/rebuild coi module "đã build sẵn" là xong và KHÔNG build lại. Lượt
@@ -57,7 +65,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: AutoManager
+  shortcutName: CapCut Automation
   installerIcon: build/icon.ico
   uninstallerIcon: build/icon.ico
 

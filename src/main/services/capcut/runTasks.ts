@@ -37,7 +37,13 @@ import {
 import { designStudioGroup } from './missions/designStudio';
 import { notificationsGroup, pwaInstallGroup } from './missions/simple';
 import { videoStudioGroup } from './missions/videoStudio';
-import { attachTaskMonitor, TaskStore, type ActionProof, type TaskSnapshot } from './taskApi';
+import {
+  attachTaskMonitor,
+  TaskStore,
+  type ActionProof,
+  type TaskMonitorIdentity,
+  type TaskSnapshot
+} from './taskApi';
 import type {
   CapcutMissionEnv,
   CapcutPace,
@@ -46,16 +52,18 @@ import type {
   TaskSnapshotSummary,
   SnapshotTaskSummary,
   TaskCheckpoint,
+  TaskClaimResult,
   UnsettledTaskProof,
   CapcutVerificationReceipt,
   AccountUiInteraction
 } from './types';
 import { URLS } from './urls';
-import { abortable } from './cancellation';
+import { abortable, isDomReadTimeout } from './cancellation';
 import { measureStage } from '../stageTiming';
-import { createDirectUiInteraction } from './uiInteractionScheduler';
 import type { CapcutHttpTaskApi } from './http/taskApi';
+import { executeHttpTasks } from './httpTasks';
 
+export { executeHttpTasks };
 export type {
   TaskSnapshotSummary,
   SnapshotTaskSummary,
@@ -81,6 +89,7 @@ const MAX_ATTEMPTS = 2;
 export const INTER_ROUND_WAIT_MS = 8_000;
 export const FINAL_SNAPSHOT_WAIT_MS = 10_000;
 export const BOOTSTRAP_DEADLINE_MS = 30_000;
+const BOOTSTRAP_RECOVERY_MS = 10_000;
 
 export function needsFinalSnapshotRefresh(
   snapshot: Partial<TaskSnapshotSummary> & Pick<TaskSnapshotSummary, 'total' | 'done' | 'missing'>
@@ -112,8 +121,10 @@ export interface RunTasksInput {
   runId?: string;
   sessionAlias?: string;
   sessionStartedAt?: number;
+  /** Dormant until the stepwise diagnostic caller explicitly supplies owner identity. */
+  rewardVerification?: TaskMonitorIdentity;
   unsettledProofs?: readonly UnsettledTaskProof[];
-  ui?: AccountUiInteraction;
+  ui: AccountUiInteraction;
   onCheckpoint?: (checkpoint: TaskCheckpoint) => Promise<void>;
 }
 
@@ -261,14 +272,23 @@ export function summarize(
  */
 async function bootstrap(
   input: RunTasksInput
-): Promise<{ store: TaskStore; env: CapcutMissionEnv; snap: TaskSnapshot }> {
+): Promise<{
+  store: TaskStore;
+  env: CapcutMissionEnv;
+  snap: TaskSnapshot;
+  disposeTaskMonitor: () => void;
+}> {
   const page = input.resolvePage
     ? await input.resolvePage('bootstrap')
     : input.page;
   const { context, sampleImage, log } = input;
 
   const store = new TaskStore();
-  attachTaskMonitor(context, store);
+  const disposeTaskMonitor = attachTaskMonitor(context, store, input.rewardVerification ?? {
+    runId: input.runId ?? 'legacy-run',
+    sessionAlias: input.sessionAlias ?? 'legacy-session',
+  });
+  try {
   attachNetDiag(context, (m) => log(`   ⚠️  ${m}`));
 
   const env: CapcutMissionEnv = {
@@ -278,7 +298,12 @@ async function bootstrap(
     log: (message: string) =>
       log(message.startsWith('stage=') ? message : '      · ' + message),
     signal: input.signal,
-    ui: input.ui ?? createDirectUiInteraction(input.signal),
+    ui: input.ui,
+    ...(input.rewardVerification ? {
+      rewardSessionAlias: input.rewardVerification.sessionAlias,
+      verifyRewardStep: (attempt, deadlineAt) =>
+        store.verifyRewardStep(attempt, deadlineAt, input.signal),
+    } : {}),
     captureStage: input.captureStage,
     // Nhịp gõ đi kèm env để từng mission truyền xuống `fillEditor`; sàn nằm ở
     // `humanType` nên cấu hình nhanh hơn khoảng đã đo không lọt qua được.
@@ -302,15 +327,17 @@ async function bootstrap(
   if (input.httpTaskApi) {
     try {
       const httpSnapshot = await input.httpTaskApi.getTaskList(input.signal);
-      store.pushTaskList(JSON.stringify({ data: { task_list: [...httpSnapshot.byKey.values()].map((task) => ({
-        task_key: task.taskKey,
-        task_id: task.taskId,
-        task_status: task.status,
-        task_reward_view: { reward_amount: task.reward },
-        task_view: { title: task.title, button_text: task.buttonText },
-        task_relation: { child_task_ids: task.childIds },
-      })) } }));
-      return { store, env, snap: httpSnapshot };
+      if (!input.rewardVerification) {
+        store.pushTaskList(JSON.stringify({ data: { task_list: [...httpSnapshot.byKey.values()].map((task) => ({
+          task_key: task.taskKey,
+          task_id: task.taskId,
+          task_status: task.status,
+          task_reward_view: { reward_amount: task.reward },
+          task_view: { title: task.title, button_text: task.buttonText },
+          task_relation: { child_task_ids: task.childIds },
+        })) } }));
+      }
+      return { store, env, snap: httpSnapshot, disposeTaskMonitor };
     } catch (error) {
       input.signal.throwIfAborted();
       if (input.httpStrict) throw new StepError('HTTP task_list failed before any mission mutation: ' + (error instanceof Error ? error.message : 'HTTP_ERROR'), await dump(page, 'http_task_list_failed'));
@@ -325,11 +352,17 @@ async function bootstrap(
 
   if (!snap && remaining() > 0) {
     log('   ℹ️  Chưa thấy task_list — mở popover nhiệm vụ để kích hoạt');
-    await withTaskPopover(page, async () => { snap = await tryGet(remaining()); }, log, {
+    const popoverDeadlineAt = deadlineAt - BOOTSTRAP_RECOVERY_MS;
+    await withTaskPopover(page, async () => {
+      snap = await tryGet(Math.max(0, popoverDeadlineAt - Date.now()));
+    }, log, {
       signal: input.signal,
-      deadlineAt,
+      deadlineAt: popoverDeadlineAt,
       ui: env.ui
-    }).catch(() => { input.signal.throwIfAborted(); });
+    }).catch((error: unknown) => {
+      input.signal.throwIfAborted();
+      if (isDomReadTimeout(error)) throw error;
+    });
     snap = store.snapshot();
   }
 
@@ -349,7 +382,11 @@ async function bootstrap(
     );
   }
 
-  return { store, env, snap };
+  return { store, env, snap, disposeTaskMonitor };
+  } catch (error) {
+    disposeTaskMonitor();
+    throw error;
+  }
 }
 
 /**
@@ -371,27 +408,52 @@ async function claimPending(
   store: TaskStore,
   outcomes: Map<string, TaskOutcome>,
   log: (msg: string) => void,
-  signal: AbortSignal
-): Promise<number> {
+  signal: AbortSignal,
+  ui: AccountUiInteraction
+): Promise<TaskClaimResult & { claimedCount: number; fatalError?: Error }> {
   let claimed = 0;
+  let latestActionSettledAt: number | null = null;
   for (const t of snap.byKey.values()) {
     signal.throwIfAborted();
     if (t.status !== 2) continue;
     const o = outcomes.get(t.taskKey);
     log(`   🟡 ${t.title} (+${t.reward}) đang chờ nhận — bấm Claim`);
-    const ok = await claimIfPending(page, t, store, log, signal).catch((e: unknown) => {
+    let result: TaskClaimResult;
+    try {
+      result = await claimIfPending(page, t, store, log, signal, ui, (at) => {
+        latestActionSettledAt = Math.max(latestActionSettledAt ?? 0, at);
+      });
+      if (result.actionSettledAt !== null) {
+        latestActionSettledAt = Math.max(latestActionSettledAt ?? 0, result.actionSettledAt);
+      }
+    } catch (e: unknown) {
       signal.throwIfAborted();
+      if (isDomReadTimeout(e)) {
+        const error = e instanceof Error ? e : new Error(String(e));
+        if (o) o.error = error.message;
+        log(`      ❌ ${error.message}`);
+        return {
+          claimed: claimed > 0,
+          claimedCount: claimed,
+          actionSettledAt: latestActionSettledAt,
+          fatalError: error
+        };
+      }
       if (o) o.error = (e as Error).message;
       log(`      ❌ ${(e as Error).message}`);
-      return false;
-    });
-    if (ok) {
+      result = { claimed: false, actionSettledAt: null };
+    }
+    if (result.claimed) {
       if (o) o.done = true;
       claimed++;
       log(`      ✅ đã nhận ${t.title} (+${t.reward})`);
     }
   }
-  return claimed;
+  return {
+    claimed: claimed > 0,
+    claimedCount: claimed,
+    actionSettledAt: latestActionSettledAt
+  };
 }
 
 /**
@@ -400,6 +462,14 @@ async function claimPending(
  * `runGroup`, và `runGroup` chỉ chấp nhận `do_action` với `err_no === 0`.
  */
 export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult> {
+  if (!input.ui) throw new Error('UI_INTERACTION_REQUIRED');
+
+  // Mặc định hoàn thành 12 nhiệm vụ qua HTTP in-session (tốc độ cao, độ ổn định tuyệt đối).
+  // Chỉ chạy luồng UI legacy khi có cờ môi trường CAPCUT_LEGACY_UI_TASKS=1 hoặc khi caller chỉ định input.groups.
+  if (process.env.CAPCUT_LEGACY_UI_TASKS !== '1' && !input.groups) {
+    return executeHttpTasks(input);
+  }
+
   const { log } = input;
   const rounds = input.maxRounds ?? MAX_ATTEMPTS;
 
@@ -416,7 +486,12 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
   log('============================================================');
 
   input.captureStage?.('task-bootstrap');
-  const { store, env, snap: first } = await measureStage('task-bootstrap', () => bootstrap(input), log);
+  const { store, env, snap: first, disposeTaskMonitor } = await measureStage(
+    'task-bootstrap',
+    () => bootstrap(input),
+    log
+  );
+  try {
   let snap = first;
   log(
     `📋 CapCut có ${snap.byKey.size} nhiệm vụ | đã nhận ${snap.earnedReward}/${snap.totalReward} credits\n`
@@ -435,11 +510,13 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
 
   const groups = input.groups ?? GROUPS;
   const proofBacked = new Set<string>();
+  const proofMemory = new Map<string, UnsettledTaskProof>();
 
   if (input.unsettledProofs) {
     for (const item of input.unsettledProofs) {
       if (item.proof?.errNo === 0) {
         proofBacked.add(item.key);
+        proofMemory.set(item.key, item);
         const outcome = outcomes.get(item.key);
         if (outcome) {
           outcome.proof = item.proof;
@@ -447,6 +524,16 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
       }
     }
   }
+
+  const unsettledFor = (snapshot: TaskSnapshotSummary): UnsettledTaskProof[] => {
+    for (const item of buildUnsettledProofs(outcomes.values(), snapshot)) {
+      proofMemory.set(item.key, item);
+    }
+    for (const task of snapshot.tasks) {
+      if (task.status === 4) proofMemory.delete(task.key);
+    }
+    return [...proofMemory.values()];
+  };
 
   let requiredAfter = input.sessionStartedAt ?? 0;
   const emitCheckpoint = async (isFinal: boolean, actionSettledAt?: number): Promise<void> => {
@@ -458,7 +545,8 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
     if (input.onCheckpoint) {
       await input.onCheckpoint({
         outcomes: [...outcomes.values()],
-        snapshot: checkpointSummary
+        snapshot: checkpointSummary,
+        unsettledProofs: unsettledFor(checkpointSummary)
       });
     }
   };
@@ -501,7 +589,7 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
       return {
         outcomes: [...outcomes.values()],
         snapshot: partialSummary,
-        unsettledProofs: buildUnsettledProofs(outcomes.values(), partialSummary)
+        unsettledProofs: unsettledFor(partialSummary)
       };
     }
   }
@@ -510,8 +598,25 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
     input.signal.throwIfAborted();
     // Nhận trước những nhiệm vụ đã đủ điều kiện, để chúng rụng khỏi danh sách
     // thay vì bắt cả nhóm chờ vô ích một do_action đã bắn từ trước.
-    if (await claimPending(env.page, snap, store, outcomes, log, input.signal)) {
-      snap = await store.waitForSnapshot(Date.now() - 5000, 30_000, input.signal).catch(() => {
+    const claim = input.rewardVerification
+      ? { claimed: false, claimedCount: 0, actionSettledAt: null }
+      : await claimPending(env.page, snap, store, outcomes, log, input.signal, env.ui);
+    if (claim.actionSettledAt !== null) {
+      requiredAfter = Math.max(requiredAfter, claim.actionSettledAt);
+    }
+    if (claim.fatalError) {
+      const fatalSummary = summarize(snap, snap.at, requiredAfter);
+      fatalSummary.final = false;
+      await emitCheckpoint(false);
+      return {
+        outcomes: [...outcomes.values()],
+        snapshot: fatalSummary,
+        fatalError: claim.fatalError,
+        unsettledProofs: unsettledFor(fatalSummary)
+      };
+    }
+    if (claim.claimedCount > 0) {
+      snap = await store.waitForSnapshot(requiredAfter, 30_000, input.signal).catch(() => {
         input.signal.throwIfAborted();
         return snap;
       });
@@ -533,14 +638,25 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
         return {
           outcomes: [...outcomes.values()],
           snapshot: closedSummary,
-          unsettledProofs: buildUnsettledProofs(outcomes.values(), closedSummary)
+          unsettledProofs: unsettledFor(closedSummary)
         };
       }
 
       log(`\n📌 ${group.name}`);
       input.captureStage?.('mission:' + group.name);
       log(`   cần: ${[...need].join(', ')}`);
-      const result = await runGroup(group, env, store, need);
+      const result = input.rewardVerification
+        ? {
+            evidence: new Map([...need].map((key) => [key, {
+              key,
+              state: 'failed' as const,
+              error: new Error('REWARD_LEAF_BOUNDARY_REQUIRED')
+            }])),
+            snapshot: store.snapshot(),
+            actionSettledAt: Date.now(),
+            fatalError: undefined
+          }
+        : await runGroup(group, env, store, need);
       if (result.snapshot) snap = result.snapshot;
       mergeGroupEvidence(outcomes, proofBacked, result.evidence, log);
       if (result.actionSettledAt) {
@@ -554,7 +670,7 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
           outcomes: [...outcomes.values()],
           snapshot: fatalSummary,
           fatalError: result.fatalError,
-          unsettledProofs: buildUnsettledProofs(outcomes.values(), fatalSummary)
+          unsettledProofs: unsettledFor(fatalSummary)
         };
       }
 
@@ -602,20 +718,27 @@ export async function runAllTasks(input: RunTasksInput): Promise<RunTasksResult>
 
   const fresh = snap.at > requiredAfter;
   const finalSummary = summarize(snap, snap.at, requiredAfter);
+  const allAttemptedMutationsProven = [...outcomes.values()].every(
+    (outcome) => outcome.attempts === 0 || outcome.proof?.errNo === 0
+  );
   finalSummary.fresh = fresh;
-  finalSummary.final = fresh && finalSummary.missing.length === 0;
+  finalSummary.final = fresh && finalSummary.missing.length === 0 && allAttemptedMutationsProven;
   finalSummary.stale = stale;
 
   if (input.onCheckpoint) {
     await input.onCheckpoint({
       outcomes: [...outcomes.values()],
-      snapshot: finalSummary
+      snapshot: finalSummary,
+      unsettledProofs: unsettledFor(finalSummary)
     });
   }
 
   return {
     outcomes: [...outcomes.values()],
     snapshot: finalSummary,
-    unsettledProofs: buildUnsettledProofs(outcomes.values(), finalSummary)
+    unsettledProofs: unsettledFor(finalSummary)
   };
+  } finally {
+    disposeTaskMonitor();
+  }
 }

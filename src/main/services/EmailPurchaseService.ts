@@ -9,6 +9,8 @@ import { AutomationTerminalError } from './AutomationTerminalError';
 import type { DongVanCodeResult, DongVanPurchasedMail } from '../providers/DongVanFBProvider';
 import { buildCustomDomainAddress, generateMailUsernames } from './mailUsername';
 import type { CustomEmailSettingsDTO } from '../../shared/schemas/settings.schema';
+import type { ObservationIdentity, ObservationScope } from '../providers/ObservedHttpClient';
+import type { AccountMutationPort } from '../repositories/AccountMutationRepository';
 import {
   CAPCUT_OTP_SERVICE,
   EmailApiProviderEnum,
@@ -40,13 +42,41 @@ export interface EmailCapacitySnapshot {
 export interface ReservedEmail {
   purchasedEmail: PurchasedEmailDTO;
   reservationId: string;
+  ownerRef?: string;
+}
+
+export interface AcquisitionIdentity {
+  ownerRef: string;
+  runId: string;
+  stepAttemptId: string;
+}
+
+export interface DiagnosticMutationContext {
+  repository: AccountMutationPort & { bindMailbox(ownerRef: string, mailboxRef: string): void };
+  authorityRef: string;
+  budgetOwnerRef: string;
+}
+
+export interface BillablePurchaseStats {
+  budget: number;
+  attempted: number;
+  confirmed: number;
+  ambiguous: number;
+}
+
+export interface BillablePurchaseEvent {
+  provider: 'gmail94' | 'dongvanfb';
+  outcome: 'attempted' | 'confirmed' | 'ambiguous';
+  stats: BillablePurchaseStats;
 }
 
 export interface EmailAcquisitionSession {
   readonly capacity?: EmailCapacitySnapshot;
-  acquireOne(workerId: string, signal: AbortSignal): Promise<ReservedEmail>;
+  acquireOne(workerId: string, signal: AbortSignal, identity?: AcquisitionIdentity): Promise<ReservedEmail>;
+  bindAccount?(reservation: ReservedEmail, accountId: string): void;
   commit(reservation: ReservedEmail, accountId: string): void;
   release(reservation: ReservedEmail): void;
+  purchaseStats(): BillablePurchaseStats;
 }
 
 /** The slice of Gmail94Provider used to rent mailboxes and read codes. */
@@ -89,12 +119,16 @@ export interface PurchaseOptions {
   service?: string;
   accountType?: number | string;
   quality?: number | string;
+  maxBillablePurchases: number;
+  onPurchaseEvent?: (event: BillablePurchaseEvent) => void;
 }
 
 export interface EmailPurchaseServiceDeps {
   nextId?: () => string;
   /** Current catch-all domain settings, read fresh so a Settings change applies. */
   customEmail?: () => CustomEmailSettingsDTO;
+  observation?: ObservationScope;
+  mutationContext?: DiagnosticMutationContext;
 }
 
 const FALLBACK_CUSTOM_EMAIL: CustomEmailSettingsDTO = {
@@ -114,6 +148,8 @@ export class EmailPurchaseService {
   private readonly secrets: SecretReader;
   private readonly customEmail: () => CustomEmailSettingsDTO;
   private readonly acquisitionTails = new Map<EmailSourceProvider, Promise<void>>();
+  private readonly observation?: ObservationScope;
+  private readonly mutationContext?: DiagnosticMutationContext;
 
   constructor(
     private readonly credRepo: CredentialRepository,
@@ -125,6 +161,12 @@ export class EmailPurchaseService {
     this.nextId = deps.nextId ?? (() => crypto.randomUUID());
     this.secrets = new SecretReader(credRepo, vault);
     this.customEmail = deps.customEmail ?? (() => FALLBACK_CUSTOM_EMAIL);
+    this.observation = deps.observation;
+    this.mutationContext = deps.mutationContext;
+  }
+
+  private observe<T>(identity: Readonly<ObservationIdentity>, operation: () => Promise<T>): Promise<T> {
+    return this.observation?.withObservationScope(identity, operation) ?? operation();
   }
 
   private async exclusive<T>(
@@ -167,65 +209,6 @@ export class EmailPurchaseService {
     }
   }
 
-  private wait(ms: number, signal: AbortSignal): Promise<void> {
-    if (signal.aborted) return Promise.reject(signal.reason ?? new Error('Aborted'));
-    return new Promise<void>((resolve, reject) => {
-      let timer: NodeJS.Timeout | null = null;
-      function cleanup(): void {
-        if (timer) clearTimeout(timer);
-        signal.removeEventListener('abort', onAbort);
-      }
-      function onAbort(): void {
-        cleanup();
-        reject(signal.reason ?? new Error('Aborted'));
-      }
-      timer = setTimeout(() => {
-        cleanup();
-        resolve();
-      }, ms);
-      signal.addEventListener('abort', onAbort, { once: true });
-    });
-  }
-
-  private async createGmail94OrderWithRetry(
-    token: string,
-    service: string,
-    signal: AbortSignal
-  ): Promise<{ email: string; orderId: string }> {
-    const delays = [0, 500, 1500];
-
-    for (let attempt = 0; attempt < delays.length; attempt += 1) {
-      signal.throwIfAborted();
-      const delay = delays[attempt];
-      if (delay > 0) {
-        await this.wait(delay, signal);
-      }
-      signal.throwIfAborted();
-
-      try {
-        return await this.apis.gmail94.createOtpOrder(token, service);
-      } catch (err: unknown) {
-        const isTransient =
-          err instanceof ProviderError &&
-          (err.code === 'NETWORK_ERROR' || err.code === 'RATE_LIMITED');
-
-        if (!isTransient) {
-          throw err;
-        }
-      }
-    }
-
-    throw new AutomationTerminalError(
-      'blocked',
-      {
-        code: 'PROVIDER_RETRY_EXHAUSTED',
-        provider: 'gmail94',
-        details: { attempts: delays.length }
-      },
-      'Gmail94 mua email vượt quá số lần thử lại.'
-    );
-  }
-
   private async preflightGmail94(
     initialConcurrency: number,
     signal: AbortSignal
@@ -234,8 +217,10 @@ export class EmailPurchaseService {
     const serviceSlug = CAPCUT_OTP_SERVICE;
     const token = this.readApiKey('gmail94');
     const [profile, services] = await Promise.all([
-      this.apis.gmail94.getProfile(token),
-      this.apis.gmail94.listServices()
+      this.observe({ provider: 'gmail94', operation: 'profile' }, () =>
+        this.apis.gmail94.getProfile(token)),
+      this.observe({ provider: 'gmail94', operation: 'service-list' }, () =>
+        this.apis.gmail94.listServices())
     ]);
     signal.throwIfAborted();
     const service = services.find((entry) => entry.slug === serviceSlug);
@@ -294,9 +279,23 @@ export class EmailPurchaseService {
   async openAcquisitionSession(
     provider: EmailSourceProvider,
     initialConcurrency: number,
-    options: PurchaseOptions = {},
+    options: PurchaseOptions,
     signal: AbortSignal
   ): Promise<EmailAcquisitionSession> {
+    const purchaseProvider = provider === 'gmail94' || provider === 'dongvanfb'
+      ? provider
+      : null;
+    if (
+      purchaseProvider !== null &&
+      (!Number.isInteger(options.maxBillablePurchases) || options.maxBillablePurchases < 0)
+    ) {
+      throw new ProviderError(
+        'CONFIG_ERROR',
+        'Giới hạn mua email phải là số nguyên không âm.',
+        purchaseProvider
+      );
+    }
+
     const capacity = provider === 'gmail94'
       ? await this.preflightGmail94(initialConcurrency, signal)
       : undefined;
@@ -306,10 +305,133 @@ export class EmailPurchaseService {
     const gmailServiceSlug = CAPCUT_OTP_SERVICE;
     const unitPrice = capacity?.unitPrice ?? 0;
     let remainingAffordablePurchases = capacity?.affordablePurchaseCount ?? 0;
+    const stats: BillablePurchaseStats = {
+      budget: purchaseProvider === null ? 0 : options.maxBillablePurchases,
+      attempted: 0,
+      confirmed: 0,
+      ambiguous: 0
+    };
+    let purchaseAccountingFailure: AutomationTerminalError | null = null;
 
-    const acquireOne = async (workerId: string, workerSignal: AbortSignal): Promise<ReservedEmail> => {
+    const purchaseStats = (): BillablePurchaseStats => ({ ...stats });
+    const emitPurchaseEvent = (outcome: BillablePurchaseEvent['outcome']): void => {
+      if (purchaseProvider === null) return;
+      options.onPurchaseEvent?.({
+        provider: purchaseProvider,
+        outcome,
+        stats: purchaseStats()
+      });
+    };
+    const poisonPurchaseAccounting = (): AutomationTerminalError => {
+      purchaseAccountingFailure ??= new AutomationTerminalError(
+        'failed',
+        {
+          code: 'INTERNAL_ERROR',
+          provider: purchaseProvider ?? undefined
+        },
+        'Không thể ghi nhận sự kiện mua email; phiên mua đã dừng an toàn.'
+      );
+      return purchaseAccountingFailure;
+    };
+    const assertPurchaseBudget = (): void => {
+      if (purchaseProvider === null || stats.attempted < stats.budget) return;
+      throw new AutomationTerminalError(
+        'blocked',
+        {
+          code: 'BILLABLE_PURCHASE_LIMIT_REACHED',
+          provider: purchaseProvider,
+          details: {
+            budget: stats.budget,
+            attempted: stats.attempted,
+            confirmed: stats.confirmed,
+            ambiguous: stats.ambiguous
+          }
+        },
+        'Đã dùng hết giới hạn mua email của lượt chạy.'
+      );
+    };
+    const beginPurchase = (): void => {
+      assertPurchaseBudget();
+      stats.attempted += 1;
+      try {
+        emitPurchaseEvent('attempted');
+      } catch {
+        stats.attempted -= 1;
+        throw poisonPurchaseAccounting();
+      }
+    };
+    const confirmPurchase = (): void => {
+      stats.confirmed += 1;
+      try {
+        emitPurchaseEvent('confirmed');
+      } catch {
+        throw poisonPurchaseAccounting();
+      }
+    };
+    const ambiguousPurchase = (): AutomationTerminalError => {
+      stats.ambiguous += 1;
+      try {
+        emitPurchaseEvent('ambiguous');
+      } catch {
+        return poisonPurchaseAccounting();
+      }
+      return new AutomationTerminalError(
+        'blocked',
+        {
+          code: 'PURCHASE_OUTCOME_UNKNOWN',
+          provider: purchaseProvider ?? undefined,
+          details: { attempts: 1 }
+        },
+        'Không xác định được kết quả mua email; đã dừng để tránh mua trùng.'
+      );
+    };
+    const isDefinitiveProviderFailure = (error: unknown): error is ProviderError => {
+      return error instanceof ProviderError && (
+        error.code === 'AUTH_ERROR' ||
+        error.code === 'CONFIG_ERROR' ||
+        error.code === 'PROVIDER_NOT_IMPLEMENTED'
+      );
+    };
+
+    const acquireOne = async (workerId: string, workerSignal: AbortSignal, providedIdentity?: AcquisitionIdentity): Promise<ReservedEmail> => {
       return this.exclusive(provider, workerSignal, async () => {
+        if (purchaseAccountingFailure) throw purchaseAccountingFailure;
         const reservationId = workerId + ':' + this.nextId();
+        const mutationIdentity = this.mutationContext
+          ? (providedIdentity ?? (() => { throw new AutomationTerminalError(
+              'blocked', { code: 'PROVIDER_CONFIG_ERROR' },
+              'Thiếu identity bền vững cho fence mua email.'
+            ); })())
+          : undefined;
+        const recordPurchaseIntent = (): void => {
+          if (!mutationIdentity || !this.mutationContext) return;
+          this.mutationContext.repository.recordIntent({
+            authorityRef: this.mutationContext.authorityRef,
+            budgetOwnerRef: this.mutationContext.budgetOwnerRef,
+            ownerRef: mutationIdentity.ownerRef,
+            accountId: null,
+            runId: mutationIdentity.runId,
+            sessionAlias: null,
+            stepAttemptId: mutationIdentity.stepAttemptId,
+            stepId: 'email-purchase',
+            taskKey: null,
+            operation: 'purchase',
+            operationKey: `purchase:${mutationIdentity.ownerRef}:${mutationIdentity.stepAttemptId}`,
+            intentAt: new Date().toISOString(),
+            state: 'outcome-unknown',
+            evidenceRef: null
+          }, 1);
+        };
+        const settlePurchase = (purchasedEmailId: string): void => {
+          if (!mutationIdentity || !this.mutationContext) return;
+          this.mutationContext.repository.bindMailbox(mutationIdentity.ownerRef, purchasedEmailId);
+          this.mutationContext.repository.settleIntent(
+            mutationIdentity.ownerRef,
+            mutationIdentity.stepAttemptId,
+            'effect-confirmed',
+            `purchase:${purchasedEmailId}`
+          );
+        };
 
         if (provider === 'gmail94') {
           const reusable = this.purchasedRepo.reserveOldestAvailable(
@@ -323,9 +445,13 @@ export class EmailPurchaseService {
             throw new Error('Gmail94 acquisition session lost its credential.');
           }
 
+          assertPurchaseBudget();
           if (remainingAffordablePurchases <= 0) {
             workerSignal.throwIfAborted();
-            const refreshedProfile = await this.apis.gmail94.getProfile(gmailToken);
+            const refreshedProfile = await this.observe(
+              { provider: 'gmail94', operation: 'profile' },
+              () => this.apis.gmail94.getProfile(gmailToken)
+            );
             const refreshedBalance = refreshedProfile.balance;
             if (refreshedBalance === null || !Number.isFinite(refreshedBalance) || refreshedBalance < 0) {
               throw new ProviderError('CONFIG_ERROR', 'Gmail94 không trả về số dư hợp lệ.', 'gmail94');
@@ -351,16 +477,21 @@ export class EmailPurchaseService {
           }
 
           workerSignal.throwIfAborted();
+          assertPurchaseBudget();
+          recordPurchaseIntent();
+          beginPurchase();
           let order: { email: string; orderId: string };
           try {
-            order = await this.createGmail94OrderWithRetry(
-              gmailToken,
-              gmailServiceSlug,
-              workerSignal
+            order = await this.observe(
+              { provider: 'gmail94', operation: 'mailbox-purchase' },
+              () => this.apis.gmail94.createOtpOrder(gmailToken, gmailServiceSlug)
             );
           } catch (err: unknown) {
             if (err instanceof ProviderError && err.code === 'INSUFFICIENT_FUNDS') {
-              const refreshedProfile = await this.apis.gmail94.getProfile(gmailToken).catch(() => null);
+              const refreshedProfile = await this.observe(
+                { provider: 'gmail94', operation: 'profile' },
+                () => this.apis.gmail94.getProfile(gmailToken)
+              ).catch(() => null);
               const refreshedBalance = refreshedProfile?.balance ?? 0;
               const affordable = Math.floor(refreshedBalance / unitPrice);
               throw new AutomationTerminalError(
@@ -377,9 +508,18 @@ export class EmailPurchaseService {
                 'Số dư Gmail94 không đủ.'
               );
             }
-            throw err;
+            if (isDefinitiveProviderFailure(err)) throw err;
+            throw ambiguousPurchase();
+          }
+          if (
+            typeof order?.email !== 'string' || order.email.length === 0 ||
+            typeof order.orderId !== 'string' || order.orderId.length === 0
+          ) {
+            throw ambiguousPurchase();
           }
 
+          remainingAffordablePurchases -= 1;
+          confirmPurchase();
           const purchasedEmail = this.purchasedRepo.insertReserved({
             id: this.nextId(),
             provider: 'gmail94',
@@ -387,8 +527,8 @@ export class EmailPurchaseService {
             orderId: order.orderId,
             service: gmailServiceSlug
           }, reservationId);
-          remainingAffordablePurchases -= 1;
-          return { purchasedEmail, reservationId };
+          settlePurchase(purchasedEmail.id);
+          return { purchasedEmail, reservationId, ...(mutationIdentity ? { ownerRef: mutationIdentity.ownerRef } : {}) };
         }
 
         if (provider === 'dongvanfb') {
@@ -403,21 +543,42 @@ export class EmailPurchaseService {
           const accountType = options.accountType ?? DEFAULT_DONGVAN_ACCOUNT_TYPE;
           const quality = options.quality ?? DEFAULT_DONGVAN_QUALITY;
 
-          const mails = await this.apis.dongvanfb.buyMail(apiKey, {
-            accountType,
-            quality,
-            type: 'full'
-          });
-          const mail = mails[0];
-          if (!mail) {
-            throw new ProviderError('NETWORK_ERROR', 'DongVanFB không trả về tài khoản nào.', 'dongvanfb');
+          assertPurchaseBudget();
+          recordPurchaseIntent();
+          beginPurchase();
+          let mails: DongVanPurchasedMail[];
+          try {
+            mails = await this.observe(
+              { provider: 'dongvanfb', operation: 'mailbox-purchase' },
+              () => this.apis.dongvanfb.buyMail(apiKey, {
+                accountType,
+                quality,
+                type: 'full'
+              })
+            );
+          } catch (err: unknown) {
+            if (
+              err instanceof ProviderError &&
+              (err.code === 'AUTH_ERROR' || err.code === 'PROVIDER_NOT_IMPLEMENTED')
+            ) {
+              throw err;
+            }
+            throw ambiguousPurchase();
           }
+          const mail = mails[0];
+          if (!mail || typeof mail.email !== 'string' || mail.email.length === 0) {
+            throw ambiguousPurchase();
+          }
+          confirmPurchase();
 
           let refreshToken = mail.refreshToken;
           let clientId = mail.clientId;
           if ((!refreshToken || !clientId) && mail.password) {
             workerSignal.throwIfAborted();
-            const pair = await this.apis.dongvanfb.getOauth2(apiKey, mail.email, mail.password);
+            const pair = await this.observe(
+              { provider: 'dongvanfb', operation: 'oauth-exchange' },
+              () => this.apis.dongvanfb.getOauth2(apiKey, mail.email, mail.password!)
+            );
             refreshToken = pair.refreshToken;
             clientId = pair.clientId;
           }
@@ -434,8 +595,8 @@ export class EmailPurchaseService {
               [mail.email, mail.password ?? '', refreshToken ?? '', clientId ?? ''].join('|')
             )
           }, reservationId);
-
-          return { purchasedEmail, reservationId };
+          settlePurchase(purchasedEmail.id);
+          return { purchasedEmail, reservationId, ...(mutationIdentity ? { ownerRef: mutationIdentity.ownerRef } : {}) };
         }
 
         if (provider === 'customdomain') {
@@ -474,6 +635,12 @@ export class EmailPurchaseService {
       });
     };
 
+    const bindAccount = (reservation: ReservedEmail, accountId: string): void => {
+      if (reservation.ownerRef && this.mutationContext) {
+        this.mutationContext.repository.bindAccount(reservation.ownerRef, accountId);
+      }
+    };
+
     const commit = (reservation: ReservedEmail, accountId: string): void => {
       const consumed = this.purchasedRepo.consumeReserved(
         reservation.purchasedEmail.id,
@@ -496,7 +663,7 @@ export class EmailPurchaseService {
       );
     };
 
-    return { capacity, acquireOne, commit, release };
+    return { capacity, acquireOne, bindAccount, commit, release, purchaseStats };
   }
 
   private readApiKey(provider: EmailApiProvider): string {
@@ -526,9 +693,10 @@ export class EmailPurchaseService {
 
     if (secrets.provider === 'customdomain') {
       const settings = this.customEmail();
-      return this.apis.customdomain.readOtp(settings.apiBaseUrl, secrets.email, {
-        senderContains: settings.senderFilter
-      });
+      return this.observe({ provider: 'customdomain', operation: 'read-otp' }, () =>
+        this.apis.customdomain.readOtp(settings.apiBaseUrl, secrets.email, {
+          senderContains: settings.senderFilter
+        }));
     }
 
     const apiKey = this.readApiKey(secrets.provider);
@@ -541,7 +709,8 @@ export class EmailPurchaseService {
           'gmail94'
         );
       }
-      return this.apis.gmail94.readOtp(apiKey, secrets.orderId, secrets.service ?? type);
+      return this.observe({ provider: 'gmail94', operation: 'read-otp' }, () =>
+        this.apis.gmail94.readOtp(apiKey, secrets.orderId!, secrets.service ?? type));
     }
 
     if (!secrets.refreshTokenEncrypted || !secrets.clientId) {
@@ -555,10 +724,12 @@ export class EmailPurchaseService {
     const refreshToken = this.vault.decrypt(secrets.refreshTokenEncrypted);
     const params = { email: secrets.email, refreshToken, clientId: secrets.clientId, type };
 
-    const viaOauth2 = await this.apis.dongvanfb.readCode('oauth2', params);
+    const viaOauth2 = await this.observe({ provider: 'dongvanfb', operation: 'read-otp' }, () =>
+      this.apis.dongvanfb.readCode('oauth2', params));
     if (viaOauth2) return viaOauth2.code;
 
-    const viaGraph = await this.apis.dongvanfb.readCode('graph', params);
+    const viaGraph = await this.observe({ provider: 'dongvanfb', operation: 'read-otp' }, () =>
+      this.apis.dongvanfb.readCode('graph', params));
     return viaGraph ? viaGraph.code : null;
   }
 }

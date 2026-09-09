@@ -62,6 +62,7 @@ const stubWorkSources: AutomationWorkSourceFactory = {
       });
       return {
         kind: 'finite',
+      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
         prepare: async (c) => ({ workerTarget: Math.min(c, items.length) }),
         next: async () => items.shift() ?? null,
         commit: () => {},
@@ -79,6 +80,7 @@ const stubWorkSources: AutomationWorkSourceFactory = {
     ];
     return {
       kind: 'finite',
+      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
       prepare: async () => ({ workerTarget: 1 }),
       next: async () => items.shift() ?? null,
       commit: () => {},
@@ -189,7 +191,8 @@ function baseConfig(overrides: Partial<AutomationRunConfigDTO> = {}): Automation
     proxy: { mode: 'direct', entries: [] },
     password: { mode: 'random', length: 12, uppercase: true, numbers: true, special: false },
     testDurationMs: 0,
-    ...overrides
+    ...overrides,
+    maxBillablePurchases: (overrides.emailSource?.mode ?? 'api') === 'api' ? 10 : 0
   });
 }
 

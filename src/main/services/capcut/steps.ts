@@ -46,7 +46,7 @@ import {
   sleep,
   waitEnabled,
 } from './human';
-import { createDirectUiInteraction } from './uiInteractionScheduler';
+import { isDomReadTimeout } from './cancellation';
 
 import type { CapcutMissionEnv } from './types';
 import { URLS } from './urls';
@@ -133,24 +133,21 @@ export async function uploadImage(
   button: Locator | null,
   filePath: string,
   log: (m: string) => void,
-  options?: HumanInteractionOptions
+  options: HumanInteractionOptions
 ): Promise<boolean> {
+  options.signal.throwIfAborted();
   if (button && (await button.isVisible({ timeout: 3000 }).catch(() => false))) {
     try {
-      const humanOptions = options ?? {
-        signal: new AbortController().signal,
-        stage: 'upload-image',
-        ui: createDirectUiInteraction(new AbortController().signal),
-        log
-      };
       const [chooser] = await Promise.all([
         page.waitForEvent('filechooser', { timeout: 8000 }),
-        humanClick(page, button, humanOptions),
+        humanClick(page, button, options),
       ]);
       await chooser.setFiles(filePath);
       log('Đã upload ảnh qua hộp thoại chọn file');
       return true;
-    } catch {
+    } catch (error: unknown) {
+      options.signal.throwIfAborted();
+      if (isDomReadTimeout(error)) throw error;
       log('Không bắt được filechooser → chuyển sang setInputFiles');
     }
   }
@@ -181,11 +178,9 @@ export async function fillEditor(
   page: Page,
   editor: Locator,
   text: string,
-  perChar?: PerCharDelay,
-  options?: HumanInteractionOptions
+  perChar: PerCharDelay | undefined,
+  options: HumanInteractionOptions
 ): Promise<void> {
-  // The bounded click inside humanType already scrolls; avoid an unbounded pre-read.
-  if (!options) await editor.scrollIntoViewIfNeeded({ timeout: 4000 }).catch(() => {});
   await humanType(page, editor, text, perChar, options);
 }
 
@@ -195,8 +190,9 @@ export async function clickSend(
   scope: Locator | Page,
   log: (m: string) => void,
   timeoutMs = 20000,
-  options?: HumanInteractionOptions
+  options: HumanInteractionOptions
 ): Promise<boolean> {
+  options.signal.throwIfAborted();
   const send = ('locator' in scope ? scope.locator(S.send) : page.locator(S.send)).last();
 
   /**
@@ -211,23 +207,16 @@ export async function clickSend(
     return false;
   }
 
-  const humanOptions: HumanInteractionOptions = options ?? {
-    signal: new AbortController().signal,
-    stage: 'click-send',
-    ui: createDirectUiInteraction(new AbortController().signal),
-    log
-  };
-
-  if (!(await waitEnabled(send, timeoutMs, humanOptions.signal))) {
+  if (!(await waitEnabled(send, timeoutMs, options.signal))) {
     const shot = await dump(page, 'send_message_disabled');
     log(`⚠️  Nút Send vẫn disabled sau khi chờ → thử Enter — dump: ${shot ?? 'không ghi được'}`);
-    await foregroundPage(page, humanOptions, () =>
+    await foregroundPage(page, options, () =>
       page.keyboard.press('Enter')
     );
     return true;
   }
 
-  await humanClick(page, send, humanOptions);
+  await humanClick(page, send, options);
   log('Đã bấm Send message');
   return true;
 }
@@ -316,7 +305,7 @@ export async function stepInspirationTemplate(env: CapcutMissionEnv): Promise<Pa
       ui: env.ui,
       log: env.log,
     };
-    await foregroundPage(studio, studioOptions, () => studio.bringToFront());
+    await foregroundPage(studio, studioOptions, async () => {});
     await studio.waitForLoadState('domcontentloaded').catch(() => {});
     await studio.waitForTimeout(rand(1000, 2000));
     await dismissOverlays(studio, studioOptions);
@@ -383,7 +372,7 @@ export async function stepChatWithAgent(dp: Page, env: CapcutMissionEnv): Promis
     ui: env.ui,
     log: env.log,
   };
-  await foregroundPage(dp, humanOptions, () => dp.bringToFront());
+  await foregroundPage(dp, humanOptions, async () => {});
   await dismissOverlays(dp, humanOptions);
 
   const panel = dp.locator(S.chatPanel).first();

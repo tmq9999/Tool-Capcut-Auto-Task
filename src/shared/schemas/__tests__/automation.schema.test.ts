@@ -10,6 +10,7 @@ import { AccountStatusEnum } from '../account.schema';
 
 const baseConfig = {
   threadCount: 3,
+  maxBillablePurchases: 3,
   browser: 'multilogin' as const,
   headless: false,
   retryCount: 3,
@@ -30,7 +31,7 @@ describe('automation.schema', () => {
     expect(AutomationRunConfigSchema.parse({ ...baseConfig, missionTransport: 'http-only' }).missionTransport).toBe('http-only');
     expect(AutomationRunConfigSchema.safeParse({ ...baseConfig, missionTransport: 'hybrid' }).success).toBe(false);
   });
-  it('accepts old configs and validates explicit mailbox caps', () => {
+  it('accepts budgeted configs and validates explicit mailbox caps', () => {
     expect(AutomationRunConfigSchema.safeParse(baseConfig).success).toBe(true);
     for (const mailLimit of [0, 1, 3, 200]) {
       expect(AutomationRunConfigSchema.parse({ ...baseConfig, mailLimit }).mailLimit).toBe(mailLimit);
@@ -69,6 +70,7 @@ describe('automation.schema', () => {
   it('accepts manual email entries without a provider', () => {
     const parsed = AutomationRunConfigSchema.parse({
       ...baseConfig,
+      maxBillablePurchases: 0,
       emailSource: { mode: 'manual', entries: ['a@b.com|pass1', 'c@d.com|pass2'] }
     });
     expect(parsed.emailSource.mode).toBe('manual');
@@ -78,6 +80,7 @@ describe('automation.schema', () => {
     const parsed = AutomationRunConfigSchema.parse({
       ...baseConfig,
       module: 'credit',
+      maxBillablePurchases: 0,
       emailSource: {
         mode: 'manual',
         entries: ['good@example.com', '', 'bad-line']
@@ -315,6 +318,7 @@ describe('AutomationEvidenceEventSchema', () => {
     expect(
       AutomationRunConfigSchema.safeParse({
         ...baseConfig,
+        maxBillablePurchases: 0,
         emailSource: { mode: 'existing', accountIds: [] }
       }).success
     ).toBe(false);
@@ -323,6 +327,7 @@ describe('AutomationEvidenceEventSchema', () => {
     expect(
       AutomationRunConfigSchema.safeParse({
         ...baseConfig,
+        maxBillablePurchases: 0,
         emailSource: { mode: 'existing', accountIds: ['acc-1', 'acc-1'] }
       }).success
     ).toBe(false);
@@ -332,6 +337,7 @@ describe('AutomationEvidenceEventSchema', () => {
     expect(
       AutomationRunConfigSchema.safeParse({
         ...baseConfig,
+        maxBillablePurchases: 0,
         emailSource: { mode: 'existing', accountIds: twentyOne }
       }).success
     ).toBe(false);
@@ -339,6 +345,7 @@ describe('AutomationEvidenceEventSchema', () => {
     // valid 3 items
     const valid = AutomationRunConfigSchema.safeParse({
       ...baseConfig,
+      maxBillablePurchases: 0,
       emailSource: { mode: 'existing', accountIds: ['acc-1', 'acc-2', 'acc-3'] }
     });
     expect(valid.success).toBe(true);
@@ -347,5 +354,4 @@ describe('AutomationEvidenceEventSchema', () => {
     }
   });
 });
-
 

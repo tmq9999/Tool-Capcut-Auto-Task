@@ -29,13 +29,17 @@ import { runLogRetentionCleanup } from './runtime/logRetention';
 import { createShutdownManager, type SafeDiagnosticLogger, type ShutdownManager } from './lifecycle';
 import { startPrimaryInstance } from './singleInstance';
 import { recoverStaleEmailReservations } from './startupRecovery';
+import { configureRolloutUserData } from './rolloutUserData';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Handle creating/removing shortcuts on Windows when installing/uninstalling.
+// Configure rollout user data directory before any storage or windows are opened
+configureRolloutUserData(app);
+
+app.setName('CapCut Automation');
 if (process.platform === 'win32') {
-  app.setAppUserModelId(app.getName());
+  app.setAppUserModelId('com.capcut.automation');
 }
 
 export type MainInitStage =
@@ -83,13 +87,18 @@ const staticLogger: SafeDiagnosticLogger = {
 };
 
 function createWindow(): void {
+  const iconPath = process.platform === 'win32'
+    ? path.join(__dirname, '../build/icon.ico')
+    : path.join(__dirname, '../build/icon.png');
+
   mainWindow = new BrowserWindow({
     width: 1480,
     height: 920,
     minWidth: 1200,
     minHeight: 760,
     backgroundColor: '#0F1115',
-    title: 'AutoManager Enterprise',
+    title: 'CapCut Automation',
+    icon: iconPath,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,

@@ -3,6 +3,7 @@ import type { Page } from 'playwright-core';
 import { closeTaskPopover, runGroup, withTaskPopover } from '../missionRunner';
 import { TaskStore } from '../taskApi';
 import { ensurePageUsable } from '../overlays';
+import { createDirectUiInteraction } from '../uiInteractionScheduler';
 
 vi.mock('../overlays', () => ({ ensurePageUsable: vi.fn(async () => true) }));
 vi.mock('../diag', async (original) => ({
@@ -23,14 +24,21 @@ function pinnedPopover() {
 
 it('does not reload away the PWA deferred prompt after Go', async () => {
   const page = pinnedPopover();
-  const result = await withTaskPopover(page as unknown as Page, async () => 'clicked', () => {});
+  const signal = new AbortController().signal;
+  const result = await withTaskPopover(
+    page as unknown as Page,
+    async () => 'clicked',
+    () => {},
+    { signal, ui: createDirectUiInteraction(signal) }
+  );
   expect(result).toBe('clicked');
   expect(page.reload).not.toHaveBeenCalled();
 });
 
 it('does not click background Inspiration cards when Escape leaves the popover pinned', async () => {
   const page = pinnedPopover();
-  const closed = await closeTaskPopover(page as unknown as Page, false);
+  const signal = new AbortController().signal;
+  const closed = await closeTaskPopover(page as unknown as Page, false, signal, createDirectUiInteraction(signal));
   expect(closed).toBe(false);
   expect(page.mouse.click).not.toHaveBeenCalled();
   expect(page.reload).not.toHaveBeenCalled();
@@ -41,9 +49,11 @@ it('blocks mission actions when the overlay guard reports unusable', async () =>
   const act = vi.fn(async () => {});
   const page = pinnedPopover();
   page.evaluate.mockResolvedValue(0);
-  const run = runGroup({ name: 'covered', keys: ['pwa'], proofTimeoutMs: 1, act }, {
-    page: page as unknown as Page, context: {} as never, signal: new AbortController().signal,
-    log: () => {}, sampleImage: 'sample.png'
+  const signal = new AbortController().signal;
+  const run = runGroup({ id: 'pwa-install', workspace: 'none', name: 'covered', keys: ['pwa'], proofTimeoutMs: 1, act }, {
+    page: page as unknown as Page, context: {} as never, signal,
+    log: () => {}, sampleImage: 'sample.png',
+    ui: createDirectUiInteraction(signal)
   }, new TaskStore(), new Set(['pwa']));
   await expect(run).rejects.toThrow(/modal|phủ|overlay/i);
   expect(act).not.toHaveBeenCalled();
@@ -63,7 +73,12 @@ describe('popover activation budget', () => {
       isClosed: () => false, waitForTimeout: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
     } as unknown as Page;
     const act = vi.fn(async () => {});
-    const operation = withTaskPopover(page, act, () => {}, { deadlineAt: Date.now() + 1000, signal: new AbortController().signal });
+    const signal = new AbortController().signal;
+    const operation = withTaskPopover(page, act, () => {}, {
+      deadlineAt: Date.now() + 1000,
+      signal,
+      ui: createDirectUiInteraction(signal)
+    });
     let settled = false;
     const outcome = operation.catch((error: unknown) => error).then((value) => { settled = true; return value; });
     await vi.advanceTimersByTimeAsync(1100);

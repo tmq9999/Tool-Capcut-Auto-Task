@@ -19,6 +19,7 @@
  * =============================================================================
  */
 
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type { BrowserContext, Page } from 'playwright-core';
 
@@ -28,8 +29,8 @@ import { ensureInApp } from './capcut/auth';
 import { setDumpDir } from './capcut/diag';
 import { ensureSampleImage } from './capcut/image';
 import { PrimaryPageResolver } from './capcut/pageRecovery';
-import { runAllTasks, type TaskSnapshotSummary } from './capcut/runTasks';
-import { checkProTrial, isEligible, MIN_TRIAL_DAYS } from './capcut/trial';
+import { buildUnsettledProofs, runAllTasks, type TaskSnapshotSummary } from './capcut/runTasks';
+import { checkProTrial, isEligible } from './capcut/trial';
 import type {
   TaskOutcome,
   CapcutPace,
@@ -46,6 +47,8 @@ import { attachRedactedHttpCapture, type CaptureController } from './capcut/http
 import { CapcutHttpClient } from './capcut/http/CapcutHttpClient';
 import { CapcutHttpTaskApi } from './capcut/http/taskApi';
 import { attachPrivateCapture } from './capcut/http/privateCapture';
+import { SessionEvidenceBudget } from './capcut/evidenceBudget';
+import { attachTaskListDiagnostics } from './capcut/taskApi';
 
 /**
  * Từ `outcomes` + `snapshot` của `runAllTasks` thành các dòng tiến độ để lưu DB.
@@ -59,38 +62,56 @@ export function toTaskProgressRows(
   snapshot: TaskSnapshotSummary
 ): CapcutAccountResult['tasks'] {
   const outcomesByKey = new Map(outcomes.map((o) => [o.key, o]));
-  if (snapshot.tasks && snapshot.tasks.length > 0) {
-    return snapshot.tasks.map((task) => {
-      const outcome = outcomesByKey.get(task.key);
-      const row: CapcutAccountResult['tasks'][number] = {
-        key: task.key,
-        title: task.title,
-        reward: task.reward,
-        status: task.status
-      };
-      if (outcome?.proof) {
-        row.opId = outcome.proof.opId;
-        row.provedAt = new Date(outcome.proof.at).toISOString();
-      }
-      return row;
-    });
-  }
-
-  // Fallback for legacy fixtures without snapshot.tasks
-  const missing = new Set(snapshot.missing ?? []);
-  return outcomes.map((outcome) => {
+  return snapshot.tasks.map((task) => {
+    const outcome = outcomesByKey.get(task.key);
     const row: CapcutAccountResult['tasks'][number] = {
-      key: outcome.key,
-      title: outcome.title,
-      reward: outcome.reward,
-      status: missing.has(outcome.key) ? 1 : 4
+      key: task.key,
+      title: task.title,
+      reward: task.reward,
+      status: task.status
     };
-    if (outcome.proof) {
+    if (outcome?.proof) {
       row.opId = outcome.proof.opId;
       row.provedAt = new Date(outcome.proof.at).toISOString();
     }
     return row;
   });
+}
+
+function toVerificationReceipt(
+  snapshot: TaskSnapshotSummary,
+  runId: string,
+  sessionAlias: string
+): CapcutVerificationReceipt {
+  if (
+    !Number.isFinite(snapshot.observedAt) ||
+    !Number.isFinite(snapshot.requiredAfter) ||
+    typeof snapshot.fresh !== 'boolean' ||
+    typeof snapshot.final !== 'boolean' ||
+    !Array.isArray(snapshot.tasks)
+  ) {
+    throw new Error('UI_VERIFICATION_METADATA_REQUIRED');
+  }
+  const exactRows = snapshot.tasks.length === snapshot.total &&
+    new Set(snapshot.tasks.map((task) => task.key)).size === snapshot.tasks.length &&
+    snapshot.tasks.filter((task) => task.status === 4).length === snapshot.done;
+  return {
+    runId,
+    sessionAlias,
+    observedAt: new Date(snapshot.observedAt).toISOString(),
+    requiredAfter: new Date(snapshot.requiredAfter).toISOString(),
+    fresh: snapshot.fresh,
+    final: snapshot.final,
+    serverTotal: snapshot.total,
+    serverDone: snapshot.done,
+    complete: snapshot.fresh &&
+      snapshot.final &&
+      exactRows &&
+      snapshot.observedAt > snapshot.requiredAfter &&
+      snapshot.total > 0 &&
+      snapshot.done === snapshot.total &&
+      snapshot.missing.length === 0
+  };
 }
 
 export interface CapcutEngineOptions {
@@ -100,9 +121,8 @@ export interface CapcutEngineOptions {
    * Bỏ qua account không có ưu đãi Pro ≥ 7 ngày.
    *
    * Mặc định **false**: engine CLI bỏ qua, nhưng trong app thì bỏ qua âm thầm là
-   * mất account, và UI chưa có ô bật/tắt. Cổng trial vẫn **fail-open** — đọc
-   * không được thì coi như đủ điều kiện, vì lượt 02/09/2026 chứng minh rằng
-   * fail-closed sẽ âm thầm loại cả 21 account khi selector vỡ.
+   * mất account, và UI chưa có ô bật/tắt. Kết quả `unknown` do lỗi đọc trial
+   * luôn bị chặn rõ ràng; cờ này chỉ điều khiển kết quả `ineligible` đã đọc được.
    */
   skipWithoutTrial?: boolean;
   /** Nguồn OTP cho đường đăng ký; app nối vào `EmailPurchaseService`. */
@@ -159,26 +179,37 @@ export class CapcutEngineService implements CapcutTaskRunner {
     sessionAlias?: string;
     sessionStartedAt?: number;
     unsettledProofs?: readonly UnsettledTaskProof[];
-    ui?: AccountUiInteraction;
+    ui: AccountUiInteraction;
     onTaskCheckpoint?: (checkpoint: {
       rows: CapcutAccountResult['tasks'];
       receipt: CapcutVerificationReceipt;
+      unsettledProofs: readonly UnsettledTaskProof[];
     }) => Promise<void>;
   }): Promise<CapcutUiAccountResult> {
+    if (!input.ui) throw new Error('UI_INTERACTION_REQUIRED');
     input.signal.throwIfAborted();
     const { context, email, password, log } = input;
+    const evidenceBudget = new SessionEvidenceBudget();
     const privateCapture = process.env.CAPCUT_CAPTURE_PRIVATE === '1'
       ? await (async () => {
         const { safeStorage } = await import('electron');
         if (!safeStorage.isEncryptionAvailable()) throw new Error('PRIVATE_CAPTURE_ENCRYPTION_UNAVAILABLE');
-        return attachPrivateCapture(context, path.join(this.options.userDataDir, 'captures-private', input.accountId + '.enc'), text => safeStorage.encryptString(text));
+        return attachPrivateCapture(
+          context,
+          path.join(this.options.userDataDir, 'captures-private', input.accountId + '-' + (input.runId ?? randomUUID()) + '-' + randomUUID() + '.enc'),
+          text => safeStorage.encryptString(text),
+          { budget: evidenceBudget }
+        );
       })()
       : null;
     const capture: CaptureController | null = process.env.CAPCUT_CAPTURE_HTTP === '1'
-      ? attachRedactedHttpCapture(context, path.join(this.options.userDataDir, 'captures', input.accountId + '.ndjson'))
+      ? attachRedactedHttpCapture(context, path.join(this.options.userDataDir, 'captures', input.accountId + '-' + randomUUID() + '.ndjson'), { budget: evidenceBudget })
       : null;
     const captureStage = (stage: string) => { capture?.mark(stage); privateCapture?.mark(stage); };
     captureStage('signup');
+    const stopTaskDiagnostics = process.env.CAPCUT_DIAG_TASK_LIST === '1'
+      ? attachTaskListDiagnostics(context, input.signal, event => log('INFO', 'Task diagnostics', JSON.stringify(event)))
+      : undefined;
 
     try {
 
@@ -250,11 +281,32 @@ export class CapcutEngineService implements CapcutTaskRunner {
      * Câu để hiển thị, không phải object: `accounts.subscription` là một `string`
      * (AGENTS.md §15) và cột Subscription của bản xuất đọc thẳng từ đó.
      */
-    const subscription = isEligible(trial)
-      ? 'Pro trial ' + (trial.days || MIN_TRIAL_DAYS) + ' ngày'
-      : 'Không có ưu đãi';
-    if (isEligible(trial)) {
-      log('INFO', 'Ưu đãi', `Có trial Pro ${trial.days || MIN_TRIAL_DAYS} ngày`);
+    const eligible = isEligible(trial);
+    const subscription = trial.status === 'unknown'
+      ? 'Không xác định ưu đãi'
+      : eligible
+        ? 'Pro trial ' + trial.days + ' ngày'
+        : 'Không có ưu đãi';
+    if (trial.status === 'unknown') {
+      const trialError = trial.error ?? 'Không đọc được trạng thái ưu đãi';
+      log('ERROR', 'Ưu đãi', `${trialError} — chặn chạy nhiệm vụ`);
+      return {
+        authenticated: true,
+        done: 0,
+        total: 0,
+        credits: 0,
+        creditsTotal: 0,
+        missing: [],
+        skipped: true,
+        tasks: [],
+        subscription,
+        verification: null,
+        fatalError: trialError,
+        unsettledProofs: []
+      };
+    }
+    if (eligible) {
+      log('INFO', 'Ưu đãi', `Có trial Pro ${trial.days} ngày`);
     } else if (input.skipWithoutTrial ?? this.options.skipWithoutTrial) {
       log('WARNING', 'Ưu đãi', 'Không có ưu đãi dùng thử — bỏ qua account này theo cấu hình');
       return {
@@ -310,22 +362,16 @@ export class CapcutEngineService implements CapcutTaskRunner {
       onCheckpoint: async (checkpoint: TaskCheckpoint) => {
         if (!input.onTaskCheckpoint) return;
         const rows = toTaskProgressRows(checkpoint.outcomes, checkpoint.snapshot);
-        const obsAt = checkpoint.snapshot.observedAt ?? Date.now();
-        const reqAfter = checkpoint.snapshot.requiredAfter ?? sessionStartedAt;
-        const receipt: CapcutVerificationReceipt = {
-          runId: input.runId ?? 'run-local',
-          sessionAlias: input.sessionAlias ?? 'session-1',
-          observedAt: new Date(obsAt).toISOString(),
-          requiredAfter: new Date(reqAfter).toISOString(),
-          fresh: checkpoint.snapshot.fresh ?? true,
-          final: checkpoint.snapshot.final ?? (checkpoint.snapshot.done === checkpoint.snapshot.total && checkpoint.snapshot.total > 0 && checkpoint.snapshot.missing.length === 0),
-          serverTotal: checkpoint.snapshot.total,
-          serverDone: checkpoint.snapshot.done,
-          complete: checkpoint.snapshot.done === checkpoint.snapshot.total &&
-            checkpoint.snapshot.total > 0 &&
-            checkpoint.snapshot.missing.length === 0
-        };
-        await input.onTaskCheckpoint({ rows, receipt });
+        const receipt = toVerificationReceipt(
+          checkpoint.snapshot,
+          input.runId ?? 'run-local',
+          input.sessionAlias ?? 'session-1'
+        );
+        await input.onTaskCheckpoint({
+          rows,
+          receipt,
+          unsettledProofs: checkpoint.unsettledProofs ?? buildUnsettledProofs(checkpoint.outcomes, checkpoint.snapshot)
+        });
       }
     });
 
@@ -335,21 +381,11 @@ export class CapcutEngineService implements CapcutTaskRunner {
       throw new Error('Không đọc được task_list của CapCut nên không thể xác nhận kết quả.');
     }
 
-    const observedAtMs = snapshot.observedAt ?? Date.now();
-    const requiredAfterMs = snapshot.requiredAfter ?? sessionStartedAt;
-    const receipt: CapcutVerificationReceipt = {
-      runId: input.runId ?? 'run-local',
-      sessionAlias: input.sessionAlias ?? 'session-1',
-      observedAt: new Date(observedAtMs).toISOString(),
-      requiredAfter: new Date(requiredAfterMs).toISOString(),
-      fresh: snapshot.fresh ?? true,
-      final: snapshot.final ?? (snapshot.done === snapshot.total && snapshot.total > 0 && snapshot.missing.length === 0),
-      serverTotal: snapshot.total,
-      serverDone: snapshot.done,
-      complete: snapshot.done === snapshot.total &&
-        snapshot.total > 0 &&
-        snapshot.missing.length === 0
-    };
+    const receipt = toVerificationReceipt(
+      snapshot,
+      input.runId ?? 'run-local',
+      input.sessionAlias ?? 'session-1'
+    );
 
     const fatalCode: CapcutFatalCode | undefined = runResult.fatalError && isDomReadTimeout(runResult.fatalError)
       ? 'DOM_READ_TIMEOUT'
@@ -370,6 +406,7 @@ export class CapcutEngineService implements CapcutTaskRunner {
       unsettledProofs: runResult.unsettledProofs ?? []
     };
     } finally {
+      stopTaskDiagnostics?.();
       await capture?.stop();
       await privateCapture?.stop();
     }

@@ -12,6 +12,16 @@ function state(overrides: Partial<AutomationConfigState> = {}): AutomationConfig
   return { ...DEFAULT_AUTOMATION_CONFIG, ...overrides };
 }
 
+it('preserves mail limit from Dashboard through saved settings and run IPC', () => {
+  const config = state({ mailLimit: 3, emailSourceMode: 'api' });
+  const saved = toPersistedConfig(config);
+  expect(saved.mailLimit).toBe(3);
+  const restored = fromPersistedConfig(saved);
+  expect(restored.mailLimit).toBe(3);
+  expect(toRunConfig(restored)).toMatchObject({ ok: true, config: { mailLimit: 3 } });
+  expect(fromPersistedConfig({ ...saved, mailLimit: undefined }).mailLimit).toBe(0);
+});
+
 describe('clampConfigNumber', () => {
   /**
    * Audit 04/09/2026: ô `<Input type="number">` không có min/max và không kẹp giá
@@ -382,6 +392,7 @@ describe('lưu và nạp lại cấu hình', () => {
   it('giữ lại toàn bộ nút điều chỉnh không phải secret', () => {
     expect(toPersistedConfig(edited)).toEqual({
       threadCount: 25,
+      maxBillablePurchases: 0,
       browser: 'gologin',
       headless: true,
       retryCount: 1,

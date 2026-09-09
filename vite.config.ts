@@ -30,7 +30,8 @@ export default defineConfig({
                 const normalized = resolvedId.replace(/\\/g, '/');
                 return (
                   normalized.includes('/node_modules/better-sqlite3/') ||
-                  normalized.includes('/node_modules/playwright-core/')
+                  normalized.includes('/node_modules/playwright-core/') ||
+                  normalized.includes('/node_modules/ws/')
                 );
               },
             }),
@@ -46,9 +47,14 @@ export default defineConfig({
           build: {
             outDir: 'dist-electron',
             minify: false,
-            lib: {
-              formats: ['cjs'],
-              fileName: () => 'preload.js',
+            lib: false,
+            rollupOptions: {
+              input: 'src/preload/preload.ts',
+              output: {
+                format: 'cjs',
+                entryFileNames: 'preload.js',
+                inlineDynamicImports: true,
+              },
             },
           },
         },

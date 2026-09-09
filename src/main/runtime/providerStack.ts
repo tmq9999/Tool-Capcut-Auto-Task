@@ -1,5 +1,10 @@
 import type Database from 'better-sqlite3';
 import { FetchHttpClient, type HttpClient } from '../providers/HttpClient';
+import {
+  ObservedHttpClient,
+  type HttpObservationSink,
+  type ObservationScope
+} from '../providers/ObservedHttpClient';
 import { MultiloginProvider } from '../providers/MultiloginProvider';
 import { KiotProxyProvider } from '../providers/KiotProxyProvider';
 import { Gmail94Provider } from '../providers/Gmail94Provider';
@@ -25,6 +30,7 @@ import { MultiloginAuthService } from '../services/MultiloginAuthService';
 import { ProxyLeaseManager } from '../services/ProxyLeaseManager';
 import { LazyProxyLeaseSource } from '../services/LazyProxyLeaseSource';
 import { EmailPurchaseService } from '../services/EmailPurchaseService';
+import type { DiagnosticMutationContext } from '../services/EmailPurchaseService';
 import { AccountService } from '../services/AccountService';
 import { LogBus } from '../services/LogBus';
 import { AutomationRunService } from '../services/AutomationRunService';
@@ -91,6 +97,7 @@ export function createTaskProgressSink(
       try {
         repo.recordCheckpoint(accountId, {
           rows: checkpoint.rows,
+          unsettledProofs: checkpoint.unsettledProofs,
           receipt: {
             runId: checkpoint.receipt.runId,
             sessionAlias: checkpoint.receipt.sessionAlias,
@@ -132,26 +139,47 @@ export interface ProviderStackOptions {
   userDataDir?: string;
   /** Explicit HTTP-only composition; absent means HTTP-only runs fail closed. */
   httpOnlyRunner?: HttpOnlyAccountRunner;
+  /** Opt-in sanitized provider HTTP metadata sink. No sink means no decorator. */
+  httpObserver?: HttpObservationSink;
+  /** Explicit durable purchase/acquisition fence; omitted for legacy callers. */
+  mutationContext?: DiagnosticMutationContext;
 }
 
 export function createProviderStack(
   repositories: ProviderStackRepositories,
   vault: ICredentialVault,
-  http: HttpClient = new FetchHttpClient(),
+  http?: HttpClient,
   options: ProviderStackOptions = {}
 ): ProviderStack {
+  let observation: ObservationScope | undefined;
+  let providerHttp: HttpClient;
+  if (options.httpObserver) {
+    let captureResponseHeaders = (_metadata: { status: number; ok: boolean }): void => {};
+    const transport = http ?? new FetchHttpClient(
+      globalThis.fetch,
+      (metadata) => captureResponseHeaders(metadata)
+    );
+    const observed = new ObservedHttpClient(transport, options.httpObserver);
+    captureResponseHeaders = (metadata) => observed.captureResponseHeaders(metadata);
+    observation = observed;
+    providerHttp = observed;
+  } else {
+    providerHttp = http ?? new FetchHttpClient();
+  }
   const secrets = new SecretReader(repositories.credentialRepo, vault);
 
-  const multiloginProvider = new MultiloginProvider(http);
-  const kiotProxyProvider = new KiotProxyProvider(http);
-  const gmail94Provider = new Gmail94Provider(http);
-  const dongVanFBProvider = new DongVanFBProvider(http);
-  const customDomainProvider = new CustomDomainMailProvider(http);
+  const multiloginProvider = new MultiloginProvider(providerHttp);
+  const kiotProxyProvider = new KiotProxyProvider(providerHttp);
+  const gmail94Provider = new Gmail94Provider(providerHttp);
+  const dongVanFBProvider = new DongVanFBProvider(providerHttp);
+  const customDomainProvider = new CustomDomainMailProvider(providerHttp);
 
   const multiloginAuth = new MultiloginAuthService(
     repositories.credentialRepo,
     vault,
-    multiloginProvider
+    multiloginProvider,
+    undefined,
+    observation
   );
 
   const logBus = new LogBus(repositories.logRepo);
@@ -170,12 +198,14 @@ export function createProviderStack(
         } catch {
           return DEFAULT_APP_SETTINGS.customEmail;
         }
-      }
+      },
+      observation,
+      mutationContext: options.mutationContext
     }
   );
 
   const proxySource = new LazyProxyLeaseSource(secrets, (options) =>
-    new ProxyLeaseManager(kiotProxyProvider, repositories.proxyLeaseRepo, options)
+    new ProxyLeaseManager(kiotProxyProvider, repositories.proxyLeaseRepo, options, { observation })
   );
 
   const browserRuntimes = new Map<string, IBrowserRuntimeApi>([
@@ -206,7 +236,8 @@ export function createProviderStack(
 
   const workSources = createAutomationWorkSourceFactory(
     emailPurchaseService,
-    (id) => accountService.getAutomationCredential(id)
+    (id) => accountService.getAutomationCredential(id),
+    observation
   );
   const automationRunService = new AutomationRunService({
     workSources,
@@ -222,8 +253,10 @@ export function createProviderStack(
       ? new CapcutEngineService({ userDataDir: options.userDataDir })
       : undefined,
     httpOnlyRunner: options.httpOnlyRunner,
-    taskProgress: createTaskProgressSink(repositories.accountTaskRepo)
-  });
+    taskProgress: createTaskProgressSink(repositories.accountTaskRepo),
+    observation,
+    mutationContext: options.mutationContext
+  }, { userDataDir: options.userDataDir });
 
   const providerRegistry = new ProviderRegistry(
     new Map<string, () => ConnectivityProvider>([

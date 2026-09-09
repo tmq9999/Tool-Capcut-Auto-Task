@@ -17,6 +17,8 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { BrowserContext, Page } from 'playwright-core';
+import { createDirectUiInteraction } from '../uiInteractionScheduler';
+import type { AuthOptions } from '../auth';
 
 const isLoggedIn = vi.fn();
 const loginCapcut = vi.fn();
@@ -53,12 +55,17 @@ function log(msg: string): void {
   lines.push(msg);
 }
 
+function options(extra: Omit<Partial<AuthOptions>, 'log' | 'signal' | 'ui'> = {}): AuthOptions {
+  const signal = new AbortController().signal;
+  return { log, signal, ui: createDirectUiInteraction(signal), ...extra };
+}
+
 describe('ensureInApp với forceSignup', () => {
   it('đi ĐĂNG KÝ trước, không thử đăng nhập', async () => {
     // Chưa vào app lúc bắt đầu, đã vào app sau khi đăng ký xong.
     isLoggedIn.mockResolvedValueOnce(false).mockResolvedValue(true);
 
-    const result = await ensureInApp(page, context, account, { forceSignup: true, log });
+    const result = await ensureInApp(page, context, account, options({ forceSignup: true }));
 
     expect(signupCapcut).toHaveBeenCalledTimes(1);
     expect(loginCapcut).not.toHaveBeenCalled();
@@ -68,7 +75,7 @@ describe('ensureInApp với forceSignup', () => {
   it('giải thích lý do bằng ngôn ngữ của app, không phải cờ CLI cũ', async () => {
     isLoggedIn.mockResolvedValueOnce(false).mockResolvedValue(true);
 
-    await ensureInApp(page, context, account, { forceSignup: true, log });
+    await ensureInApp(page, context, account, options({ forceSignup: true }));
 
     const reason = lines.find((line) => line.includes('ĐĂNG KÝ'));
     expect(reason).toBeDefined();
@@ -81,7 +88,7 @@ describe('ensureInApp không forceSignup', () => {
   it('account từ DB đi đường ĐĂNG NHẬP', async () => {
     isLoggedIn.mockResolvedValueOnce(false).mockResolvedValue(true);
 
-    const result = await ensureInApp(page, context, account, { log });
+    const result = await ensureInApp(page, context, account, options());
 
     expect(loginCapcut).toHaveBeenCalledTimes(1);
     expect(signupCapcut).not.toHaveBeenCalled();
@@ -95,7 +102,7 @@ describe('ensureInApp không forceSignup', () => {
       .mockResolvedValueOnce(false)
       .mockResolvedValue(true);
 
-    const result = await ensureInApp(page, context, account, { log });
+    const result = await ensureInApp(page, context, account, options());
 
     expect(loginCapcut).toHaveBeenCalledTimes(1);
     expect(signupCapcut).toHaveBeenCalledTimes(1);
@@ -107,7 +114,7 @@ describe('ensureInApp khi profile đã có session', () => {
   it('không xác thực lại', async () => {
     isLoggedIn.mockResolvedValue(true);
 
-    const result = await ensureInApp(page, context, account, { forceSignup: true, log });
+    const result = await ensureInApp(page, context, account, options({ forceSignup: true }));
 
     expect(signupCapcut).not.toHaveBeenCalled();
     expect(loginCapcut).not.toHaveBeenCalled();
@@ -120,10 +127,7 @@ describe('ensureInApp với allowSignupFallback=false (recovery login)', () => {
     isLoggedIn.mockResolvedValue(false);
 
     await expect(
-      ensureInApp(page, context, account, {
-        log,
-        allowSignupFallback: false
-      })
+      ensureInApp(page, context, account, options({ allowSignupFallback: false }))
     ).rejects.toThrow(/recovery/i);
 
     expect(signupCapcut).not.toHaveBeenCalled();
@@ -137,11 +141,7 @@ describe('ensureInApp với allowSignupFallback=false (recovery login)', () => {
     });
 
     await expect(
-      ensureInApp(page, context, account, {
-        log,
-        allowSignupFallback: false,
-        getOtp
-      })
+      ensureInApp(page, context, account, options({ allowSignupFallback: false, getOtp }))
     ).rejects.toThrow();
 
     expect(getOtp).not.toHaveBeenCalled();

@@ -9,6 +9,7 @@ import { ProxyLeaseRepository } from '../../repositories/ProxyLeaseRepository';
 import { ProxyLeaseManager, type IKiotProxyLeaseApi } from '../ProxyLeaseManager';
 import { ProviderError } from '../../providers/ProviderError';
 import { ProxyKeyUnavailableError, type KiotProxyKeySummary, type KiotProxyLease } from '../../providers/KiotProxyProvider';
+import type { ObservationIdentity, ObservationScope } from '../../providers/ObservedHttpClient';
 
 interface KeyBehaviour {
   ips: string[];
@@ -90,7 +91,8 @@ let onSleep: (() => void) | null;
 
 function createManager(
   api: StubProxyApi,
-  overrides: { acquireTimeoutMs?: number; keyCooldownMs?: number; keys?: string[] } = {}
+  overrides: { acquireTimeoutMs?: number; keyCooldownMs?: number; keys?: string[] } = {},
+  observation?: ObservationScope
 ) {
   return new ProxyLeaseManager(
     api,
@@ -111,7 +113,8 @@ function createManager(
         onSleep = null;
         if (hook) hook();
       },
-      nextId: () => 'lease-' + ++idCounter
+      nextId: () => 'lease-' + ++idCounter,
+      observation
     }
   );
 }
@@ -133,6 +136,26 @@ afterEach(() => {
 });
 
 describe('ProxyLeaseManager.acquire', () => {
+  it('classifies key discovery, current IP, and acquisition calls', async () => {
+    const api = new StubProxyApi(['K1']);
+    api.setIps('K1', ['113.161.10.5']);
+    const identities: Readonly<ObservationIdentity>[] = [];
+    const manager = createManager(api, {}, {
+      withObservationScope: async (identity, operation) => {
+        identities.push(identity);
+        return operation();
+      }
+    });
+
+    await manager.acquire();
+
+    expect(identities).toEqual([
+      { provider: 'kiotproxy', operation: 'proxy-list' },
+      { provider: 'kiotproxy', operation: 'proxy-current' },
+      { provider: 'kiotproxy', operation: 'proxy-acquire' }
+    ]);
+  });
+
   it('leases a fresh proxy from the first key and marks the IP as in use', async () => {
     const api = new StubProxyApi(['K1', 'K2']);
     api.setIps('K1', ['113.161.10.5']);

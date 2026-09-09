@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { createRunTelemetry } from '../runTelemetry';
-import type { AutomationEvidenceTerminalEvent, AutomationEvidenceEvent } from '../../../../shared/schemas/automation-evidence.schema';
+import type { AutomationEvidenceTerminalEvent, AutomationEvidenceNonTerminalEvent } from '../../../../shared/schemas/automation-evidence.schema';
 
 const forbidden = [
   'secret@example.com',
@@ -99,7 +99,7 @@ describe('runTelemetry', () => {
       at: '2026-09-08T00:00:04.000Z',
       type: 'ui-queued',
       lane: 'foreground',
-      label: 'test-gesture'
+      label: 'ui-action'
     });
 
     const terminalEvent: AutomationEvidenceTerminalEvent = {
@@ -107,6 +107,7 @@ describe('runTelemetry', () => {
       runId,
       at: '2026-09-08T00:00:05.000Z',
       type: 'terminal',
+      mode: 'new', stage: 1, mailboxAcquisitions: 1,
       state: 'completed',
       code: 'MAIL_LIMIT_REACHED',
       accepted: 1,
@@ -152,7 +153,7 @@ describe('runTelemetry', () => {
       at: '2026-09-08T00:00:01.000Z',
       type: 'ui-queued',
       lane: 'foreground',
-      label: 'click-login'
+      label: 'auth'
     });
 
     telemetry.record({
@@ -163,7 +164,7 @@ describe('runTelemetry', () => {
       at: '2026-09-08T00:00:02.000Z',
       type: 'ui-started',
       lane: 'foreground',
-      label: 'click-login',
+      label: 'auth',
       waitMs: 150
     });
 
@@ -175,7 +176,7 @@ describe('runTelemetry', () => {
       at: '2026-09-08T00:00:03.000Z',
       type: 'ui-finished',
       lane: 'foreground',
-      label: 'click-login',
+      label: 'auth',
       holdMs: 300
     });
 
@@ -205,6 +206,7 @@ describe('runTelemetry', () => {
       runId,
       at: '2026-09-08T00:00:06.000Z',
       type: 'terminal',
+      mode: 'new', stage: 1, mailboxAcquisitions: 1,
       state: 'completed',
       code: 'MAIL_LIMIT_REACHED',
       accepted: 1,
@@ -248,6 +250,7 @@ describe('runTelemetry', () => {
       sessionAlias: 'worker-1-session-1',
       at: '2026-09-08T00:00:01.000Z',
       type: 'task-checkpoint',
+      accountAlias: 'account-1',
       fresh: true,
       final: false,
       observedAt: '2026-09-08T00:00:01.000Z',
@@ -255,8 +258,8 @@ describe('runTelemetry', () => {
       serverTotal: 2,
       serverDone: 1,
       tasks: [
-        { key: 'task-a', status: 4, errNo: 0 },
-        { key: 'task-b', status: 1 }
+        { key: 'capcut_web_newbie_register', status: 4, errNo: 0 },
+        { key: 'capcut_web_pwa_install', status: 1 }
       ]
     });
 
@@ -265,6 +268,7 @@ describe('runTelemetry', () => {
       runId,
       at: '2026-09-08T00:00:02.000Z',
       type: 'terminal',
+      mode: 'new', stage: 1, mailboxAcquisitions: 1,
       state: 'completed',
       code: 'MAIL_LIMIT_REACHED',
       accepted: 1,
@@ -283,8 +287,8 @@ describe('runTelemetry', () => {
 
     expect(checkpointEvent.type).toBe('task-checkpoint');
     expect(checkpointEvent.tasks).toEqual([
-      { key: 'task-a', status: 4, errNo: 0 },
-      { key: 'task-b', status: 1 }
+      { key: 'capcut_web_newbie_register', status: 4, errNo: 0 },
+      { key: 'capcut_web_pwa_install', status: 1 }
     ]);
     expect(checkpointEvent.payload).toBeUndefined();
     expect(checkpointEvent.body).toBeUndefined();
@@ -305,7 +309,7 @@ describe('runTelemetry', () => {
       name: 'auth',
       state: 'start',
       email: 'secret@example.com' // FORBIDDEN UNKNOWN FIELD
-    } as unknown as AutomationEvidenceEvent;
+    } as unknown as AutomationEvidenceNonTerminalEvent;
 
     expect(() => telemetry.record(invalidEvent)).toThrow();
   });
@@ -322,6 +326,7 @@ describe('runTelemetry', () => {
       runId,
       at: '2026-09-08T00:00:01.000Z',
       type: 'terminal',
+      mode: 'new', stage: 1, mailboxAcquisitions: 1,
       state: 'completed',
       code: 'MAIL_LIMIT_REACHED',
       accepted: 1,
@@ -363,6 +368,7 @@ describe('runTelemetry', () => {
       runId,
       at: '2026-09-08T00:00:01.000Z',
       type: 'terminal',
+      mode: 'new', stage: 1, mailboxAcquisitions: 1,
       state: 'completed',
       code: 'MAIL_LIMIT_REACHED',
       accepted: 1,
@@ -434,6 +440,7 @@ describe('runTelemetry', () => {
       runId,
       at: '2026-09-08T00:00:03.000Z',
       type: 'terminal',
+      mode: 'new', stage: 1, mailboxAcquisitions: 1,
       state: 'blocked',
       code: 'PURCHASE_OUTCOME_UNKNOWN',
       accepted: 0,

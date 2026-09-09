@@ -3,7 +3,7 @@ import type { IProviderRegistry } from './ServiceConnectionManager';
 
 /** Minimum surface a service must expose to be testable from Settings. */
 export interface ConnectivityProvider {
-  testConnection(): Promise<SanitizedDiagnosticResult>;
+  testConnection(draft?: unknown): Promise<SanitizedDiagnosticResult>;
 }
 
 export function isConnectivityProvider(candidate: unknown): candidate is ConnectivityProvider {

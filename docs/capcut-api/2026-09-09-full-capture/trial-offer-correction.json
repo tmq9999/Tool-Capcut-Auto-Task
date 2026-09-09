@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "sourceCaptureSha256": "e5e97fb2aa376d98417d2ebeb9041889c17639e95a24aba1ea4b7d122b52e1d9",
+  "offlineOnly": true,
+  "correction": "Current trial state and per-offer trial eligibility are separate facts.",
+  "evidence": {
+    "currentState": {
+      "requestIds": [
+        280
+      ],
+      "decodedFrom": "JSON.parse(outer.response)",
+      "fields": {
+        "/is_free_trial": false,
+        "/can_free_trial": false,
+        "/can_free_trial_days": 0
+      },
+      "scope": "No trial was active at this user-state read; these fields are not a global offer-eligibility verdict."
+    },
+    "inactiveSubscription": {
+      "requestIds": [
+        314,
+        327,
+        345,
+        1674,
+        1690,
+        1699,
+        2222,
+        3156
+      ],
+      "decodedFrom": "JSON.parse(outer.response)",
+      "fields": {
+        "/subscription_user_infos/vip/subscription_infos": [],
+        "/subscription_user_infos/vip/vip_infos": []
+      }
+    },
+    "eligibleOffers": {
+      "requestIds": [
+        3163
+      ],
+      "decodedFrom": "JSON.parse(outer.response)[0].response.data",
+      "outerFields": {
+        "/data": null
+      },
+      "offers": [
+        {
+          "index": 0,
+          "fields": {
+            "/all_price_list/0/can_trial": true,
+            "/all_price_list/0/trial_cycle": 7,
+            "/all_price_list/0/trial_cycle_unit": "DAY",
+            "/all_price_list/0/trial_info/trial_period": 7,
+            "/all_price_list/0/trial_info/trial_cycle": 7,
+            "/all_price_list/0/trial_info/trial_cycle_unit": "DAY",
+            "/all_price_list/0/trial_info/trial_price": 0
+          }
+        },
+        {
+          "index": 1,
+          "fields": {
+            "/all_price_list/1/can_trial": true,
+            "/all_price_list/1/trial_cycle": 7,
+            "/all_price_list/1/trial_cycle_unit": "DAY",
+            "/all_price_list/1/trial_info/trial_period": 7,
+            "/all_price_list/1/trial_info/trial_cycle": 7,
+            "/all_price_list/1/trial_info/trial_cycle_unit": "DAY",
+            "/all_price_list/1/trial_info/trial_price": 0
+          }
+        }
+      ],
+      "scope": "Two captured offers are eligible for a seven-day zero-price trial; this does not prove activation."
+    },
+    "checkoutState": {
+      "requestIds": [
+        3183,
+        3202,
+        3266,
+        3272,
+        3279,
+        3287,
+        3288,
+        3290,
+        3297,
+        3300
+      ],
+      "fields": {
+        "/data/order_status": "PROCESSING"
+      },
+      "scope": "No terminal payment or trial activation is captured."
+    }
+  },
+  "redaction": "Contains request IDs, structural field paths, booleans, durations and zero-price evidence only; no account, credential, token, signature, order identifier, email or URL values."
+}

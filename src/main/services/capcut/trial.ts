@@ -4,9 +4,10 @@
  * =============================================================================
  * Chỉ làm nhiệm vụ cho account CÓ ưu đãi dùng thử Pro miễn phí >= 7 ngày.
  *
- * BÀI HỌC ĐẮT: ở đây API KHÔNG phải nguồn sự thật.
+ * Đây là đường DOM legacy hiện vẫn được production engine gọi trực tiếp.
  *
- * Tôi đã đọc 11 trường API và cả 11 đều nói không có trial:
+ * Lần đo cũ chỉ đọc 11 trường API không đúng nguồn offer, và chúng đều nói
+ * không có trial:
  *   can_free_trial: false      can_trial: false        hit_vip_trial: false
  *   can_free_trial_days: 0     trial_tips: ""          send_vip_days: 0
  *   is_free_trial: false       can_low_price_trial: false ...
@@ -14,8 +15,10 @@
  * Trong khi modal Upgrade của CHÍNH account đó hiển thị rõ:
  *   Pro   222,000₫ → 0₫   for 7 days   [Start free trial]
  *
- * Nên với nhiệm vụ (`task_list`/`do_action`) thì tin API; còn với trial thì phải
- * đọc DOM. Cấu trúc đo được 2026-09-02 trên account pthxdszn65494:
+ * Capture mới xác nhận keyed pricing batch là một nguồn offer hợp lệ; parser và
+ * request read-only của nguồn đó nằm riêng trong `http/trialOffers.ts` và
+ * `http/trialApi.ts`, chưa được tích hợp vào engine này. Trong lúc production
+ * còn giữ đường DOM, cấu trúc đo được 2026-09-02 là:
  *   .subscriptionProductSection-pro        thẻ gói Pro (class KHÔNG hash)
  *   text: "Pro | 222,000₫ | 0₫ | for 7 days | ..."
  *   button "Start free trial"              nút bắt đầu dùng thử
@@ -30,10 +33,12 @@ import type { BrowserContext, Page } from 'playwright-core';
 
 import { dump } from './diag';
 import { foregroundPage, rand } from './human';
-import { createDirectUiInteraction } from './uiInteractionScheduler';
+import { isDomReadTimeout } from './cancellation';
 import type { AccountUiInteraction } from './types';
 
 export interface TrialInfo {
+  /** `unknown` luôn chặn; policy caller quyết định cách xử lý eligible/ineligible. */
+  status: 'eligible' | 'ineligible' | 'unknown';
   /** Có ưu đãi dùng thử miễn phí không */
   canTrial: boolean;
   /** Số ngày dùng thử đọc được từ "for N days" */
@@ -100,11 +105,10 @@ const READ_TRIAL = `(() => {
 async function openUpgradeModal(
   page: Page,
   log: (m: string) => void,
-  ui?: AccountUiInteraction,
-  signal?: AbortSignal
+  ui: AccountUiInteraction,
+  signal: AbortSignal
 ): Promise<boolean> {
-  const targetSig = signal ?? new AbortController().signal;
-  const targetUi = ui ?? createDirectUiInteraction(targetSig);
+  signal.throwIfAborted();
 
   // Các popup che header phải dẹp trước: banner xin email, và onboarding "Got it".
   for (const sel of [
@@ -117,9 +121,12 @@ async function openUpgradeModal(
     if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
       await foregroundPage(
         page,
-        { signal: targetSig, stage: 'trial:banner-close', ui: targetUi },
+        { signal, stage: 'trial:banner-close', ui },
         () => el.click({ timeout: 3000, force: true })
-      ).catch(() => {});
+      ).catch((error: unknown) => {
+        signal.throwIfAborted();
+        if (isDomReadTimeout(error)) throw error;
+      });
       await page.waitForTimeout(800);
     }
   }
@@ -148,9 +155,12 @@ async function openUpgradeModal(
     // xuống component React bên trong, nên dùng force thay vì đòi visible.
     await foregroundPage(
       page,
-      { signal: targetSig, stage: 'trial:open-upgrade', ui: targetUi },
+      { signal, stage: 'trial:open-upgrade', ui },
       () => el.click({ timeout: 5000, force: true })
-    ).catch(() => {});
+    ).catch((error: unknown) => {
+      signal.throwIfAborted();
+      if (isDomReadTimeout(error)) throw error;
+    });
     log(`đã bấm ${label}`);
     await page.waitForTimeout(rand(6000, 8000));
 
@@ -167,19 +177,22 @@ async function openUpgradeModal(
 /**
  * Kiểm tra ưu đãi dùng thử Pro của account đang đăng nhập.
  *
- * FAIL-OPEN: không đọc được thì trả `canTrial: true` kèm `error` — một trục trặc
- * giao diện thoáng qua không nên âm thầm bỏ qua cả batch. Người gọi quyết định
- * có tin hay không dựa vào `error`.
+ * Không đọc được thì trả `unknown`; caller phải chặn task execution thay vì
+ * biến lỗi đọc DOM thành một ưu đãi chưa từng được quan sát.
  */
 export async function checkProTrial(
   page: Page,
   _context: BrowserContext,
   log: (m: string) => void,
-  ui?: AccountUiInteraction,
-  signal?: AbortSignal
+  ui: AccountUiInteraction,
+  signal: AbortSignal
 ): Promise<TrialInfo> {
+  if (!ui) throw new Error('UI_INTERACTION_REQUIRED');
+  if (!signal) throw new Error('ABORT_SIGNAL_REQUIRED');
+  signal.throwIfAborted();
   const fallback = (error: string, dumpName?: string | null): TrialInfo => ({
-    canTrial: true,
+    status: 'unknown',
+    canTrial: false,
     days: 0,
     trialPrice: '',
     listPrice: '',
@@ -215,6 +228,7 @@ export async function checkProTrial(
 
   const days = Number(raw.days ?? 0);
   const info: TrialInfo = {
+    status: days >= MIN_TRIAL_DAYS ? 'eligible' : 'ineligible',
     canTrial: days > 0,
     days,
     trialPrice: String(raw.trialPrice ?? ''),
@@ -228,6 +242,5 @@ export async function checkProTrial(
 
 /** Account có đủ điều kiện làm nhiệm vụ không. */
 export function isEligible(info: TrialInfo): boolean {
-  if (info.error) return true; // fail-open, xem checkProTrial
-  return info.canTrial && info.days >= MIN_TRIAL_DAYS;
+  return info.status === 'eligible' && !info.error && info.canTrial && info.days >= MIN_TRIAL_DAYS;
 }

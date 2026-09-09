@@ -59,6 +59,7 @@ const stubWorkSources: AutomationWorkSourceFactory = {
     });
     return {
       kind: 'finite',
+      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
       prepare: async (c) => ({ workerTarget: Math.min(c, items.length) }),
       next: async () => items.shift() ?? null,
       commit: () => {},
@@ -140,7 +141,8 @@ class StubCapcutRunner implements CapcutTaskRunner {
     if (input.onTaskCheckpoint && this.result.verification && !this.result.skipped && this.result.tasks.length > 0) {
       await input.onTaskCheckpoint({
         rows: this.result.tasks,
-        receipt: this.result.verification
+        receipt: this.result.verification,
+        unsettledProofs: this.result.unsettledProofs
       });
     }
     return this.result;
@@ -301,7 +303,10 @@ describe('toTaskProgressRows', () => {
   const snapshot: TaskSnapshotSummary = {
     observedAt: 100,
     requiredAfter: 50,
-    tasks: [],
+    tasks: [
+      { key: 'capcut_web_pwa_install', title: 'Install the app', reward: 30, status: 4 },
+      { key: 'capcut_web_video_studio_export', title: 'Export a video', reward: 120, status: 1 }
+    ],
     fresh: true,
     final: true,
     total: 2,
@@ -331,6 +336,10 @@ describe('toTaskProgressRows', () => {
       expect.objectContaining({ key: 'task-b', status: 1 })
     ]);
     expect(toTaskProgressRows(outcomes, summary).some((row) => row.key === 'task-a')).toBe(false);
+  });
+
+  it('does not infer receipt rows when exact snapshot tasks are absent', () => {
+    expect(toTaskProgressRows(outcomes, { ...snapshot, tasks: [] })).toEqual([]);
   });
 
   it('preserves exact non-complete server statuses', () => {
@@ -385,6 +394,7 @@ describe('toTaskProgressRows', () => {
     // CapCut được quyền kết luận, nên phải ra status 1.
     const rows = toTaskProgressRows(outcomes, {
       ...snapshot,
+      tasks: snapshot.tasks.map((task) => ({ ...task, status: 1 })),
       missing: ['capcut_web_pwa_install', 'capcut_web_video_studio_export']
     });
 
@@ -392,7 +402,11 @@ describe('toTaskProgressRows', () => {
   });
 
   it('không nhiệm vụ nào thiếu thì mọi dòng là 4', () => {
-    const rows = toTaskProgressRows(outcomes, { ...snapshot, missing: [] });
+    const rows = toTaskProgressRows(outcomes, {
+      ...snapshot,
+      tasks: snapshot.tasks.map((task) => ({ ...task, status: 4 })),
+      missing: []
+    });
     expect(rows.every((row) => row.status === 4)).toBe(true);
   });
 
@@ -410,6 +424,7 @@ describe('toTaskProgressRows', () => {
   it('retains proof without marking a missing task done when the snapshot is stale', () => {
     const rows = toTaskProgressRows(outcomes, {
       ...snapshot,
+      tasks: snapshot.tasks.map((task) => ({ ...task, status: 1 })),
       done: 0,
       credits: 0,
       stale: true,
@@ -432,6 +447,7 @@ describe('toTaskProgressRows', () => {
   it('snapshot còn tươi thì proof KHÔNG được lật ngược missing', () => {
     const rows = toTaskProgressRows(outcomes, {
       ...snapshot,
+      tasks: snapshot.tasks.map((task) => ({ ...task, status: 1 })),
       missing: ['capcut_web_pwa_install', 'capcut_web_video_studio_export']
     });
 
@@ -456,6 +472,7 @@ describe('toTaskProgressRows', () => {
 
     const rows = toTaskProgressRows(failed, {
       ...snapshot,
+      tasks: [{ key: 'capcut_web_pwa_install', title: 'Install the app', reward: 30, status: 1 }],
       stale: true,
       missing: ['capcut_web_pwa_install']
     });
@@ -463,7 +480,7 @@ describe('toTaskProgressRows', () => {
   });
 
   it('trả mảng rỗng khi engine không đọc được nhiệm vụ nào', () => {
-    expect(toTaskProgressRows([], { ...snapshot, total: 0, done: 0, missing: [] })).toEqual([]);
+    expect(toTaskProgressRows([], { ...snapshot, tasks: [], total: 0, done: 0, missing: [] })).toEqual([]);
   });
 });
 
@@ -607,13 +624,13 @@ describe('AutomationRunService ghi tiến độ nhiệm vụ', () => {
       tasks: TASKS
     };
     const progress = new RecordingProgressSink();
-    class HttpOnlyRunner {
-      async runAccount(): Promise<CapcutAccountResult> {
-        return httpOnlyResult;
-      }
-    }
-    const service = createService(new HttpOnlyRunner() as unknown as CapcutTaskRunner, progress);
-    await service.start(baseConfig());
+    const service = new AutomationRunService({
+      workSources: stubWorkSources, proxies: new StubProxySource(), browser: new StubBrowserRuntime(),
+      emailOtp: { readOtp: async () => null }, accounts, logBus: new LogBus(new CollectingSink()),
+      taskProgress: progress,
+      httpOnlyRunner: { preflight: async () => {}, runAccount: async () => httpOnlyResult }
+    });
+    await service.start(baseConfig({ missionTransport: 'http-only', proxy: { mode: 'direct', entries: ['http://127.0.0.1:9000'] } }));
     const summary = await service.waitForCompletion();
     expect(summary.accountsCompleted).toBe(1);
     expect(progress.calls[0].rows).toEqual(TASKS);
@@ -700,14 +717,16 @@ describe('AutomationRunService khi ghi tiến độ thất bại', () => {
     await expect(
       sink.record('acc-1', {
         rows: TASKS,
-        receipt: fullResult().verification!
+        receipt: fullResult().verification!,
+        unsettledProofs: []
       })
     ).rejects.toThrow(AutomationTerminalError);
 
     try {
       await sink.record('acc-1', {
         rows: TASKS,
-        receipt: fullResult().verification!
+        receipt: fullResult().verification!,
+        unsettledProofs: []
       });
     } catch (err: unknown) {
       expect(err).toBeInstanceOf(AutomationTerminalError);
@@ -876,7 +895,8 @@ describe('Task 8: Recovery state machine and single-recycle resume', () => {
         events.push('engine:session-1');
         const cp = input.onTaskCheckpoint({
           rows: TASKS,
-          receipt: { ...fullResult().verification!, complete: false, final: false }
+          receipt: { ...fullResult().verification!, complete: false, final: false },
+          unsettledProofs: []
         });
         events.push('checkpoint:started');
         await checkpointPromise;
@@ -922,7 +942,8 @@ describe('Task 8: Recovery state machine and single-recycle resume', () => {
       async (input) => {
         await input.onTaskCheckpoint({
           rows: TASKS,
-          receipt: fullResult().verification!
+          receipt: fullResult().verification!,
+          unsettledProofs: []
         });
         return {
           ...fullResult(),
@@ -1004,7 +1025,7 @@ describe('Task 8: Recovery state machine and single-recycle resume', () => {
     const runner = new SequencedCapcutRunner([
       async (input) => {
         events.push('engine:session-1');
-        await input.onTaskCheckpoint({ rows: TASKS, receipt: { ...fullResult().verification!, complete: false, final: false } });
+        await input.onTaskCheckpoint({ rows: TASKS, receipt: { ...fullResult().verification!, complete: false, final: false }, unsettledProofs: [] });
         events.push('checkpoint:partial');
         return {
           ...fullResult(),
@@ -1018,7 +1039,7 @@ describe('Task 8: Recovery state machine and single-recycle resume', () => {
         if (input.unsettledProofs && input.unsettledProofs.length > 0) {
           events.push('reconcile:unsettled-proofs');
         }
-        await input.onTaskCheckpoint({ rows: TASKS, receipt: { ...fullResult({ missing: [] }).verification!, complete: true, final: true } });
+        await input.onTaskCheckpoint({ rows: TASKS, receipt: { ...fullResult({ missing: [] }).verification!, complete: true, final: true }, unsettledProofs: [] });
         events.push('checkpoint:final');
         return fullCompleteResult();
       }

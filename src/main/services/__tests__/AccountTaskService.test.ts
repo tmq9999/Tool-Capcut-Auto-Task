@@ -66,6 +66,83 @@ describe('AccountTaskService', () => {
   it('account chưa chạy nhiệm vụ nào thì trả về danh sách rỗng, không ném', () => {
     const result = service.listByAccount({ accountId: 'acc-khong-co' });
 
-    expect(result).toEqual({ items: [], doneCount: 0, creditsEarned: 0 });
+    expect(result).toMatchObject({ items: [], doneCount: 0, creditsEarned: 0, verification: { state: 'missing' } });
+  });
+
+  it('returns unverified for legacy task rows with no receipt', () => {
+    const taskRepo = new AccountTaskRepository(db);
+    const legacyRows = Array.from({ length: 12 }, (_, i) => ({
+      key: `legacy_task_${i + 1}`,
+      title: `Legacy Task ${i + 1}`,
+      reward: 10,
+      status: CAPCUT_TASK_STATUS.DONE
+    }));
+    taskRepo.upsertMany('acc-legacy', legacyRows);
+    const result = service.listByAccount({ accountId: 'acc-legacy' });
+    expect(result.verification.state).toBe('missing');
+    expect(result.verification.state).not.toBe('verified');
+  });
+
+  it('ignores historical rows outside the latest receipt', () => {
+    const taskRepo = new AccountTaskRepository(db);
+    const oldRows = Array.from({ length: 12 }, (_, i) => ({
+      key: `task_${i + 1}`,
+      title: `Task ${i + 1}`,
+      reward: 10,
+      status: CAPCUT_TASK_STATUS.DONE
+    }));
+    taskRepo.upsertMany('acc-partial', oldRows);
+
+    const currentRows = Array.from({ length: 12 }, (_, i) => ({
+      key: `task_${i + 1}`,
+      title: `Task ${i + 1}`,
+      reward: 10,
+      status: i < 6 ? CAPCUT_TASK_STATUS.DONE : CAPCUT_TASK_STATUS.OPEN
+    }));
+    taskRepo.recordCheckpoint('acc-partial', {
+      rows: currentRows,
+      receipt: {
+        runId: 'run-partial',
+        sessionAlias: 'session-partial',
+        observedAt: '2026-09-08T01:00:00.000Z',
+        requiredAfter: '2026-09-08T00:59:00.000Z',
+        serverTotal: 12,
+        serverDone: 6,
+        isFresh: true,
+        isFinal: false
+      }
+    });
+
+    const result = service.listByAccount({ accountId: 'acc-partial' });
+    expect(result.verification.state).toBe('partial');
+    expect(result.verification.serverDone).toBe(6);
+    expect(result.verification.serverTotal).toBe(12);
+  });
+
+  it('returns only the latest receipt task set to the dialog', () => {
+    const taskRepo = new AccountTaskRepository(db);
+    taskRepo.upsertMany('acc-sub', [
+      { key: 'task_b', title: 'Task B', reward: 20, status: CAPCUT_TASK_STATUS.DONE }
+    ]);
+    taskRepo.recordCheckpoint('acc-sub', {
+      rows: [
+        { key: 'task_a', title: 'Task A', reward: 10, status: CAPCUT_TASK_STATUS.DONE },
+        { key: 'task_c', title: 'Task C', reward: 30, status: CAPCUT_TASK_STATUS.CLAIMABLE }
+      ],
+      receipt: {
+        runId: 'run-sub',
+        sessionAlias: 'session-sub',
+        observedAt: '2026-09-08T01:00:00.000Z',
+        requiredAfter: '2026-09-08T00:59:00.000Z',
+        serverTotal: 2,
+        serverDone: 1,
+        isFresh: true,
+        isFinal: false
+      }
+    });
+
+    const result = service.listByAccount({ accountId: 'acc-sub' });
+    expect(result.items.map((i) => i.taskKey)).toEqual(['task_a', 'task_c']);
+    expect(result.items.some((i) => i.taskKey === 'task_b')).toBe(false);
   });
 });

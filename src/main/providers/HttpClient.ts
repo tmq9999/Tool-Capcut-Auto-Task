@@ -21,6 +21,13 @@ export interface HttpClient {
   send(request: HttpRequest): Promise<HttpResponse>;
 }
 
+export interface HttpResponseHeadersMetadata {
+  status: number;
+  ok: boolean;
+}
+
+export type HttpResponseHeadersObserver = (metadata: HttpResponseHeadersMetadata) => void;
+
 export const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
 
 export class HttpTransportError extends Error {
@@ -38,7 +45,10 @@ export class HttpTransportError extends Error {
  * Request headers are never logged by this class.
  */
 export class FetchHttpClient implements HttpClient {
-  constructor(private readonly fetchImpl: typeof fetch = globalThis.fetch) {}
+  constructor(
+    private readonly fetchImpl: typeof fetch = globalThis.fetch,
+    private readonly onResponseHeaders?: HttpResponseHeadersObserver
+  ) {}
 
   async send(request: HttpRequest): Promise<HttpResponse> {
     const controller = new AbortController();
@@ -60,6 +70,12 @@ export class FetchHttpClient implements HttpClient {
         body: request.json === undefined ? undefined : JSON.stringify(request.json),
         signal: controller.signal
       });
+
+      try {
+        this.onResponseHeaders?.({ status: response.status, ok: response.ok });
+      } catch {
+        // Observation is diagnostic only and must never affect transport behavior.
+      }
 
       const rawText = await response.text();
       let body: unknown = null;

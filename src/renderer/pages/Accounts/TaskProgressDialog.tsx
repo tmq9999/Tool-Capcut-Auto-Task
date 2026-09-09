@@ -13,11 +13,9 @@ export interface TaskProgressDialogProps {
   onClose: () => void;
   accountId: string | null;
   email: string;
-  loadTasks: (accountId: string) => Promise<AccountTasksResponseDTO | null>;
+  loadTasks?: (accountId: string) => Promise<AccountTasksResponseDTO | null>;
+  initialData?: AccountTasksResponseDTO | null;
 }
-
-/** Tổng số nhiệm vụ của module free credits — dùng để hiện "x/12". */
-const CAPCUT_TASK_TOTAL = 12;
 
 function statusVariant(status: number): 'done' | 'waiting' | 'disabled' {
   if (status === CAPCUT_TASK_STATUS.DONE) return 'done';
@@ -25,8 +23,25 @@ function statusVariant(status: number): 'done' | 'waiting' | 'disabled' {
   return 'disabled';
 }
 
+function verificationBadgeConfig(state: 'verified' | 'partial' | 'stale' | 'missing'): {
+  variant: 'done' | 'waiting' | 'disabled';
+  label: string;
+} {
+  switch (state) {
+    case 'verified':
+      return { variant: 'done', label: 'Đã xác minh' };
+    case 'partial':
+      return { variant: 'waiting', label: 'Chưa hoàn tất' };
+    case 'stale':
+      return { variant: 'disabled', label: 'Chưa xác minh (cũ)' };
+    case 'missing':
+    default:
+      return { variant: 'disabled', label: 'Chưa xác minh' };
+  }
+}
+
 /**
- * Bảng tiến độ 12 nhiệm vụ của một account.
+ * Bảng tiến độ nhiệm vụ của một account.
  *
  * Số liệu là `task_status` do CHÍNH CapCut trả về (`account_tasks`), không phải
  * bộ đếm nội bộ — bản CLI cũ từng báo "7/10" trong khi CapCut ghi nhận ít hơn.
@@ -37,13 +52,14 @@ export const TaskProgressDialog: React.FC<TaskProgressDialogProps> = ({
   accountId,
   email,
   loadTasks,
+  initialData = null,
 }) => {
-  const [data, setData] = useState<AccountTasksResponseDTO | null>(null);
+  const [data, setData] = useState<AccountTasksResponseDTO | null>(initialData);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isOpen || !accountId) return;
+    if (!isOpen || !accountId || !loadTasks) return;
     let canceled = false;
     setIsLoading(true);
     setError(null);
@@ -85,13 +101,21 @@ export const TaskProgressDialog: React.FC<TaskProgressDialogProps> = ({
           <span className="text-on-surface-variant">
             CapCut ghi nhận:{' '}
             <span className="text-on-surface font-semibold">
-              {data ? data.doneCount : 0}/{CAPCUT_TASK_TOTAL}
+              {data?.verification
+                ? `${data.verification.serverDone}/${data.verification.serverTotal}`
+                : `${data ? data.doneCount : 0}/${data ? data.items.length : 0}`}
             </span>
           </span>
           <span className="text-on-surface-variant">
             Credit đã nhận:{' '}
             <span className="text-on-surface font-semibold">{data ? data.creditsEarned : 0}</span>
           </span>
+          {data && (
+            <Badge
+              variant={verificationBadgeConfig(data.verification?.state ?? 'missing').variant}
+              label={verificationBadgeConfig(data.verification?.state ?? 'missing').label}
+            />
+          )}
         </div>
 
         {error && <p className="font-body-sm text-body-sm text-error">{error}</p>}

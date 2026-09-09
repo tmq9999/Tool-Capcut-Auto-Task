@@ -1,0 +1,3853 @@
+{
+  "scope": "All 1012 focus-telemetry requests read as raw body; values retained only as safe labels, markers or hashes.",
+  "inspectedRequests": 1012,
+  "totalEvents": 5052,
+  "eventKinds": {
+    "unknown": 602,
+    "http": 3150,
+    "resource": 703,
+    "xss": 1,
+    "pageview": 19,
+    "custom": 438,
+    "performance": 70,
+    "performance_timing": 6,
+    "resource_error": 34,
+    "setting": 6,
+    "csp-violation": 15,
+    "js_error": 1,
+    "performance_longtask": 2,
+    "runtime_strategy": 5
+  },
+  "runtimeErrors": [
+    {
+      "id": 70,
+      "time": "Wed Sep 09 05:33:12 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "timing"
+      ]
+    },
+    {
+      "id": 72,
+      "time": "Wed Sep 09 05:33:13 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "xpath",
+        "timing"
+      ]
+    },
+    {
+      "id": 90,
+      "time": "Wed Sep 09 05:33:59 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "timing"
+      ]
+    },
+    {
+      "id": 90,
+      "time": "Wed Sep 09 05:33:59 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "timing"
+      ]
+    },
+    {
+      "id": 90,
+      "time": "Wed Sep 09 05:33:59 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "timing"
+      ]
+    },
+    {
+      "id": 91,
+      "time": "Wed Sep 09 05:33:59 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "xpath",
+        "timing"
+      ]
+    },
+    {
+      "id": 91,
+      "time": "Wed Sep 09 05:33:59 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "xpath",
+        "timing"
+      ]
+    },
+    {
+      "id": 91,
+      "time": "Wed Sep 09 05:33:59 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "xpath",
+        "timing"
+      ]
+    },
+    {
+      "id": 145,
+      "time": "Wed Sep 09 05:34:03 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "timing"
+      ]
+    },
+    {
+      "id": 145,
+      "time": "Wed Sep 09 05:34:03 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "timing"
+      ]
+    },
+    {
+      "id": 258,
+      "time": "Wed Sep 09 05:36:03 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "timing"
+      ]
+    },
+    {
+      "id": 437,
+      "time": "Wed Sep 09 05:36:08 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 437,
+      "time": "Wed Sep 09 05:36:08 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 490,
+      "time": "Wed Sep 09 05:36:09 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 490,
+      "time": "Wed Sep 09 05:36:09 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 1531,
+      "time": "Wed Sep 09 05:43:18 GMT+07:00 2026",
+      "eventType": "js_error",
+      "name": "AbortError",
+      "source": "[opaque]",
+      "messageSha256": "bcd24171e6b563601fa8d684a85970d1289ad10423f69aa00d18397bfc6d0d07",
+      "messageLength": 94,
+      "markers": [],
+      "payloadKeys": [
+        "error",
+        "breadcrumbs",
+        "source"
+      ]
+    },
+    {
+      "id": 1850,
+      "time": "Wed Sep 09 05:45:06 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 1960,
+      "time": "Wed Sep 09 05:45:22 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 1965,
+      "time": "Wed Sep 09 05:45:23 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 2095,
+      "time": "Wed Sep 09 05:46:46 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 2101,
+      "time": "Wed Sep 09 05:46:46 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 2360,
+      "time": "Wed Sep 09 05:46:56 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "timing"
+      ]
+    },
+    {
+      "id": 2360,
+      "time": "Wed Sep 09 05:46:56 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "timing"
+      ]
+    },
+    {
+      "id": 2439,
+      "time": "Wed Sep 09 05:47:37 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 2443,
+      "time": "Wed Sep 09 05:47:38 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 2645,
+      "time": "Wed Sep 09 05:49:22 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 2647,
+      "time": "Wed Sep 09 05:49:23 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 2831,
+      "time": "Wed Sep 09 05:49:41 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "timing"
+      ]
+    },
+    {
+      "id": 2831,
+      "time": "Wed Sep 09 05:49:41 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "timing"
+      ]
+    },
+    {
+      "id": 2844,
+      "time": "Wed Sep 09 05:49:44 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 2851,
+      "time": "Wed Sep 09 05:49:54 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 2880,
+      "time": "Wed Sep 09 05:50:13 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 2903,
+      "time": "Wed Sep 09 05:50:24 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url"
+      ]
+    },
+    {
+      "id": 3105,
+      "time": "Wed Sep 09 05:52:17 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "timing"
+      ]
+    },
+    {
+      "id": 3105,
+      "time": "Wed Sep 09 05:52:17 GMT+07:00 2026",
+      "eventType": "resource_error",
+      "name": "[opaque]",
+      "source": "[opaque]",
+      "messageSha256": null,
+      "messageLength": 0,
+      "markers": [],
+      "payloadKeys": [
+        "type",
+        "url",
+        "timing"
+      ]
+    }
+  ],
+  "httpErrors": [
+    {
+      "id": 72,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "www.google.com",
+        "path": "/ccm/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 191
+    },
+    {
+      "id": 72,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "www.google.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 196
+    },
+    {
+      "id": 72,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "ad.doubleclick.net",
+        "path": "/ccm/s/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 394
+    },
+    {
+      "id": 72,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 464
+    },
+    {
+      "id": 155,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 97
+    },
+    {
+      "id": 381,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/api/v1/web-cookie-privacy/config"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 323
+    },
+    {
+      "id": 381,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/campaign/v1/pc_diversion/web/main_page"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 327
+    },
+    {
+      "id": 381,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "vcs-sg.capcutapi.com",
+        "path": "/vc/setting"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 358
+    },
+    {
+      "id": 437,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/campaign/v1/capcut/web/resource"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 488
+    },
+    {
+      "id": 467,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 487
+    },
+    {
+      "id": 467,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 920
+    },
+    {
+      "id": 467,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 394
+    },
+    {
+      "id": 494,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "www.google.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 235
+    },
+    {
+      "id": 494,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "www.google.com",
+        "path": "/ccm/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 240
+    },
+    {
+      "id": 494,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 231
+    },
+    {
+      "id": 494,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 982
+    },
+    {
+      "id": 494,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 893
+    },
+    {
+      "id": 494,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 674
+    },
+    {
+      "id": 505,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 455
+    },
+    {
+      "id": 650,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 932
+    },
+    {
+      "id": 956,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 597
+    },
+    {
+      "id": 1026,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 110
+    },
+    {
+      "id": 1026,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 110
+    },
+    {
+      "id": 1026,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/editor-page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 406
+    },
+    {
+      "id": 1053,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/campaign/v2/resource"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 310
+    },
+    {
+      "id": 1053,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 304
+    },
+    {
+      "id": 1111,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/magic-tools/tools-page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 200
+    },
+    {
+      "id": 1111,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/magic-tools/new-tools-page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 199
+    },
+    {
+      "id": 1119,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 153
+    },
+    {
+      "id": 1199,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 304
+    },
+    {
+      "id": 1218,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/campaign/v1/capcut/web/resource"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 346
+    },
+    {
+      "id": 1222,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 300
+    },
+    {
+      "id": 1226,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/ai-creator/page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 249
+    },
+    {
+      "id": 1226,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/ai-creator/page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 489
+    },
+    {
+      "id": 1226,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/ai-creator/page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 726
+    },
+    {
+      "id": 1251,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1300
+    },
+    {
+      "id": 1251,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/editor-wasm-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 260
+    },
+    {
+      "id": 1255,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1328
+    },
+    {
+      "id": 1265,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1357
+    },
+    {
+      "id": 1284,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1306
+    },
+    {
+      "id": 1300,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1279
+    },
+    {
+      "id": 1310,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1356
+    },
+    {
+      "id": 1327,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1349
+    },
+    {
+      "id": 1338,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1599
+    },
+    {
+      "id": 1349,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1285
+    },
+    {
+      "id": 1364,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1393
+    },
+    {
+      "id": 1373,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 2785
+    },
+    {
+      "id": 1389,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1348
+    },
+    {
+      "id": 1400,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1341
+    },
+    {
+      "id": 1414,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1374
+    },
+    {
+      "id": 1431,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1380
+    },
+    {
+      "id": 1454,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1696
+    },
+    {
+      "id": 1473,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1350
+    },
+    {
+      "id": 1498,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1352
+    },
+    {
+      "id": 1514,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1342
+    },
+    {
+      "id": 1531,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 457
+    },
+    {
+      "id": 1540,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1263
+    },
+    {
+      "id": 1553,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 477
+    },
+    {
+      "id": 1570,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/do_action"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 674
+    },
+    {
+      "id": 1570,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 224
+    },
+    {
+      "id": 1570,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 216
+    },
+    {
+      "id": 1578,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1290
+    },
+    {
+      "id": 1597,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1352
+    },
+    {
+      "id": 1617,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/do_action"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 1017
+    },
+    {
+      "id": 1617,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 239
+    },
+    {
+      "id": 1617,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 411
+    },
+    {
+      "id": 1717,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/api/v1/web-cookie-privacy/config"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 250
+    },
+    {
+      "id": 1717,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/campaign/v1/pc_diversion/web/main_page"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 159
+    },
+    {
+      "id": 1717,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 292
+    },
+    {
+      "id": 1723,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "vcs-sg.capcutapi.com",
+        "path": "/vc/setting"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 585
+    },
+    {
+      "id": 1754,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/campaign/v1/capcut/web/resource"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 647
+    },
+    {
+      "id": 1775,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 241
+    },
+    {
+      "id": 1775,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 182
+    },
+    {
+      "id": 1783,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 227
+    },
+    {
+      "id": 1783,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 142
+    },
+    {
+      "id": 1783,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 11
+    },
+    {
+      "id": 1828,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 970
+    },
+    {
+      "id": 1828,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 56
+    },
+    {
+      "id": 1828,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 55
+    },
+    {
+      "id": 1847,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/campaign/v2/resource"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 167
+    },
+    {
+      "id": 1847,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "www.google.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 149
+    },
+    {
+      "id": 1847,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "www.google.com",
+        "path": "/ccm/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 147
+    },
+    {
+      "id": 1847,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 142
+    },
+    {
+      "id": 1850,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "ad.doubleclick.net",
+        "path": "/ccm/s/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 443
+    },
+    {
+      "id": 1850,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/editor-page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 211
+    },
+    {
+      "id": 1865,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/ai-creator/page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 229
+    },
+    {
+      "id": 1869,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/ai-creator/page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 484
+    },
+    {
+      "id": 1874,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/ai-creator/page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 665
+    },
+    {
+      "id": 1898,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1567
+    },
+    {
+      "id": 1898,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "firebaseinstallations.googleapis.com",
+        "path": "/v1/projects/capcut-web/installations"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 1203
+    },
+    {
+      "id": 1898,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1299
+    },
+    {
+      "id": 1898,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "fcmregistrations.googleapis.com",
+        "path": "/v1/projects/capcut-web/registrations"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 1899
+    },
+    {
+      "id": 1927,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1279
+    },
+    {
+      "id": 1928,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 146
+    },
+    {
+      "id": 1928,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/magic-tools/tools-page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 171
+    },
+    {
+      "id": 1929,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/magic-tools/new-tools-page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 201
+    },
+    {
+      "id": 1943,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 571
+    },
+    {
+      "id": 1943,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 191
+    },
+    {
+      "id": 1943,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/editor-wasm-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 143
+    },
+    {
+      "id": 1946,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1185
+    },
+    {
+      "id": 1967,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1619
+    },
+    {
+      "id": 1967,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 299
+    },
+    {
+      "id": 1970,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 301
+    },
+    {
+      "id": 1973,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 403
+    },
+    {
+      "id": 1973,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 300
+    },
+    {
+      "id": 1996,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 299
+    },
+    {
+      "id": 1996,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/do_action"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 617
+    },
+    {
+      "id": 1996,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 231
+    },
+    {
+      "id": 2005,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 428
+    },
+    {
+      "id": 2005,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1290
+    },
+    {
+      "id": 2012,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1331
+    },
+    {
+      "id": 2021,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1358
+    },
+    {
+      "id": 2034,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1622
+    },
+    {
+      "id": 2047,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1320
+    },
+    {
+      "id": 2058,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1307
+    },
+    {
+      "id": 2118,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1553
+    },
+    {
+      "id": 2118,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 292
+    },
+    {
+      "id": 2118,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1263
+    },
+    {
+      "id": 2118,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 633
+    },
+    {
+      "id": 2118,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 565
+    },
+    {
+      "id": 2228,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/api/v1/web-cookie-privacy/config"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 201
+    },
+    {
+      "id": 2252,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/zh-hans.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 749
+    },
+    {
+      "id": 2252,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansThai-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 812
+    },
+    {
+      "id": 2252,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansSymbols2-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 821
+    },
+    {
+      "id": 2252,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansKannada-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 825
+    },
+    {
+      "id": 2252,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/en_new.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 845
+    },
+    {
+      "id": 2252,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/th.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 887
+    },
+    {
+      "id": 2252,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/campaign/v1/capcut/web/resource"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 362
+    },
+    {
+      "id": 2306,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 312
+    },
+    {
+      "id": 2306,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "vcs-sg.capcutapi.com",
+        "path": "/vc/setting"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 377
+    },
+    {
+      "id": 2306,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 250
+    },
+    {
+      "id": 2306,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/ja.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 1278
+    },
+    {
+      "id": 2326,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 155
+    },
+    {
+      "id": 2347,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 371
+    },
+    {
+      "id": 2347,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "www.google.com",
+        "path": "/ccm/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 306
+    },
+    {
+      "id": 2347,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "www.google.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 341
+    },
+    {
+      "id": 2351,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSans-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 1995
+    },
+    {
+      "id": 2351,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansArabic-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2042
+    },
+    {
+      "id": 2351,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansBengali-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2047
+    },
+    {
+      "id": 2351,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansHebrew-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2049
+    },
+    {
+      "id": 2351,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansKhmer-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2049
+    },
+    {
+      "id": 2351,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansMyanmar-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2050
+    },
+    {
+      "id": 2351,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansArmenian-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2052
+    },
+    {
+      "id": 2351,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansCanadianAboriginal-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2053
+    },
+    {
+      "id": 2356,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansEthiopic-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2053
+    },
+    {
+      "id": 2356,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/zh-hant.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2065
+    },
+    {
+      "id": 2356,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansGeorgian-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2090
+    },
+    {
+      "id": 2356,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansGujarati-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2091
+    },
+    {
+      "id": 2356,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansGurmukhi-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2093
+    },
+    {
+      "id": 2356,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansLao-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2093
+    },
+    {
+      "id": 2356,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansTamil-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2093
+    },
+    {
+      "id": 2356,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansMalayalam-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2094
+    },
+    {
+      "id": 2356,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/NotoSansTelugu-Regular.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2095
+    },
+    {
+      "id": 2356,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/ko.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2110
+    },
+    {
+      "id": 2356,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "sf16-web-tos-buz.capcutstatic.com",
+        "path": "/obj/capcut-web-buz-sg/ies.lvve-os.graphic/font/emoji.zip"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 2201
+    },
+    {
+      "id": 2369,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 295
+    },
+    {
+      "id": 2376,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 163
+    },
+    {
+      "id": 2439,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/do_action"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 980
+    },
+    {
+      "id": 2439,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 213
+    },
+    {
+      "id": 2446,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 395
+    },
+    {
+      "id": 2446,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 700
+    },
+    {
+      "id": 2457,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 388
+    },
+    {
+      "id": 2461,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 422
+    },
+    {
+      "id": 2464,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1266
+    },
+    {
+      "id": 2483,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "tos-my216-share.vodupload.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 839
+    },
+    {
+      "id": 2491,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1546
+    },
+    {
+      "id": 2520,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/do_action"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 972
+    },
+    {
+      "id": 2531,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 228
+    },
+    {
+      "id": 2531,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 221
+    },
+    {
+      "id": 2531,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "tos-my16-up.byteoversea.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 1018
+    },
+    {
+      "id": 2540,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 225
+    },
+    {
+      "id": 2555,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1289
+    },
+    {
+      "id": 2556,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "tos-my319-share.tiktokcdn.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 791
+    },
+    {
+      "id": 2569,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1370
+    },
+    {
+      "id": 2597,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/do_action"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 795
+    },
+    {
+      "id": 2597,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 219
+    },
+    {
+      "id": 2597,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 332
+    },
+    {
+      "id": 2597,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 165
+    },
+    {
+      "id": 2602,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 153
+    },
+    {
+      "id": 2602,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 229
+    },
+    {
+      "id": 2612,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1286
+    },
+    {
+      "id": 2628,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "o.clarity.ms",
+        "path": "/collect"
+      },
+      "status": 204,
+      "isCustomError": true,
+      "durationMs": 1371
+    },
+    {
+      "id": 2647,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 178
+    },
+    {
+      "id": 2664,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "tos-my16-share.vodupload.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 776
+    },
+    {
+      "id": 2744,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/api/v1/web-cookie-privacy/config"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 259
+    },
+    {
+      "id": 2792,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "vcs-sg.capcutapi.com",
+        "path": "/vc/setting"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 606
+    },
+    {
+      "id": 2792,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 250
+    },
+    {
+      "id": 2792,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 468
+    },
+    {
+      "id": 2792,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/ai-creator/page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 229
+    },
+    {
+      "id": 2823,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 150
+    },
+    {
+      "id": 2823,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "www.google.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 288
+    },
+    {
+      "id": 2823,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "www.google.com",
+        "path": "/ccm/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 309
+    },
+    {
+      "id": 2823,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "ad.doubleclick.net",
+        "path": "/ccm/s/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 355
+    },
+    {
+      "id": 2823,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/campaign/v1/capcut/web/resource"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 875
+    },
+    {
+      "id": 2823,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/lv/v1/user/web/authorized_user_info"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 873
+    },
+    {
+      "id": 2823,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 171
+    },
+    {
+      "id": 2851,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 140
+    },
+    {
+      "id": 2851,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 148
+    },
+    {
+      "id": 2903,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/do_action"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 813
+    },
+    {
+      "id": 2903,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 157
+    },
+    {
+      "id": 2903,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 150
+    },
+    {
+      "id": 2903,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 295
+    },
+    {
+      "id": 2969,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/do_action"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 861
+    },
+    {
+      "id": 2969,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 212
+    },
+    {
+      "id": 2969,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 422
+    },
+    {
+      "id": 2969,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/do_action"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 843
+    },
+    {
+      "id": 2969,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 193
+    },
+    {
+      "id": 2969,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 308
+    },
+    {
+      "id": 2969,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 195
+    },
+    {
+      "id": 2969,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 494
+    },
+    {
+      "id": 3064,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/api/v1/web-cookie-privacy/config"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 204
+    },
+    {
+      "id": 3064,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/lv/v1/user/web/authorized_user_info"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 304
+    },
+    {
+      "id": 3064,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "vcs-sg.capcutapi.com",
+        "path": "/vc/setting"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 325
+    },
+    {
+      "id": 3105,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 336
+    },
+    {
+      "id": 3105,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 387
+    },
+    {
+      "id": 3105,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 143
+    },
+    {
+      "id": 3105,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "www.google.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 290
+    },
+    {
+      "id": 3105,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "www.google.com",
+        "path": "/ccm/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 316
+    },
+    {
+      "id": 3105,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "ad.doubleclick.net",
+        "path": "/ccm/s/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 330
+    },
+    {
+      "id": 3105,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 339
+    },
+    {
+      "id": 3105,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/ai-creator/page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 278
+    },
+    {
+      "id": 3135,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "lf16-beecdn.ibytedtos.com",
+        "path": "[not matched; private URL omitted]"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 432
+    },
+    {
+      "id": 3135,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/campaign/v1/capcut/web/resource"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 464
+    },
+    {
+      "id": 3135,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "edit-api-sg.capcut.com",
+        "path": "/luckycat/i18n/capcut/task/v1/task_list"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 202
+    },
+    {
+      "id": 3135,
+      "eventType": "http",
+      "method": "post",
+      "endpoint": {
+        "host": "analytics.google.com",
+        "path": "/g/collect"
+      },
+      "status": 0,
+      "isCustomError": false,
+      "durationMs": 73
+    },
+    {
+      "id": 3135,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/ai-creator/page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 225
+    },
+    {
+      "id": 3147,
+      "eventType": "http",
+      "method": "get",
+      "endpoint": {
+        "host": "www.capcut.com",
+        "path": "/ai-creator/page-resource.json"
+      },
+      "status": 200,
+      "isCustomError": true,
+      "durationMs": 221
+    }
+  ],
+  "customDiagnostics": [
+    {
+      "eventType": "custom",
+      "label": "status",
+      "count": 4,
+      "ids": [
+        39,
+        50
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "pns_cuj",
+      "count": 7,
+      "ids": [
+        70,
+        145,
+        420,
+        1830,
+        2290,
+        2790,
+        3087
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "exLoadStatus",
+      "count": 6,
+      "ids": [
+        143,
+        500,
+        1842,
+        2368,
+        2807,
+        3106
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "multiWebMssdkSamePage",
+      "count": 13,
+      "ids": [
+        143,
+        144,
+        154,
+        500,
+        1040,
+        1842,
+        1887,
+        2368,
+        2371,
+        2825,
+        2829,
+        3128,
+        3130
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "vimo_material_fetch_result",
+      "count": 73,
+      "ids": [
+        467,
+        489,
+        494,
+        505,
+        960,
+        1026,
+        1053,
+        1059,
+        1192,
+        1195,
+        1196,
+        1197,
+        1199,
+        1200,
+        1717,
+        1723,
+        1754,
+        1775,
+        1898,
+        1923,
+        1927,
+        2347,
+        2350,
+        2356,
+        2792,
+        2823
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "data_loading",
+      "count": 10,
+      "ids": [
+        467,
+        494,
+        505,
+        960,
+        1717,
+        1723,
+        1754
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "signURL",
+      "count": 2,
+      "ids": [
+        500
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "ccfmp",
+      "count": 5,
+      "ids": [
+        505,
+        1723,
+        2228,
+        2718,
+        3064
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "cctti",
+      "count": 4,
+      "ids": [
+        505,
+        1723,
+        2228,
+        2744
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "log",
+      "count": 103,
+      "ids": [
+        505,
+        953,
+        1026,
+        1053,
+        1265,
+        1300,
+        1319,
+        1338,
+        1358,
+        1380,
+        1400,
+        1418,
+        1436,
+        1454,
+        1472,
+        1491,
+        1507,
+        1524,
+        1553,
+        1585,
+        1613,
+        1800,
+        1828,
+        1996,
+        2034,
+        2070,
+        2228,
+        2356,
+        2389,
+        2457,
+        2520,
+        2531,
+        2540,
+        2619,
+        2718,
+        2744,
+        2792,
+        2823,
+        2831,
+        3064
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "preload-smart-tools-page-status",
+      "count": 2,
+      "ids": [
+        1192,
+        1923
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "preload-ai-creator-page-status",
+      "count": 6,
+      "ids": [
+        1235,
+        1240,
+        1242,
+        1847
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "page_init",
+      "count": 2,
+      "ids": [
+        1629,
+        2684
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "effects_video_dev_common",
+      "count": 3,
+      "ids": [
+        1996
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "page-partial-visible",
+      "count": 1,
+      "ids": [
+        2228
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "enter_picture_edit_page",
+      "count": 1,
+      "ids": [
+        2228
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "ai_design_dev_common",
+      "count": 24,
+      "ids": [
+        2228,
+        2439,
+        2446,
+        2459,
+        2520,
+        2531,
+        2541,
+        2591,
+        2627,
+        2634,
+        2647
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "graphic_editor_init",
+      "count": 2,
+      "ids": [
+        2228,
+        2718
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "ai_design_api_status",
+      "count": 8,
+      "ids": [
+        2252,
+        2347,
+        2439,
+        2459,
+        2591,
+        2627
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "agent_page_action",
+      "count": 14,
+      "ids": [
+        2306,
+        2347,
+        2408,
+        2439,
+        2459,
+        2558,
+        2591,
+        2627,
+        2634
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "graphic_editor_effect_status",
+      "count": 1,
+      "ids": [
+        2356
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "vip_function_details",
+      "count": 19,
+      "ids": [
+        2408,
+        2411,
+        2439,
+        2459,
+        2520,
+        2531,
+        2627,
+        2634,
+        2647,
+        3064
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "quota_consume_status",
+      "count": 4,
+      "ids": [
+        2439,
+        2591
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "graphic_editor_draft_save",
+      "count": 9,
+      "ids": [
+        2439,
+        2459,
+        2520,
+        2541,
+        2591,
+        2601,
+        2627,
+        2634,
+        2647
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "graphic_editor_effect_api_perf",
+      "count": 5,
+      "ids": [
+        2489
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "ai_design_material_import",
+      "count": 5,
+      "ids": [
+        2504,
+        2520,
+        2531
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "add_material_to_canvas",
+      "count": 1,
+      "ids": [
+        2520
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "material_render_cost",
+      "count": 1,
+      "ids": [
+        2520
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "ever-upload-full",
+      "count": 1,
+      "ids": [
+        2531
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "import_material",
+      "count": 1,
+      "ids": [
+        2531
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "ai_agent_result_render_status",
+      "count": 2,
+      "ids": [
+        2627,
+        2647
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "perf_milestone",
+      "count": 2,
+      "ids": [
+        2718,
+        3064
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "trace",
+      "count": 4,
+      "ids": [
+        2718,
+        2744,
+        3064
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "ai-creator-initialization-flow",
+      "count": 10,
+      "ids": [
+        2718,
+        3064
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "ai-creator-initialization-status",
+      "count": 3,
+      "ids": [
+        2718,
+        3064
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "ai_video_maker_dev_common",
+      "count": 41,
+      "ids": [
+        2718,
+        2744,
+        2831
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "ai-creator-browser-compatible",
+      "count": 2,
+      "ids": [
+        2718,
+        3064
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "ai-creator-agent-draft-restore",
+      "count": 1,
+      "ids": [
+        2744
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "ai-creator-draft-replay",
+      "count": 1,
+      "ids": [
+        2744
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "video_maker_canvas_page_action",
+      "count": 5,
+      "ids": [
+        2744,
+        2792,
+        2823
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "ai-creator-tti",
+      "count": 1,
+      "ids": [
+        2744
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "ai-creator-flow-performance",
+      "count": 2,
+      "ids": [
+        2744,
+        3064
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "input_panel_action",
+      "count": 6,
+      "ids": [
+        2792,
+        2823,
+        2831,
+        3064
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "query_credit_history",
+      "count": 3,
+      "ids": [
+        2792
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "query_user_credit",
+      "count": 5,
+      "ids": [
+        2792,
+        2823
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "frame_exposure_action",
+      "count": 1,
+      "ids": [
+        2792
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "storyboard_hint_action",
+      "count": 3,
+      "ids": [
+        2792
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "query_benefit_metadata",
+      "count": 3,
+      "ids": [
+        2792,
+        2823
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "batch_get_user_benefit",
+      "count": 3,
+      "ids": [
+        2792,
+        2823
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "general_ad_placement",
+      "count": 1,
+      "ids": [
+        2823
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "storyboard_quick_generate_data",
+      "count": 1,
+      "ids": [
+        3064
+      ]
+    },
+    {
+      "eventType": "custom",
+      "label": "homepage_of_scenarios",
+      "count": 1,
+      "ids": [
+        3064
+      ]
+    }
+  ],
+  "limits": [
+    "Telemetry is diagnostic, not authoritative business response evidence.",
+    "Messages/stacks and user text omitted; hashes point to raw source item for private review.",
+    "Reported HTTP failures may be sampled or duplicated; a telemetry row is not an extra captured exchange.",
+    "No native runtime root cause can be inferred solely from these event names."
+  ]
+}

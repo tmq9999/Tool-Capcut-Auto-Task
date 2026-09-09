@@ -2,58 +2,58 @@
  * =============================================================================
  * HÀNH VI "NGƯỜI THẬT" — DÙNG CHUNG CHO MỌI SCRIPT
  * =============================================================================
- * CapCut chạy Shark Risk Control (ByteDance): nó chấm điểm quỹ đạo chuột, độ
- * trễ giữa các phím và thời gian dừng trước khi click. Click bằng
- * `locator.click()` thuần (teleport chuột, 0ms delay) rất dễ bị chặn khi
- * grant_reward → trả về err_no 8001003.
+ * Control DOM dùng native locator-first click với actionability, timeout và
+ * signal huỷ của trình duyệt; không tự vẽ quỹ đạo pointer cho DOM controls.
+ * Vẫn giữ delay bấm, khoảng dừng và nhịp gõ theo pace người dùng đã đo.
  *
  * Toàn bộ tương tác trong dự án PHẢI đi qua các hàm ở file này.
  * =============================================================================
  */
 
 import type { Locator, Page } from 'playwright-core';
-import { abortableDelay, boundedDomRead, DomReadTimeoutError } from './cancellation';
+import { abortableDelay, boundedDomRead, DomReadTimeoutError, isDomReadTimeout } from './cancellation';
 import type { AccountUiInteraction } from './types';
-import { createDirectUiInteraction } from './uiInteractionScheduler';
 
 export interface HumanInteractionOptions {
-  signal?: AbortSignal;
-  stage?: string;
-  ui?: AccountUiInteraction;
+  signal: AbortSignal;
+  stage: string;
+  ui: AccountUiInteraction;
   log?: (message: string) => void;
+  preserveFocus?: boolean;
 }
 
 export function foregroundPage<T>(
   page: Page,
-  options: Pick<HumanInteractionOptions, 'signal' | 'stage' | 'ui'> | undefined,
+  options: Pick<HumanInteractionOptions, 'signal' | 'stage' | 'ui'>,
   operation: () => Promise<T>
 ): Promise<T> {
-  const signal = options?.signal ?? new AbortController().signal;
-  const stage = options?.stage ?? 'unspecified';
-  const ui = options?.ui ?? createDirectUiInteraction(signal);
+  if (!options?.ui) throw new Error('UI_INTERACTION_REQUIRED');
+  const { signal, stage, ui } = options;
+  signal.throwIfAborted();
   return ui.foreground(stage, async () => {
     signal.throwIfAborted();
-    await page.bringToFront();
+    if (ui.focusMode !== 'target') {
+      await boundedDomRead(() => page.bringToFront(), stage + ':focus', 5000, signal);
+    }
     signal.throwIfAborted();
     return operation();
   });
 }
 
-function command<T>(run: () => Promise<T>, phase: string, ms: number, options?: HumanInteractionOptions): Promise<T> {
-  if (!options) return run();
-  options.signal?.throwIfAborted();
-  const stage = options.stage ?? 'unspecified';
+function command<T>(run: () => Promise<T>, phase: string, ms: number, options: HumanInteractionOptions): Promise<T> {
+  options.signal.throwIfAborted();
+  const stage = options.stage;
   if (phase !== 'mouse-move' && phase !== 'type') options.log?.('Browser command: ' + stage + ':' + phase);
-  return boundedDomRead(run, stage + ':' + phase, ms, options.signal ?? new AbortController().signal);
+  return boundedDomRead(run, stage + ':' + phase, ms, options.signal);
 }
 
-function pause(ms: number, options?: HumanInteractionOptions): Promise<void> {
-  return options?.signal ? abortableDelay(ms, options.signal) : sleep(ms);
+function pause(ms: number, options: HumanInteractionOptions): Promise<void> {
+  return abortableDelay(ms, options.signal);
 }
 
-function rethrowInterrupted(error: unknown, options?: HumanInteractionOptions): void {
-  options?.signal?.throwIfAborted();
-  if (error instanceof DomReadTimeoutError) throw error;
+function rethrowInterrupted(error: unknown, options: HumanInteractionOptions): void {
+  options.signal.throwIfAborted();
+  if (isDomReadTimeout(error)) throw error;
 }
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -68,44 +68,19 @@ async function humanClickUnlocked(
   locator: Locator,
   options: HumanInteractionOptions
 ): Promise<void> {
-  async function humanMouseMove(tx: number, ty: number): Promise<void> {
-    options.log?.('Browser command: ' + options.stage + ':mouse-move');
-    const sx = rand(80, 400);
-    const sy = rand(80, 400);
-    const steps = 22 + Math.floor(rand(0, 10));
-
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-      const x = sx + (tx - sx) * ease + Math.sin(t * Math.PI) * rand(-4, 4);
-      const y = sy + (ty - sy) * ease + Math.cos(t * Math.PI) * rand(-3, 3);
-      await command(() => page.mouse.move(x, y), 'mouse-move', 5000, options);
-      await pause(rand(8, 20), options);
-    }
-    await command(() => page.mouse.move(tx, ty), 'mouse-move', 5000, options);
-  }
-
-  await command(() => locator.scrollIntoViewIfNeeded({ timeout: 5000 }), 'scroll', 6000, options)
-    .catch(error => { rethrowInterrupted(error, options); });
-  const box = await command(() => locator.boundingBox(), 'bounding-box', 5000, options)
-    .catch(error => { rethrowInterrupted(error, options); return null; });
-
-  // Không lấy được toạ độ (element ẩn/0 kích thước) → dùng click thường
-  if (!box || box.width === 0 || box.height === 0) {
-    await command(() => locator.click({ timeout: 8000 }), 'fallback-click', 9000, options);
-    return;
-  }
-
-  const tx = box.x + box.width / 2 + rand(-3, 3);
-  const ty = box.y + box.height / 2 + rand(-2, 2);
-
-  // A bounded timeout abandons our wait; it does not cancel the browser
-  // command. Propagate it instead of queueing another input on the same page.
-  await humanMouseMove(tx, ty);
+  void page;
   await pause(rand(180, 420), options);
-  await command(() => page.mouse.down(), 'mouse-down', 5000, options);
-  await pause(rand(70, 150), options);
-  await command(() => page.mouse.up(), 'mouse-up', 5000, options);
+  try {
+    await command(() => locator.click({
+      timeout: 8000, delay: rand(70, 150), signal: options.signal
+    }), 'locator-click', 9000, options);
+  } catch (error: unknown) {
+    options.signal.throwIfAborted();
+    if (error instanceof Error && error.name === 'TimeoutError') {
+      throw new DomReadTimeoutError(options.stage + ':locator-click');
+    }
+    throw error;
+  }
   await pause(rand(250, 500), options);
 }
 
@@ -148,7 +123,15 @@ async function humanTypeUnlocked(
   options: HumanInteractionOptions
 ): Promise<void> {
   const { minMs, maxMs } = perCharDelayRange(perChar);
-  await humanClickUnlocked(page, locator, options);
+  const alreadyFocused = options.preserveFocus && await command(() => locator.evaluate((element) => {
+    const selection = element.ownerDocument.getSelection();
+    return (element as HTMLElement).isContentEditable &&
+      !element.closest('[inert], [aria-hidden="true"]') &&
+      element.ownerDocument.activeElement === element &&
+      Boolean(selection?.rangeCount && selection.isCollapsed &&
+        element.contains(selection.anchorNode) && element.contains(selection.focusNode));
+  }), 'focused-editor', 1000, options);
+  if (!alreadyFocused) await humanClickUnlocked(page, locator, options);
   await pause(rand(150, 350), options);
   options.log?.('Browser command: ' + options.stage + ':type');
   for (const ch of text) {
@@ -160,23 +143,14 @@ async function humanTypeUnlocked(
   await pause(rand(250, 600), options);
 }
 
-/** Click kiểu người thật: cuộn tới → hover → dừng → mousedown → dừng → mouseup */
+/** Click locator có actionability, delay bấm và khoảng dừng trước/sau. */
 export function humanClick(
   page: Page,
   locator: Locator,
-  options?: HumanInteractionOptions
+  options: HumanInteractionOptions
 ): Promise<void> {
-  const signal = options?.signal ?? new AbortController().signal;
-  const stage = options?.stage ?? 'unspecified';
-  const ui = options?.ui ?? createDirectUiInteraction(signal);
-  const normalized: HumanInteractionOptions = {
-    signal,
-    stage,
-    ui,
-    log: options?.log
-  };
-  return foregroundPage(page, normalized, () =>
-    humanClickUnlocked(page, locator, normalized)
+  return foregroundPage(page, options, () =>
+    humanClickUnlocked(page, locator, options)
   );
 }
 
@@ -185,20 +159,11 @@ export function humanType(
   page: Page,
   locator: Locator,
   text: string,
-  perChar?: PerCharDelay,
-  options?: HumanInteractionOptions
+  perChar: PerCharDelay | undefined,
+  options: HumanInteractionOptions
 ): Promise<void> {
-  const signal = options?.signal ?? new AbortController().signal;
-  const stage = options?.stage ?? 'unspecified';
-  const ui = options?.ui ?? createDirectUiInteraction(signal);
-  const normalized: HumanInteractionOptions = {
-    signal,
-    stage,
-    ui,
-    log: options?.log
-  };
-  return foregroundPage(page, normalized, () =>
-    humanTypeUnlocked(page, locator, text, perChar, normalized)
+  return foregroundPage(page, options, () =>
+    humanTypeUnlocked(page, locator, text, perChar, options)
   );
 }
 
@@ -221,7 +186,7 @@ export async function isDisabled(locator: Locator, signal?: AbortSignal, timeout
   return (signal ? boundedDomRead(read, 'enabled-check', timeoutMs, signal) : read())
     .catch(error => {
       signal?.throwIfAborted();
-      if (error instanceof DomReadTimeoutError) throw error;
+      if (isDomReadTimeout(error)) throw error;
       return false;
     });
 }
@@ -244,16 +209,23 @@ export async function clickIfVisible(
   page: Page,
   locator: Locator,
   timeout = 2500,
-  options?: HumanInteractionOptions
+  options: HumanInteractionOptions
 ): Promise<boolean> {
+  options.signal.throwIfAborted();
   const visible = await locator
     .first()
     .isVisible({ timeout })
-    .catch(() => false);
+    .catch((error: unknown) => {
+      rethrowInterrupted(error, options);
+      return false;
+    });
   if (!visible) return false;
-  if (!options) return false;
-  await humanClick(page, locator.first(), options).catch(() => {});
-  return true;
+  return humanClick(page, locator.first(), options)
+    .then(() => true)
+    .catch((error: unknown) => {
+      rethrowInterrupted(error, options);
+      return false;
+    });
 }
 
 /**
@@ -262,17 +234,10 @@ export async function clickIfVisible(
  */
 export async function dismissOverlays(
   page: Page,
-  options?: HumanInteractionOptions
+  options: HumanInteractionOptions
 ): Promise<number> {
-  const signal = options?.signal ?? new AbortController().signal;
-  const stage = options?.stage ?? 'dismiss-overlays';
-  const ui = options?.ui ?? createDirectUiInteraction(signal);
-  const normalized: HumanInteractionOptions = {
-    ...options,
-    signal,
-    stage,
-    ui,
-  };
+  const { signal } = options;
+  signal.throwIfAborted();
   const candidates = [
     'button:has-text("Got it")',
     'div[role="button"]:text-is("Got it")',
@@ -288,12 +253,20 @@ export async function dismissOverlays(
   for (const sel of candidates) {
     signal.throwIfAborted();
     const loc = page.locator(sel).first();
-    if (await loc.isVisible({ timeout: 600 }).catch(() => false)) {
-      await foregroundPage(page, normalized, async () => {
-        await loc.click({ timeout: 2500 }).catch(() => {});
-      });
+    const visible = await loc.isVisible({ timeout: 600 }).catch((error: unknown) => {
+      rethrowInterrupted(error, options);
+      return false;
+    });
+    if (visible) {
+      const clicked = await foregroundPage(page, options, () => loc.click({ timeout: 2500 }))
+        .then(() => true)
+        .catch((error: unknown) => {
+          rethrowInterrupted(error, options);
+          return false;
+        });
+      if (!clicked) continue;
       closed++;
-      await pause(rand(400, 800), normalized);
+      await pause(rand(400, 800), options);
     }
   }
   return closed;

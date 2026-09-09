@@ -39,7 +39,7 @@ import { dump, StepError } from './diag';
 import { skipOnboardingSurvey } from './overlays';
 import type { AccountUiInteraction } from './types';
 import { foregroundPage } from './human';
-import { createDirectUiInteraction } from './uiInteractionScheduler';
+import { abortableDelay, boundedDomRead, isDomReadTimeout } from './cancellation';
 
 const SIGNUP_URL =
   'https://www.capcut.com/signup?redirect_url=https%3A%2F%2Fwww.capcut.com%2Fmy-edit&lang=en';
@@ -64,8 +64,13 @@ export interface SignupOptions {
    * Không truyền mà CapCut lại đòi OTP thì `getOtpCode` ném lỗi rõ ràng.
    */
   getOtp?: (email: string) => Promise<string>;
-  ui?: AccountUiInteraction;
-  signal?: AbortSignal;
+  ui: AccountUiInteraction;
+  signal: AbortSignal;
+}
+
+function rethrowInterrupted(error: unknown, signal: AbortSignal): void {
+  signal.throwIfAborted();
+  if (isDomReadTimeout(error)) throw error;
 }
 
 // -----------------------------------------------------------------------------
@@ -78,18 +83,34 @@ async function fillVerified(
   value: string,
   name: string,
   log: LogFn,
+  ui: AccountUiInteraction,
+  signal: AbortSignal,
+  stage: string,
   attempts = 3
 ): Promise<void> {
   await input.waitFor({ state: 'visible', timeout: 25000 });
 
   for (let i = 0; i < attempts; i++) {
-    await input.clear().catch(() => {});
-    await input.pressSequentially(value, { delay: 100 });
-    if ((await input.inputValue()) === value) {
+    signal.throwIfAborted();
+    const matches = await foregroundPage(
+      input.page(),
+      { signal, stage: `${stage}:attempt-${i + 1}`, ui },
+      async () => {
+        await boundedDomRead(() => input.clear(), `${stage}:clear`, 5000, signal);
+        await boundedDomRead(
+          () => input.pressSequentially(value, { delay: 100 }),
+          `${stage}:type`,
+          Math.max(5000, value.length * 100 + 5000),
+          signal
+        );
+        return boundedDomRead(() => input.inputValue(), `${stage}:validate`, 2000, signal);
+      }
+    );
+    if (matches === value) {
       log(`   ✅ Đã điền ${name}`);
       return;
     }
-    await input.page().waitForTimeout(400);
+    await abortableDelay(400, signal);
   }
   throw new Error(`Không điền được ${name} sau ${attempts} lần thử`);
 }
@@ -106,7 +127,9 @@ async function clickUntilVisible(
   for (let i = 0; i < attempts; i++) {
     signal.throwIfAborted();
     await foregroundPage(trigger.page(), { signal, stage: 'signup:open-email-form', ui }, async () => {
-      await trigger.click({ timeout: 3000 }).catch(() => {});
+      await trigger.click({ timeout: 3000 }).catch((error: unknown) => {
+        rethrowInterrupted(error, signal);
+      });
     });
     if (await target.isVisible({ timeout: 600 }).catch(() => false)) return;
   }
@@ -181,7 +204,7 @@ async function fillOtp(
     .first();
 
   if (await single.isVisible({ timeout: 8000 }).catch(() => false)) {
-    await fillVerified(single, code, 'Mã xác minh', log);
+    await fillVerified(single, code, 'Mã xác minh', log, ui, signal, 'signup:fill-otp');
     return;
   }
 
@@ -203,7 +226,9 @@ async function acceptTermsIfAny(
     if (!(await box.isVisible({ timeout: 600 }).catch(() => false))) continue;
     // Dùng click thay vì check() vì CapCut bọc checkbox trong label custom
     await foregroundPage(page, { signal, stage: 'signup:accept-terms', ui }, async () => {
-      await box.click({ timeout: 2500, force: true }).catch(() => {});
+      await box.click({ timeout: 2500, force: true }).catch((error: unknown) => {
+        rethrowInterrupted(error, signal);
+      });
     });
   }
   if (n > 0) log(`   → Đã xử lý ${n} checkbox điều khoản`);
@@ -282,7 +307,9 @@ async function handleBirthdayIfPresent(
       );
     } else {
       await foregroundPage(page, { signal, stage: 'signup:birthday-day-select-fallback', ui }, async () => {
-        await page.locator('.lv-select-option, [role="option"]').first().click().catch(() => {});
+        await page.locator('.lv-select-option, [role="option"]').first().click().catch((error: unknown) => {
+          rethrowInterrupted(error, signal);
+        });
       });
     }
     await page.waitForTimeout(400);
@@ -329,7 +356,9 @@ async function dismissOnboarding(
     .first();
   if (await openCapcutBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
     await foregroundPage(page, { signal, stage: 'signup:open-capcut-space', ui }, async () => {
-      await openCapcutBtn.click({ timeout: 8000 }).catch(() => {});
+      await openCapcutBtn.click({ timeout: 8000 }).catch((error: unknown) => {
+        rethrowInterrupted(error, signal);
+      });
     });
     log('   → Đã bấm "Open CapCut"');
     await page.waitForTimeout(4000);
@@ -345,7 +374,9 @@ async function dismissOnboarding(
     .first();
   if (await close.isVisible({ timeout: 3000 }).catch(() => false)) {
     await foregroundPage(page, { signal, stage: 'signup:close-onboarding-modal', ui }, async () => {
-      await close.click({ timeout: 5000 }).catch(() => {});
+      await close.click({ timeout: 5000 }).catch((error: unknown) => {
+        rethrowInterrupted(error, signal);
+      });
     });
     await page.waitForTimeout(1500);
   }
@@ -368,8 +399,10 @@ export async function signupCapcut(
   opts: SignupOptions
 ): Promise<SignupResult> {
   const { log, getOtp } = opts;
-  const signal = opts.signal ?? new AbortController().signal;
-  const ui = opts.ui ?? createDirectUiInteraction(signal);
+  if (!opts.ui) throw new Error('UI_INTERACTION_REQUIRED');
+  if (!opts.signal) throw new Error('ABORT_SIGNAL_REQUIRED');
+  const { signal, ui } = opts;
+  signal.throwIfAborted();
 
   log('\n============================================================');
   log('📝 ĐĂNG KÝ TÀI KHOẢN CAPCUT WEB');
@@ -395,7 +428,7 @@ export async function signupCapcut(
   log('   → Đã mở form email');
 
   // --- Bước 2: điền email -> Continue ---
-  await fillVerified(emailInput, creds.email, 'Email', log);
+  await fillVerified(emailInput, creds.email, 'Email', log, ui, signal, 'signup:fill-email');
 
   const continueBtn = page.getByRole('button', { name: /^(Continue|Tiếp tục|Next)$/ }).first();
   await continueBtn.waitFor({ state: 'visible', timeout: 25000 });
@@ -424,9 +457,17 @@ export async function signupCapcut(
     );
   }
 
-  await fillVerified(pwInputs.first(), creds.password, 'Password', log);
+  await fillVerified(pwInputs.first(), creds.password, 'Password', log, ui, signal, 'signup:fill-password');
   if (pwCount > 1) {
-    await fillVerified(pwInputs.nth(1), creds.password, 'Xác nhận password', log);
+    await fillVerified(
+      pwInputs.nth(1),
+      creds.password,
+      'Xác nhận password',
+      log,
+      ui,
+      signal,
+      'signup:fill-password-confirmation'
+    );
   }
 
   await acceptTermsIfAny(page, log, ui, signal);
@@ -463,7 +504,9 @@ export async function signupCapcut(
       .first();
     if (await verifyBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
       await foregroundPage(page, { signal, stage: 'signup:verify-otp', ui }, async () => {
-        await verifyBtn.click({ timeout: 15000 }).catch(() => {});
+        await verifyBtn.click({ timeout: 15000 }).catch((error: unknown) => {
+          rethrowInterrupted(error, signal);
+        });
       });
     }
     log('   → Đã gửi mã xác minh, chờ chuyển trang...');

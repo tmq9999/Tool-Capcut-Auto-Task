@@ -305,6 +305,7 @@ describe('registerLogsIpc', () => {
 describe('registerAutomationIpc', () => {
   const validConfig = {
     threadCount: 2,
+    maxBillablePurchases: 2,
     browser: 'multilogin',
     headless: false,
     retryCount: 0,

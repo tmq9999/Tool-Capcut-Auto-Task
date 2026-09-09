@@ -11,6 +11,7 @@ import {
 } from '../AutomationRunService';
 import type { BrowserLauncher, LaunchedProfile } from '../capcut/launcher';
 import { createDirectUiInteraction, type RunUiInteractionScheduler } from '../capcut/uiInteractionScheduler';
+import type { AutomationRunTerminalSnapshot } from '../AutomationRunService';
 import { DomReadTimeoutError } from '../capcut/cancellation';
 import { runDeterministicSimulation } from './fixtures/deterministicRunHarness';
 import { LogBus, type ILogSink } from '../LogBus';
@@ -29,6 +30,7 @@ import type {
 import type { RunningThreadInfo } from '../AutomationRunService';
 import { headlessWorkerStaggerMs } from '../AutomationRunService';
 import { createAutomationWorkSourceFactory } from '../AutomationWorkSource';
+import type { ObservationIdentity, ObservationScope } from '../../providers/ObservedHttpClient';
 
 class CollectingSink implements ILogSink {
   public rows: unknown[] = [];
@@ -146,7 +148,8 @@ class StubBrowserRuntime implements IBrowserRuntimeApi {
 
   async startProfile(params: {
     headless: boolean;
-    proxy?: { host: string };
+    proxy?: { host: string; port?: number; type?: string; username?: string; password?: string };
+    signal?: AbortSignal;
   }): Promise<StartedProfile> {
     this.counter += 1;
     if (this.counter === this.failAtCall) throw new Error('launcher refused');
@@ -216,18 +219,22 @@ function baseConfig(overrides: Partial<AutomationRunConfigDTO> = {}): Automation
     emailSource: { mode: 'api', provider: 'gmail94', service: 'facebook' },
     proxy: { mode: 'proxykey' },
     password: { mode: 'random', length: 12, uppercase: true, numbers: true, special: false },
-    ...overrides
+    ...overrides,
+    maxBillablePurchases: (overrides.emailSource?.mode ?? 'api') === 'api' ? (overrides.maxBillablePurchases ?? 20) : 0
   });
 }
 
 function createService(
   launcher?: BrowserLauncher,
   httpOnlyRunner?: HttpOnlyAccountRunner,
-  capcut?: CapcutTaskRunner
+  capcut?: CapcutTaskRunner,
+  observation?: ObservationScope
 ): AutomationRunService {
+  let configuredHoldMs = 0;
   const workSources: AutomationWorkSourceFactory = {
     create: (config) => {
       workSourceCreateCalls += 1;
+      configuredHoldMs = config.testDurationMs;
       if (config.emailSource.mode === 'manual') {
         const items: AutomationWorkItem[] = config.emailSource.entries.flatMap((entry, i) => {
           const trimmed = entry.trim();
@@ -243,6 +250,7 @@ function createService(
         });
         return {
           kind: 'finite',
+      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
           prepare: async (c) => {
             workSourcePrepareCalls += 1;
             if (items.length === 0) {
@@ -275,6 +283,7 @@ function createService(
 
       return {
         kind: 'finite',
+      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
         prepare: async (c) => {
           workSourcePrepareCalls += 1;
           if (emailSource.available === 0 && emailSource.failures.length > 0) {
@@ -301,6 +310,63 @@ function createService(
     }
   };
 
+  const uiLauncher: BrowserLauncher = launcher ?? {
+    name: 'api-v3',
+    launch: async (options) => {
+      const started = await browser.startProfile({
+        headless: options.headless ?? false,
+        signal: options.signal,
+        proxy: options.proxy ? {
+          host: options.proxy.host,
+          port: Number(options.proxy.port),
+          type: options.proxy.scheme,
+          username: options.proxy.username,
+          password: options.proxy.password
+        } : undefined
+      });
+      options.onProfileStarted?.(started.profileId);
+      return {
+        profileId: started.profileId,
+        port: started.port ?? 0,
+        page: {} as LaunchedProfile['page'],
+        context: {} as LaunchedProfile['context']
+      };
+    },
+    stop: (profileId) => browser.stopProfile(profileId)
+  };
+  const uiRunner: CapcutTaskRunner = capcut ?? {
+    runAccount: async (input) => {
+      if (configuredHoldMs >= HOLD_BLOCK_THRESHOLD_MS) {
+        await new Promise<void>((_resolve, reject) => {
+          if (input.signal.aborted) reject(input.signal.reason);
+          else input.signal.addEventListener('abort', () => reject(input.signal.reason), { once: true });
+        });
+      }
+      const observedAt = new Date().toISOString();
+      return {
+        authenticated: true,
+        done: 1,
+        total: 1,
+        credits: 10,
+        creditsTotal: 10,
+        missing: [],
+        tasks: [{ key: 'capcut_web_newbie_register', title: 'Register', reward: 10, status: 4 }],
+        unsettledProofs: [],
+        verification: {
+          runId: input.runId ?? 'run-1',
+          sessionAlias: input.sessionAlias ?? 'worker-1-session-1',
+          observedAt,
+          requiredAfter: observedAt,
+          fresh: true,
+          final: true,
+          serverTotal: 1,
+          serverDone: 1,
+          complete: true
+        }
+      };
+    }
+  };
+
   const service = new AutomationRunService(
     {
       workSources,
@@ -309,9 +375,10 @@ function createService(
       browser,
       accounts,
       logBus,
-      ...(launcher ? { launcher: () => launcher } : {}),
+      launcher: () => uiLauncher,
+      observation,
       ...(httpOnlyRunner ? { httpOnlyRunner } : {}),
-      ...(capcut ? { capcut } : {})
+      capcut: uiRunner
     },
     {
       // A long hold blocks until the test asks the run to stop, so tests can
@@ -342,6 +409,141 @@ beforeEach(() => {
   idCounter = 0;
   workSourceCreateCalls = 0;
   workSourcePrepareCalls = 0;
+});
+
+describe('provider observation cleanup ownership', () => {
+  it('preserves acquisition ownership when a lease is released before an account exists', async () => {
+    const identities: Readonly<ObservationIdentity>[] = [];
+    const observation: ObservationScope = {
+      withObservationScope: async (identity, operation) => {
+        identities.push(identity);
+        return operation();
+      }
+    };
+    const service = createService(undefined, undefined, undefined, observation);
+    const lease = {
+      leaseId: 'lease-early', keyValue: 'K1', ip: '10.0.0.1', host: '10.0.0.1',
+      port: 20001, protocol: 'http', username: null, password: null, nextChangeSeconds: null
+    } as AcquiredProxyLease;
+    const acquisitionIdentity = {
+      runId: 'run-early', workerAlias: 'worker-1', acquisitionAlias: 'run-early:worker-1:1',
+      accountAlias: 'unassigned', sessionAlias: 'unassigned', authorityRef: 'automation-run'
+    } as const;
+    const privateService = service as unknown as {
+      cleanupIteration: (
+        source: AutomationWorkSource,
+        item: AutomationWorkItem | null,
+        committed: boolean,
+        thread: unknown,
+        lease: AcquiredProxyLease | undefined,
+        identity: Readonly<ObservationIdentity>
+      ) => Promise<void>;
+    };
+
+    await privateService.cleanupIteration(
+      { release: () => {}, purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }) } as unknown as AutomationWorkSource,
+      null,
+      false,
+      undefined,
+      lease,
+      acquisitionIdentity
+    );
+
+    expect(identities).toContainEqual({
+      ...acquisitionIdentity,
+      provider: 'kiotproxy',
+      operation: 'proxy-release'
+    });
+  });
+
+  it('runs profile stop and proxy cleanup under exact thread/run scopes', async () => {
+    emailSource.available = 1;
+    const active: Readonly<ObservationIdentity>[] = [];
+    const completed: Readonly<ObservationIdentity>[] = [];
+    const observation: ObservationScope = {
+      withObservationScope: async (identity, operation) => {
+        active.push(identity);
+        const result = await operation();
+        completed.push(identity);
+        return result;
+      }
+    };
+    const service = createService(undefined, undefined, undefined, observation);
+
+    await service.start(baseConfig({ threadCount: 1 }));
+    await service.waitForCompletion();
+
+    const cleanup = completed.filter((identity) =>
+      identity.operation === 'profile-stop' || identity.operation === 'proxy-release'
+    );
+    expect(cleanup).toEqual([
+      {
+        runId: 'id-1', workerAlias: 'worker-1', accountAlias: 'account-1',
+        sessionAlias: 'worker-1-session-1', provider: 'multilogin', operation: 'profile-stop'
+      },
+      {
+        runId: 'id-1', workerAlias: 'worker-1', accountAlias: 'account-1',
+        sessionAlias: 'worker-1-session-1', provider: 'kiotproxy', operation: 'proxy-release'
+      },
+      {
+        runId: 'id-1', workerAlias: null, acquisitionAlias: null, accountAlias: null,
+        sessionAlias: null, provider: 'kiotproxy', operation: 'proxy-release', authorityRef: 'all'
+      }
+    ]);
+    expect(active).toEqual(expect.arrayContaining(cleanup));
+  });
+
+  it('runs health launch and stop with real run/worker/session and unassigned account', async () => {
+    const identities: Readonly<ObservationIdentity>[] = [];
+    let profileSequence = 0;
+    const observation: ObservationScope = {
+      withObservationScope: async (identity, operation) => {
+        identities.push(identity);
+        return operation();
+      }
+    };
+    const service = new AutomationRunService({
+      workSources: { create: () => { throw new Error('unused'); } },
+      emailOtp: { readOtp: async () => null },
+      proxies: { acquire: async () => { throw new Error('unused'); }, release: async () => {}, releaseAll: async () => {} },
+      browser: { startProfile: async () => { throw new Error('unused'); }, stopProfile: async () => {} },
+      accounts: { create: () => { throw new Error('unused'); }, update: () => ({ success: true }) },
+      logBus: { emit: () => ({}) as never },
+      observation,
+      launcher: () => ({
+        name: 'api-v3',
+        launch: async () => ({
+          profileId: 'health-profile-' + ++profileSequence,
+          port: 9222,
+          page: {} as never,
+          context: {} as never
+        }),
+        stop: async () => {}
+      })
+    }, {
+      userDataDir: 'unused',
+      nextId: () => 'run-health-observed',
+      createTelemetry: () => ({
+        record: () => {}, close: async () => {}, filePath: () => 'unused', artifactBasename: () => 'run.jsonl'
+      })
+    });
+
+    await service.runHealthCheck({ threadCount: 3, rolloutStage: 3, headless: false });
+
+    expect(identities).toHaveLength(6);
+    for (const worker of ['worker-1', 'worker-2', 'worker-3']) {
+      expect(identities).toEqual(expect.arrayContaining([
+        {
+          runId: 'run-health-observed', workerAlias: worker, accountAlias: 'unassigned',
+          sessionAlias: worker + '-session-1', provider: 'multilogin', operation: 'profile-launch'
+        },
+        {
+          runId: 'run-health-observed', workerAlias: worker, accountAlias: 'unassigned',
+          sessionAlias: worker + '-session-1', provider: 'multilogin', operation: 'profile-stop'
+        }
+      ]));
+    }
+  });
 });
 
 describe('headless worker startup scheduling', () => {
@@ -392,6 +594,7 @@ describe('mail-limited runs with the real source factory', () => {
     let orders = 0;
     const factory = createAutomationWorkSourceFactory({
       openAcquisitionSession: async () => ({
+        purchaseStats: () => ({ budget: 20, attempted: 0, confirmed: 0, ambiguous: 0 }),
         acquireOne: async () => ({ purchasedEmail: purchasedRow(++orders), reservationId: 'r-' + orders }),
         commit: () => {}, release: () => {}
       })
@@ -415,6 +618,56 @@ describe('mail-limited runs with the real source factory', () => {
 });
 
 describe('AutomationRunService.start with an API email source', () => {
+  it('binds a fenced mailbox to the created account before browser launch', async () => {
+    const order: string[] = [];
+    const item: AutomationWorkItem = {
+      kind: 'new', sourceId: 'reservation-1', reservationId: 'reservation-1',
+      purchasedEmailId: 'mailbox-1', ownerRef: 'owner-1',
+      email: 'fenced@example.com', emailProvider: 'gmail94'
+    };
+    const source: AutomationWorkSource = {
+      kind: 'finite',
+      prepare: async () => ({ workerTarget: 1 }),
+      next: async () => item,
+      bind: () => { order.push('bind'); },
+      commit: () => { order.push('commit'); },
+      release: () => {},
+      purchaseStats: () => ({ budget: 1, attempted: 1, confirmed: 1, ambiguous: 0 })
+    };
+    const launcher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async (options) => {
+        order.push('launch');
+        options.onProfileStarted?.('profile-1');
+        return {
+          profileId: 'profile-1', port: 9222,
+          page: {} as LaunchedProfile['page'], context: {} as LaunchedProfile['context']
+        };
+      }),
+      stop: vi.fn(async () => {})
+    };
+    const service = new AutomationRunService({
+      workSources: { create: () => source },
+      emailOtp: { readOtp: async () => '123456' }, proxies: proxySource, browser, accounts, logBus,
+      launcher: () => launcher,
+      capcut: {
+        runAccount: async (input) => ({
+          authenticated: true, done: 1, total: 1, credits: 1, creditsTotal: 1,
+          missing: [], tasks: [], unsettledProofs: [],
+          verification: {
+            runId: input.runId!, sessionAlias: input.sessionAlias!, observedAt: new Date().toISOString(),
+            requiredAfter: new Date().toISOString(), fresh: true, final: true, serverTotal: 1, serverDone: 1,
+            complete: true
+          }
+        })
+      }
+    }, { sleep: async () => {}, nextId: () => 'run-fenced' });
+
+    await service.start(baseConfig({ threadCount: 1, proxy: { mode: 'direct', entries: [] } }));
+    await service.waitForCompletion();
+
+    expect(order.slice(0, 3)).toEqual(['bind', 'launch', 'commit']);
+  });
   it('buys one mailbox per configured thread', async () => {
     emailSource.available = 2;
     const service = createService();
@@ -466,14 +719,14 @@ describe('AutomationRunService.start with an API email source', () => {
     ]);
   });
 
-  it('holds the browsers for the configured test duration and then stops them', async () => {
+  it('uses a verified UI result instead of treating testDuration as completion proof', async () => {
     emailSource.available = 2;
     const service = createService();
 
     await service.start(baseConfig({ threadCount: 2, testDurationMs: 10_000 }));
     await service.waitForCompletion();
 
-    expect(sleepCalls).toContain(10_000);
+    expect(sleepCalls).not.toContain(10_000);
     expect(browser.stopped.sort()).toEqual(['profile-1', 'profile-2']);
   });
 
@@ -883,6 +1136,7 @@ describe('AutomationRunService HTTP-only mission transport', () => {
       workSources: {
         create: () => ({
           kind: 'finite',
+      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
           prepare: async () => ({ workerTarget: 1 }),
           next: async () => {
             if (!available) return null;
@@ -934,7 +1188,8 @@ describe('AutomationRunService HTTP-only mission transport', () => {
     const service = new AutomationRunService({
       workSources: {
         create: () => ({
-          kind: 'finite', prepare: async () => ({ workerTarget: 1 }),
+          kind: 'finite',
+      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }), prepare: async () => ({ workerTarget: 1 }),
           next: async () => {
             if (!available) return null;
             available = false;
@@ -967,6 +1222,124 @@ describe('AutomationRunService HTTP-only mission transport', () => {
   });
 });
 
+describe('AutomationRunService strict UI result classification', () => {
+  it('fails a UI account with no verification receipt and never uses legacy persistence', async () => {
+    emailSource.available = 1;
+    const recordLegacy = vi.fn();
+    const capcut: CapcutTaskRunner = {
+      runAccount: async () => ({
+        authenticated: true,
+        done: 1,
+        total: 1,
+        credits: 10,
+        creditsTotal: 10,
+        missing: [],
+        tasks: [{ key: 'capcut_web_newbie_register', title: 'Register', reward: 10, status: 4 }],
+        unsettledProofs: [],
+        verification: undefined
+      } as unknown as Awaited<ReturnType<CapcutTaskRunner['runAccount']>>)
+    };
+    const service = new AutomationRunService({
+      workSources: {
+        create: () => {
+          let available = true;
+          return {
+            kind: 'finite',
+            purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
+            prepare: async () => ({ workerTarget: 1 }),
+            next: async () => {
+              if (!available) return null;
+              available = false;
+              return { kind: 'new', sourceId: 'manual-1', email: 'ui@example.com', emailProvider: 'manual' };
+            },
+            commit: () => {},
+            release: () => {}
+          };
+        }
+      },
+      emailOtp: { readOtp: async () => '123456' },
+      proxies: proxySource,
+      browser,
+      accounts,
+      logBus,
+      capcut,
+      taskProgress: { record: async () => {}, recordLegacy }
+    }, { sleep: async () => {}, nextId: () => 'run-strict-ui' });
+
+    await service.start(baseConfig({
+      threadCount: 1,
+      emailSource: { mode: 'manual', entries: ['ui@example.com'] }
+    }));
+    const summary = await service.waitForCompletion();
+
+    expect(summary.accountsCompleted).toBe(0);
+    expect(summary.accountsFailed).toBe(1);
+    expect(recordLegacy).not.toHaveBeenCalled();
+  });
+});
+
+describe('AutomationRunService terminal lifecycle snapshot', () => {
+  it('publishes the real scheduler and resource state before disposal', async () => {
+    emailSource.available = 1;
+    let terminalSnapshot: AutomationRunTerminalSnapshot | undefined;
+    const service = new AutomationRunService(
+      {
+        workSources: {
+          create: () => {
+            let available = true;
+            return {
+              kind: 'finite', purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
+              prepare: async () => ({ workerTarget: 1 }),
+              next: async () => available
+                ? (available = false, { kind: 'new', sourceId: 'one', email: 'one@example.com', emailProvider: 'manual' })
+                : null,
+              commit: () => {}, release: () => {}
+            };
+          }
+        },
+        emailOtp: { readOtp: async () => '123456' }, proxies: proxySource, browser,
+        accounts, logBus,
+        launcher: () => ({
+          name: 'api-v3',
+          launch: async (options) => {
+            options.onProfileStarted?.('snapshot-profile');
+            return { profileId: 'snapshot-profile', port: 9222, page: {} as never, context: {} as never };
+          },
+          stop: async () => {}
+        }),
+        capcut: {
+          runAccount: async (input) => {
+            const at = new Date().toISOString();
+            return {
+              authenticated: true, done: 1, total: 1, credits: 10, creditsTotal: 10, missing: [],
+              tasks: [{ key: 'capcut_web_newbie_register', title: 'Register', reward: 10, status: 4 }],
+              unsettledProofs: [], verification: {
+                runId: input.runId!, sessionAlias: input.sessionAlias!, observedAt: at, requiredAfter: at,
+                fresh: true, final: true, serverTotal: 1, serverDone: 1, complete: true
+              }
+            };
+          }
+        }
+      },
+      { nextId: () => 'run-snapshot', onTerminalSnapshot: (snapshot) => { terminalSnapshot = snapshot; } }
+    );
+
+    await service.start(baseConfig({ threadCount: 1 }));
+    await service.waitForCompletion();
+
+    expect(terminalSnapshot).toEqual(expect.objectContaining({
+      activeThreads: 0,
+      activeProfiles: 0,
+      activeProxies: 0,
+      activeMailReservations: 0,
+      schedulers: expect.any(Array)
+    }));
+    expect(terminalSnapshot?.schedulers.every(({ snapshot }) =>
+      snapshot.foregroundWaiting === 0 && snapshot.editorWaiting === 0 && snapshot.editorActive === 0
+    )).toBe(true);
+  });
+});
+
 /**
  * `xcli` là launcher MẶC ĐỊNH và nó từ chối proxy có user/pass
  * (`XcliLauncher.ts:139`), trong khi placeholder trên Dashboard lại mời dán đúng
@@ -991,6 +1364,7 @@ describe('AutomationRunService chặn tổ hợp xcli + proxy user/pass', () => 
           });
           return {
             kind: 'finite',
+      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
             prepare: async (c) => ({ workerTarget: Math.min(c, items.length) }),
             next: async () => items.shift() ?? null,
             commit: () => {},
@@ -999,6 +1373,7 @@ describe('AutomationRunService chặn tổ hợp xcli + proxy user/pass', () => 
         }
         return {
           kind: 'continuous',
+      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
           prepare: async (c) => ({ workerTarget: c }),
           next: async () => ({ kind: 'new' as const, sourceId: 's-1', email: 'a@x.com', emailProvider: 'gmail94' }),
           commit: () => {},
@@ -1185,17 +1560,23 @@ describe('AutomationRunService progress and stop', () => {
     expect(service.getProgress()).toMatchObject({ state: 'stopped', terminalReason: { code: 'USER_STOP' } });
   });
 
-  it('allows retrying a failed profile teardown without forgetting its owner', async () => {
+  it('retains failed profile teardown ownership instead of retrying automatically', async () => {
     emailSource.available = 1;
     const service = createService();
     browser.failStopFor.add('profile-1');
     await service.start(baseConfig({ threadCount: 1 }));
     await service.waitForCompletion();
     expect(service.getRunningThreads()).toHaveLength(1);
+
     browser.failStopFor.clear();
     await service.stop();
-    expect(service.getRunningThreads()).toEqual([]);
-    expect(browser.stopped).toEqual(['profile-1']);
+
+    expect(service.getRunningThreads()).toHaveLength(1);
+    expect(browser.stopped).toEqual([]);
+    expect(service.getProgress()).toMatchObject({
+      state: 'failed',
+      terminalReason: { code: 'RESOURCE_CLEANUP_FAILED' }
+    });
   });
 
   it('publishes the full state sequence for a completed run', async () => {
@@ -1297,9 +1678,30 @@ describe('AutomationRunService progress and stop', () => {
 });
 
 describe('AutomationRunService.stopThread', () => {
-  it('reports failed per-row Stop and allows retry for a retained profile', async () => {
+  it('reports failed per-row Stop and never retries a retained uncertain profile', async () => {
     emailSource.available = 1;
-    const service = createService();
+    const launcher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: async (options) => {
+        options.onProfileStarted?.('profile-1');
+        return {
+          profileId: 'profile-1',
+          port: 9222,
+          page: {} as LaunchedProfile['page'],
+          context: {} as LaunchedProfile['context']
+        };
+      },
+      stop: async (profileId) => browser.stopProfile(profileId)
+    };
+    const capcut: CapcutTaskRunner = {
+      runAccount: async ({ signal }) => {
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+        throw new Error('unreachable');
+      }
+    };
+    const service = createService(launcher, undefined, capcut);
     await service.start(baseConfig({ threadCount: 1, testDurationMs: 600_000 }));
     await service.waitUntilRunning();
     browser.failStopFor.add('profile-1');
@@ -1307,8 +1709,9 @@ describe('AutomationRunService.stopThread', () => {
     browser.failStopFor.clear();
     const second = await service.stopThread('acc-1');
     expect(first).toBe(false);
-    expect(second).toBe(true);
-    expect(service.getRunningThreads()).toEqual([]);
+    expect(second).toBe(false);
+    expect(service.getRunningThreads()).toHaveLength(1);
+    expect(browser.stopped).toEqual([]);
   });
 
   it('keeps proxy cleanup failure details in the final Stop summary', async () => {
@@ -1658,6 +2061,7 @@ describe('AutomationRunService giới hạn theo danh sách proxy key của phi�
 
 describe('AutomationRunService continuous cancellable worker lifecycle', () => {
   class StubWorkSource implements AutomationWorkSource {
+    purchaseStats() { return { budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }; }
     public prepareCalls = 0;
     public nextCalls = 0;
     public maxConcurrentNext = 0;
@@ -1795,6 +2199,47 @@ describe('AutomationRunService continuous cancellable worker lifecycle', () => {
     const sink = new CollectingSink();
     const logBus = new LogBus(sink, { maxBatchSize: 1000 });
     const workloads = new WorkloadGate(options.holdFromWorkload ?? null);
+    const launcher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: async (launchOptions) => {
+        const started = await browser.startProfile({ headless: launchOptions.headless ?? false });
+        launchOptions.onProfileStarted?.(started.profileId);
+        return {
+          profileId: started.profileId,
+          port: started.port ?? 0,
+          page: {} as LaunchedProfile['page'],
+          context: {} as LaunchedProfile['context']
+        };
+      },
+      stop: (profileId) => browser.stopProfile(profileId)
+    };
+    const capcut: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        await Promise.race([
+          workloads.sleep(100_000),
+          new Promise<never>((_resolve, reject) => {
+            if (input.signal.aborted) reject(input.signal.reason);
+            else input.signal.addEventListener('abort', () => reject(input.signal.reason), { once: true });
+          })
+        ]);
+        const observedAt = new Date().toISOString();
+        return {
+          authenticated: true,
+          done: 1,
+          total: 1,
+          credits: 10,
+          creditsTotal: 10,
+          missing: [],
+          tasks: [{ key: 'capcut_web_newbie_register', title: 'Register', reward: 10, status: 4 }],
+          unsettledProofs: [],
+          verification: {
+            runId: input.runId ?? 'run-1', sessionAlias: input.sessionAlias ?? 'worker-1-session-1',
+            observedAt, requiredAfter: observedAt, fresh: true, final: true,
+            serverTotal: 1, serverDone: 1, complete: true
+          }
+        };
+      }
+    };
     let id = 0;
     const config = baseConfig({
       threadCount: options.threadCount,
@@ -1810,7 +2255,9 @@ describe('AutomationRunService continuous cancellable worker lifecycle', () => {
         proxies,
         browser,
         accounts,
-        logBus
+        logBus,
+        launcher: () => launcher,
+        capcut
       },
       {
         nextId: () => 'id-' + ++id,
@@ -2240,6 +2687,7 @@ describe('session-scoped browser ownership', () => {
 
   interface ServiceOwnershipAccessor {
     activeThreads: Map<string, InternalThreadSessionRef>;
+    uiSchedulers: Map<string, RunUiInteractionScheduler>;
     stopSession(thread: InternalThreadSessionRef, session: BrowserSessionRuntime): Promise<boolean>;
   }
 
@@ -2264,6 +2712,7 @@ describe('session-scoped browser ownership', () => {
         }));
         return {
           kind: 'finite' as const,
+      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
           prepare: async (c: number) => ({ workerTarget: Math.min(c, items.length) }),
           next: async () => items.shift() ?? null,
           commit: () => {},
@@ -2512,6 +2961,35 @@ describe('session-scoped browser ownership', () => {
     await service.waitForCompletion();
   });
 
+  it('does not let a late provider stop settlement clear a timed-out cleanup failure', async () => {
+    emailSource.available = 1;
+    const deferred = createDeferred<void>();
+    const customBrowser = new StubBrowserRuntime();
+    customBrowser.stopProfile = vi.fn(async () => deferred.promise);
+    const service = new AutomationRunService({
+      workSources: createStubFactory(['user@example.com|pass']),
+      emailOtp: { readOtp: async () => '123456' }, proxies: proxySource,
+      browser: customBrowser, accounts, logBus
+    }, {
+      sleep: async () => {}, nextId: () => 'run-1', profileStopTimeoutMs: 0
+    });
+
+    await service.start(baseConfig({ threadCount: 1, testDurationMs: 600_000 }));
+    await service.waitUntilRunning();
+    const thread = (service as unknown as ServiceOwnershipAccessor).activeThreads.get('acc-1')!;
+    const session = thread.session!;
+    expect(await (service as unknown as ServiceOwnershipAccessor).stopSession(thread, session)).toBe(false);
+    expect(session.stopFailed).toBe(true);
+
+    deferred.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(session.stopFailed).toBe(true);
+    expect(thread.session).toBe(session);
+    expect(customBrowser.stopProfile).toHaveBeenCalledTimes(1);
+  });
+
   it('defers Stop requested before profile id and stops the late profile exactly once', async () => {
     const stoppedProfiles: string[] = [];
     const defStart = createDeferred<void>();
@@ -2684,7 +3162,7 @@ describe('session-scoped browser ownership', () => {
   });
 
   it('turns failed profile stop into run-terminal scheduler shutdown', async () => {
-    let shutdownReason: { reason: { code?: string } } | undefined;
+    let shutdownReason: { code?: string; message?: string } | undefined;
     const customBrowser = new StubBrowserRuntime();
     customBrowser.stopProfile = vi.fn(async () => {
       throw new Error('teardown broken');
@@ -2716,20 +3194,146 @@ describe('session-scoped browser ownership', () => {
     // Attach mock scheduler
     session1!.scheduler = {
       confirmProfileStopped: () => {},
-      shutdown: (reason: unknown) => { shutdownReason = reason as { reason: { code?: string } }; }
+      shutdown: (reason: unknown) => { shutdownReason = reason as { code?: string; message?: string }; }
     } as unknown as RunUiInteractionScheduler;
+    (service as unknown as ServiceOwnershipAccessor).uiSchedulers.set(session1!.alias, session1!.scheduler);
 
     await (service as unknown as ServiceOwnershipAccessor).stopSession(thread1!, session1!);
 
     expect(shutdownReason).toBeDefined();
-    expect(shutdownReason!.reason.code).toBe('RESOURCE_CLEANUP_FAILED');
+    expect(shutdownReason).toMatchObject({
+      code: 'RESOURCE_CLEANUP_FAILED',
+      message: 'Không dừng được browser profile trong lúc thu hồi tài nguyên.'
+    });
 
     const summary = await service.waitForCompletion();
     expect(summary.state).toBe('failed');
   });
 
-  describe('Task 10: Deterministic 1/3/5/10-worker stress and resource invariants', () => {
-    describe.each([1, 3, 5, 10])('Worker cap %i', (count) => {
+  describe('Independent headed worker scheduling', () => {
+    it('admits all ten editors before any held editor is released', async () => {
+      const entered = new Set<string>();
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => { release = resolve; });
+      const run = runDeterministicSimulation({
+        count: 10,
+        onEditorStarted: async (alias) => {
+          entered.add(alias);
+          await hold;
+        }
+      });
+      try {
+        await vi.waitFor(() => expect(entered.size).toBe(10));
+      } finally {
+        release();
+        await run;
+      }
+    });
+
+    it('lets nineteen peers finish while worker one remains held', async () => {
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => { release = resolve; });
+      const completed = new Set<string>();
+      const run = runDeterministicSimulation({
+        count: 20,
+        onEditorStarted: async (alias) => {
+          if (alias === 'worker-1-session-1') await hold;
+        },
+        onAccountCompleted: (_accountId, sessionAlias) => { completed.add(sessionAlias); }
+      });
+      try {
+        await vi.waitFor(() => {
+          expect(completed.size).toBe(19);
+          expect(completed.has('worker-1-session-1')).toBe(false);
+        });
+      } finally {
+        release();
+        await run;
+      }
+    });
+
+    it('lets a continuous peer accept and finish its next item while worker one remains held', async () => {
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => { release = resolve; });
+      const completed = new Set<string>();
+      try {
+        const result = await runDeterministicSimulation({
+          count: 2,
+          itemCount: 3,
+          sourceKind: 'continuous',
+          stopAfterCompleted: 2,
+          onEditorStarted: async (alias) => {
+            if (alias === 'worker-1-session-1') await hold;
+          },
+          onAccountCompleted: (_accountId, alias) => { completed.add(alias); }
+        });
+        expect(completed).toEqual(new Set(['worker-2-session-1', 'worker-2-session-2']));
+        expect(result.counters.completed).toBe(2);
+        expect(result.counters.stopped).toBe(1);
+      } finally {
+        release();
+      }
+    });
+
+    it('retires schedulers after one hundred successful sessions', async () => {
+      const result = await runDeterministicSimulation({ count: 3, itemCount: 100 });
+
+      expect(result.counters.completed).toBe(100);
+      expect(result.final.schedulerCount).toBe(0);
+    });
+
+    it('retires schedulers after one hundred definitive no-resource launch failures', async () => {
+      const result = await runDeterministicSimulation({
+        count: 3,
+        itemCount: 100,
+        faults: { launchRejectBeforeProfile: true }
+      });
+
+      expect(result.counters.failed).toBe(100);
+      expect(result.final.schedulerCount).toBe(0);
+    });
+
+    it.each([1, 3, 5, 10, 20])(
+      'proves %i session-local foreground and editor lanes overlap across two rounds',
+      async (count) => {
+        const makeBarrier = () => {
+          const entered = new Map<number, Set<string>>();
+          const releases = new Map<number, () => void>();
+          const holds = new Map<number, Promise<void>>();
+          return async (alias: string): Promise<void> => {
+            const round = Number(/-session-(\d+)$/.exec(alias)?.[1] ?? 0);
+            const aliases = entered.get(round) ?? new Set<string>();
+            aliases.add(alias);
+            entered.set(round, aliases);
+            let hold = holds.get(round);
+            if (!hold) {
+              hold = new Promise<void>((resolve) => releases.set(round, resolve));
+              holds.set(round, hold);
+            }
+            if (aliases.size === count) releases.get(round)?.();
+            await hold;
+          };
+        };
+        const foregroundBarrier = makeBarrier();
+        const editorBarrier = makeBarrier();
+        const { peaks, counters } = await runDeterministicSimulation({
+          count,
+          itemCount: count * 2,
+          onForegroundStarted: foregroundBarrier,
+          onEditorStarted: editorBarrier
+        });
+
+        expect(peaks.foreground).toBe(count);
+        expect(peaks.editor).toBe(count);
+        expect(Object.values(peaks.perSessionForeground).every((peak) => peak === 1)).toBe(true);
+        expect(Object.values(peaks.perSessionEditor).every((peak) => peak === 1)).toBe(true);
+        expect(counters.completed).toBe(count * 2);
+      }
+    );
+  });
+
+  describe('Task 10: Deterministic 1/3/5/10/20-worker stress and resource invariants', () => {
+    describe.each([1, 3, 5, 10, 20])('Worker cap %i', (count) => {
       it(`keeps workers, profiles, proxies, reservations, and accepted accounts within cap ${count}`, async () => {
         const { peaks, counters, final } = await runDeterministicSimulation({
           count,
@@ -2740,8 +3344,15 @@ describe('session-scoped browser ownership', () => {
         expect(peaks.profiles).toBeLessThanOrEqual(count);
         expect(peaks.proxies).toBeLessThanOrEqual(count);
         expect(peaks.mailReservations).toBeLessThanOrEqual(count);
+        expect(peaks.foreground).toBeLessThanOrEqual(count);
+        expect(peaks.editor).toBeLessThanOrEqual(count);
+        expect(Object.values(peaks.perSessionForeground).every((peak) => peak === 1)).toBe(true);
+        expect(Object.values(peaks.perSessionEditor).every((peak) => peak === 1)).toBe(true);
         expect(counters.accepted).toBeLessThanOrEqual(count);
         expect(counters.completed + counters.failed + counters.stopped).toBe(counters.accepted);
+        expect(counters.completed).toBe(count);
+        expect(counters.failed).toBe(0);
+        expect(counters.stopped).toBe(0);
         expect(final.activeThreads).toBe(0);
         expect(final.schedulerForegroundWaiting).toBe(0);
         expect(final.schedulerEditorWaiting).toBe(0);
@@ -2758,8 +3369,15 @@ describe('session-scoped browser ownership', () => {
           expect(peaks.profiles, `seed ${seed} profiles peak`).toBeLessThanOrEqual(count);
           expect(peaks.proxies, `seed ${seed} proxies peak`).toBeLessThanOrEqual(count);
           expect(peaks.mailReservations, `seed ${seed} mailReservations peak`).toBeLessThanOrEqual(count);
+          expect(peaks.foreground, `seed ${seed} foreground peak`).toBeLessThanOrEqual(count);
+          expect(peaks.editor, `seed ${seed} editor peak`).toBeLessThanOrEqual(count);
+          expect(Object.values(peaks.perSessionForeground).every((peak) => peak === 1), `seed ${seed} per-session foreground`).toBe(true);
+          expect(Object.values(peaks.perSessionEditor).every((peak) => peak === 1), `seed ${seed} per-session editor`).toBe(true);
           expect(counters.accepted, `seed ${seed} accepted`).toBeLessThanOrEqual(count);
           expect(counters.completed + counters.failed + counters.stopped, `seed ${seed} terminal sum`).toBe(counters.accepted);
+          expect(counters.completed, `seed ${seed} completed`).toBe(count);
+          expect(counters.failed, `seed ${seed} failed`).toBe(0);
+          expect(counters.stopped, `seed ${seed} stopped`).toBe(0);
           expect(final.activeThreads, `seed ${seed} activeThreads`).toBe(0);
           expect(final.schedulerForegroundWaiting, `seed ${seed} fg waiting`).toBe(0);
           expect(final.schedulerEditorWaiting, `seed ${seed} editor waiting`).toBe(0);
@@ -2768,7 +3386,72 @@ describe('session-scoped browser ownership', () => {
     });
 
     describe('Injected fault matrix', () => {
-      it('never admits another foreground action before quarantined profile stop', async () => {
+      it.each([
+        ['proxyAcquireError', { proxyAcquireError: new Error('proxy unavailable') }],
+        ['attachRejectionAfterProfileId', { attachRejectionAfterProfileId: true }],
+        ['healthMouseTimeout', { healthMouseTimeout: true }],
+        ['missionMouseTimeout', { missionMouseTimeout: true }],
+        ['checkpointPersistenceError', { checkpointPersistenceError: new Error('checkpoint failed') }],
+        ['proxyReleaseError', { proxyReleaseError: new Error('proxy release failed') }],
+        ['mailReleaseError', { mailReleaseError: new Error('mail release failed') }]
+      ] as const)('reaches the declared %s injection', async (name, faults) => {
+        const result = await runDeterministicSimulation({ count: 1, faults });
+        expect(result.faultReached[name]).toBeGreaterThan(0);
+        expect(result.counters.completed + result.counters.failed + result.counters.stopped).toBe(result.counters.accepted);
+        expect(result.final.schedulerForegroundWaiting).toBe(0);
+        expect(result.final.schedulerEditorWaiting).toBe(0);
+        expect(result.final.schedulerEditorActive).toBe(0);
+        expect(result.final.activeThreads).toBe(0);
+      });
+
+      it.each([1, 3, 5, 10])('settles 100 seeded global cancellations without lane or resource leaks at %i workers', async (count) => {
+        for (let seed = 1; seed <= 100; seed += 1) {
+          const result = await runDeterministicSimulation({ count, seed, cancellationMode: 'global' });
+          expect(result.counters.stopped, `seed ${seed} stopped`).toBeGreaterThan(0);
+          expect(result.counters.completed + result.counters.failed + result.counters.stopped, `seed ${seed} terminal sum`)
+            .toBe(result.counters.accepted);
+          expect(result.final, `seed ${seed} terminal lifecycle`).toMatchObject({
+            activeThreads: 0, schedulerForegroundWaiting: 0, schedulerEditorWaiting: 0,
+            schedulerEditorActive: 0, activeProfiles: 0, activeProxies: 0, activeMailReservations: 0
+          });
+        }
+      });
+
+      it.each([1, 3, 5, 10])('settles 100 seeded per-thread cancellations without lane or resource leaks at %i workers', async (count) => {
+        for (let seed = 1; seed <= 100; seed += 1) {
+          const result = await runDeterministicSimulation({ count, seed, cancellationMode: 'thread' });
+          expect(result.counters.stopped, `seed ${seed} stopped`).toBe(1);
+          expect(result.counters.completed + result.counters.failed + result.counters.stopped, `seed ${seed} terminal sum`)
+            .toBe(result.counters.accepted);
+          expect(result.final, `seed ${seed} terminal lifecycle`).toMatchObject({
+            activeThreads: 0, schedulerForegroundWaiting: 0, schedulerEditorWaiting: 0,
+            schedulerEditorActive: 0, activeProfiles: 0, activeProxies: 0, activeMailReservations: 0
+          });
+        }
+      });
+
+      it.each([
+        ['oldStopError', { missionMouseTimeout: true, oldStopError: new Error('old stop failed') }],
+        ['replacementLaunchError', { missionMouseTimeout: true, replacementLaunchError: new Error('replacement launch failed') }],
+        ['replacementLoginError', { missionMouseTimeout: true, replacementLoginError: new Error('replacement login failed') }]
+      ] as const)('exercises 100 seeded recovery failures for %s at 1/3/5/10 workers', async (name, faults) => {
+        for (const count of [1, 3, 5, 10]) for (let seed = 1; seed <= 100; seed += 1) {
+          const result = await runDeterministicSimulation({ count, seed, faults });
+          expect(result.faultReached[name], `seed ${seed} ${name} reached`).toBeGreaterThan(0);
+          expect(result.counters.completed + result.counters.failed + result.counters.stopped, `seed ${seed} terminal sum`)
+            .toBe(result.counters.accepted);
+          expect(result.counters.failed, `seed ${seed} failed accounts`).toBeGreaterThan(0);
+          if (name === 'oldStopError') {
+            expect(result.summary.state, `seed ${seed} state`).toBe('failed');
+            expect(result.counters.cleanupFailures, `seed ${seed} cleanup failures`).toBeGreaterThan(0);
+          }
+          expect(result.final.schedulerForegroundWaiting, `seed ${seed} foreground waiting`).toBe(0);
+          expect(result.final.schedulerEditorWaiting, `seed ${seed} editor waiting`).toBe(0);
+          expect(result.final.schedulerEditorActive, `seed ${seed} editor active`).toBe(0);
+        }
+      });
+
+      it('admits a peer foreground action before quarantined profile stop', async () => {
         const events: string[] = [];
         let resolveStop1: () => void = () => {};
         const stop1Promise = new Promise<void>((r) => { resolveStop1 = r; });
@@ -2862,7 +3545,7 @@ describe('session-scoped browser ownership', () => {
         // Give worker 1 time to fault and quarantine
         await new Promise((r) => setTimeout(r, 50));
         expect(events).toContain('fg:acc-1:start');
-        expect(events).not.toContain('fg:acc-2:start');
+        expect(events).toContain('fg:acc-2:start');
 
         // Now release worker 1's profile stop
         resolveStop1();
@@ -2870,7 +3553,7 @@ describe('session-scoped browser ownership', () => {
 
         expect(events).toContain('stop:prof-1');
         expect(events).toContain('fg:acc-2:start');
-        expect(events.indexOf('stop:prof-1')).toBeLessThan(events.indexOf('fg:acc-2:start'));
+        expect(events.indexOf('fg:acc-2:start')).toBeLessThan(events.indexOf('stop:prof-1'));
       });
 
       it('never starts replacement after an uncertain old-profile stop', async () => {
@@ -2965,7 +3648,7 @@ describe('session-scoped browser ownership', () => {
                 credits: 0,
                 creditsTotal: 10,
                 missing: ['task-1'],
-                tasks: [],
+                tasks: [{ key: 'capcut_web_newbie_register', title: 'Register', reward: 10, status: 4 }],
                 unsettledProofs: [],
                 verification: null,
                 fatalCode: 'DOM_READ_TIMEOUT',
@@ -2994,7 +3677,7 @@ describe('session-scoped browser ownership', () => {
                 credits: 10,
                 creditsTotal: 10,
                 missing: [],
-                tasks: [],
+                tasks: [{ key: 'capcut_web_newbie_register', title: 'Register', reward: 10, status: 4 }],
                 unsettledProofs: [],
                 verification: null
               };
@@ -3119,6 +3802,7 @@ describe('session-scoped browser ownership', () => {
           runAccount: async (input) => {
             await input.onTaskCheckpoint?.({
               rows: [{ key: 'task-1', title: 'Task 1', reward: 10, status: 4 }],
+              unsettledProofs: [],
               receipt: {
                 runId: input.runId ?? 'run-1',
                 sessionAlias: input.sessionAlias ?? 's1',
@@ -3278,6 +3962,7 @@ describe('session-scoped browser ownership', () => {
         const customWorkSources: AutomationWorkSourceFactory = {
           create: () => ({
             kind: 'finite',
+      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
             prepare: async () => ({ workerTarget: 1 }),
             next: async () => {
               if (acquiredMailboxes > 0) return null;
@@ -3402,7 +4087,7 @@ describe('session-scoped browser ownership', () => {
                 credits: 10,
                 creditsTotal: 10,
                 missing: [],
-                tasks: [],
+                tasks: [{ key: 'capcut_web_newbie_register', title: 'Register', reward: 10, status: 4 }],
                 unsettledProofs: [],
                 verification: {
                   runId: input.runId ?? 'run-1',
@@ -3546,6 +4231,7 @@ describe('session-scoped browser ownership', () => {
           let delivered = false;
           return {
             kind: 'finite',
+      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
             prepare: async () => ({ workerTarget: 1 }),
             next: async () => {
               if (delivered) return null;
@@ -3636,6 +4322,7 @@ describe('session-scoped browser ownership', () => {
           let delivered = false;
           return {
             kind: 'finite',
+      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
             prepare: async () => ({ workerTarget: 1 }),
             next: async () => {
               if (delivered) return null;
@@ -3726,5 +4413,3 @@ describe('session-scoped browser ownership', () => {
     });
   });
 });
-
-

@@ -287,5 +287,66 @@ describe('Migration Engine & Schema Integrity (Task 5 RED)', () => {
         email: 'old@gmail.com'
       });
     });
+
+    it('migration 006 adds one latest task receipt and exact item table without losing task rows', () => {
+      if (!db) throw new Error('DB is not initialized');
+      const before = MIGRATIONS.slice(0, 5);
+      runMigrations(db, before);
+
+      db.prepare(
+        "INSERT INTO account_tasks (account_id, task_key, title, reward, status, op_id, proved_at, updated_at)" +
+        " VALUES ('acc-1', 'capcut_web_pwa_install', 'Install app', 30, 4, 'op-1', '2026-09-08T00:00:00.000Z', datetime('now'))"
+      ).run();
+
+      runMigrations(db);
+
+      const taskRow = db.prepare("SELECT * FROM account_tasks WHERE account_id = 'acc-1'").get() as Record<string, unknown>;
+      expect(taskRow['task_key']).toBe('capcut_web_pwa_install');
+      expect(taskRow['status']).toBe(4);
+      expect(taskRow['op_id']).toBe('op-1');
+
+      const receiptCols = db.prepare('PRAGMA table_info(account_task_receipts)').all() as Array<{ name: string; pk: number }>;
+      expect(receiptCols.find((c) => c.name === 'account_id')?.pk).toBe(1);
+
+      const itemCols = db.prepare('PRAGMA table_info(account_task_receipt_items)').all() as Array<{ name: string; pk: number }>;
+      expect(itemCols.find((c) => c.name === 'account_id')?.pk).toBe(1);
+      expect(itemCols.find((c) => c.name === 'task_key')?.pk).toBe(2);
+    });
+
+    it('upgrades migration 006 receipts without changing their exact item set', () => {
+      if (!db) throw new Error('DB is not initialized');
+      runMigrations(db, MIGRATIONS.slice(0, 6));
+      db.prepare(`INSERT INTO account_task_receipts
+        (account_id,run_id,session_alias,observed_at,required_after,server_total,server_done,is_fresh,is_final,updated_at)
+        VALUES ('acc-old','run-old','worker-1-session-1','2026-09-08T01:00:00.000Z','2026-09-08T00:00:00.000Z',1,1,1,1,'old')`).run();
+      db.prepare("INSERT INTO account_task_receipt_items VALUES ('acc-old','task-old',4,0)").run();
+      expect(runMigrations(db).appliedCount).toBe(2);
+      expect(db.prepare('SELECT task_key,status,ordinal FROM account_task_receipt_items').all()).toEqual([
+        { task_key: 'task-old', status: 4, ordinal: 0 }
+      ]);
+      expect(db.prepare('SELECT * FROM account_unsettled_proofs').all()).toEqual([]);
+      expect(runMigrations(db).appliedCount).toBe(0);
+    });
+
+    it('adds the durable mutation registry after migration 007 without changing existing proof rows', () => {
+      if (!db) throw new Error('DB is not initialized');
+      runMigrations(db, MIGRATIONS.slice(0, 7));
+      db.prepare(`INSERT INTO account_task_receipts
+        (account_id,run_id,session_alias,observed_at,required_after,server_total,server_done,is_fresh,is_final,updated_at)
+        VALUES ('acc-old','run-old','session-old','2026-09-09T00:00:00.000Z','2026-09-08T23:00:00.000Z',1,1,1,1,'old')`).run();
+      db.prepare(`INSERT INTO account_unsettled_proofs
+        (account_id,run_id,task_key,op_id,proved_at)
+        VALUES ('acc-old','run-old','task-old','op-old','2026-09-09T00:00:00.000Z')`).run();
+
+      expect(runMigrations(db).appliedCount).toBe(1);
+      expect(db.prepare('SELECT account_id,op_id FROM account_unsettled_proofs').all()).toEqual([
+        { account_id: 'acc-old', op_id: 'op-old' }
+      ]);
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as SqliteMasterRow[];
+      expect(tables.map((row) => row.name)).toEqual(expect.arrayContaining([
+        'diagnostic_approvals', 'account_mutation_bindings', 'account_mutation_intents'
+      ]));
+      expect(runMigrations(db).appliedCount).toBe(0);
+    });
   });
 });

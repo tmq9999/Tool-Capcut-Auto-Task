@@ -37,6 +37,35 @@ export interface AccountTaskProgressInput {
   provedAt?: string;
 }
 
+export interface AccountTaskReceiptRecord {
+  accountId: string;
+  runId: string;
+  sessionAlias: string;
+  observedAt: string;
+  requiredAfter: string;
+  serverTotal: number;
+  serverDone: number;
+  isFresh: boolean;
+  isFinal: boolean;
+  updatedAt: string;
+}
+
+export interface AccountTaskReceiptItemRecord {
+  accountId: string;
+  taskKey: string;
+  status: number;
+  ordinal: number;
+}
+
+export interface AccountTaskCheckpointInput {
+  rows: readonly AccountTaskProgressInput[];
+  receipt: Omit<AccountTaskReceiptRecord, 'accountId' | 'updatedAt'>;
+  unsettledProofs?: readonly {
+    key: string;
+    proof: { actionKey: string; opId: string; errNo: 0; at: number };
+  }[];
+}
+
 export interface AccountTaskRecord {
   accountId: string;
   taskKey: string;
@@ -132,8 +161,184 @@ export class AccountTaskRepository {
     return rows.map(toRecord);
   }
 
-  /** Dọn tiến độ khi account bị xoá — bảng không có FOREIGN KEY nên phải gọi tay. */
+  /**
+   * Lưu checkpoint gồm các task row và receipt trong cùng MỘT transaction.
+   * Xoá receipt items cũ và ghi lại toàn bộ receipt items mới theo thứ tự ordinal.
+   */
+  recordCheckpoint(accountId: string, checkpoint: AccountTaskCheckpointInput): void {
+    if (checkpoint.receipt.serverTotal !== checkpoint.rows.length) {
+      throw new Error(
+        `Checkpoint serverTotal (${checkpoint.receipt.serverTotal}) does not match rows count (${checkpoint.rows.length})`
+      );
+    }
+
+    const seen = new Set<string>();
+    for (const row of checkpoint.rows) {
+      if (seen.has(row.key)) {
+        throw new Error(`Duplicate task key in checkpoint: ${row.key}`);
+      }
+      seen.add(row.key);
+    }
+
+    const upsertTaskStmt = this.db.prepare(`
+      INSERT INTO account_tasks (
+        account_id, task_key, title, reward, status, op_id, proved_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT (account_id, task_key) DO UPDATE SET
+        title = excluded.title,
+        reward = excluded.reward,
+        status = excluded.status,
+        op_id = COALESCE(excluded.op_id, account_tasks.op_id),
+        proved_at = COALESCE(excluded.proved_at, account_tasks.proved_at),
+        updated_at = excluded.updated_at
+    `);
+
+    const upsertReceiptStmt = this.db.prepare(`
+      INSERT INTO account_task_receipts (
+        account_id, run_id, session_alias, observed_at, required_after,
+        server_total, server_done, is_fresh, is_final, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT (account_id) DO UPDATE SET
+        run_id = excluded.run_id,
+        session_alias = excluded.session_alias,
+        observed_at = excluded.observed_at,
+        required_after = excluded.required_after,
+        server_total = excluded.server_total,
+        server_done = excluded.server_done,
+        is_fresh = excluded.is_fresh,
+        is_final = excluded.is_final,
+        updated_at = excluded.updated_at
+    `);
+
+    const deleteItemsStmt = this.db.prepare(
+      'DELETE FROM account_task_receipt_items WHERE account_id = ?'
+    );
+
+    const insertItemStmt = this.db.prepare(`
+      INSERT INTO account_task_receipt_items (
+        account_id, task_key, status, ordinal
+      ) VALUES (?, ?, ?, ?)
+    `);
+
+    const transaction = this.db.transaction(() => {
+      for (const row of checkpoint.rows) {
+        upsertTaskStmt.run(
+          accountId,
+          row.key,
+          row.title,
+          row.reward,
+          row.status,
+          row.opId ?? null,
+          row.provedAt ?? null
+        );
+      }
+
+      upsertReceiptStmt.run(
+        accountId,
+        checkpoint.receipt.runId,
+        checkpoint.receipt.sessionAlias,
+        checkpoint.receipt.observedAt,
+        checkpoint.receipt.requiredAfter,
+        checkpoint.receipt.serverTotal,
+        checkpoint.receipt.serverDone,
+        checkpoint.receipt.isFresh ? 1 : 0,
+        checkpoint.receipt.isFinal ? 1 : 0
+      );
+
+      this.db.prepare('DELETE FROM account_unsettled_proofs WHERE account_id = ?').run(accountId);
+      const proofStmt = this.db.prepare(`
+        INSERT INTO account_unsettled_proofs (account_id, run_id, task_key, op_id, proved_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      for (const item of checkpoint.unsettledProofs ?? []) {
+        if (item.key !== item.proof.actionKey || item.proof.errNo !== 0 || !Number.isFinite(item.proof.at)) {
+          throw new Error('INVALID_UNSETTLED_PROOF');
+        }
+        proofStmt.run(accountId, checkpoint.receipt.runId, item.key, item.proof.opId, new Date(item.proof.at).toISOString());
+      }
+
+      deleteItemsStmt.run(accountId);
+
+      let ordinal = 0;
+      for (const row of checkpoint.rows) {
+        insertItemStmt.run(accountId, row.key, row.status, ordinal);
+        ordinal++;
+      }
+    });
+
+    transaction();
+  }
+
+  /** Lấy receipt gần nhất cùng danh sách items theo thứ tự ordinal. */
+  getLatestReceipt(accountId: string): {
+    receipt: AccountTaskReceiptRecord;
+    items: AccountTaskReceiptItemRecord[];
+  } | null {
+    interface ReceiptRow {
+      account_id: string;
+      run_id: string;
+      session_alias: string;
+      observed_at: string;
+      required_after: string;
+      server_total: number;
+      server_done: number;
+      is_fresh: number;
+      is_final: number;
+      updated_at: string;
+    }
+    interface ItemRow {
+      account_id: string;
+      task_key: string;
+      status: number;
+      ordinal: number;
+    }
+
+    const receiptRow = this.db
+      .prepare('SELECT * FROM account_task_receipts WHERE account_id = ?')
+      .get(accountId) as ReceiptRow | undefined;
+
+    if (!receiptRow) return null;
+
+    const itemRows = this.db
+      .prepare(
+        'SELECT * FROM account_task_receipt_items WHERE account_id = ? ORDER BY ordinal ASC'
+      )
+      .all(accountId) as ItemRow[];
+
+    return {
+      receipt: {
+        accountId: receiptRow.account_id,
+        runId: receiptRow.run_id,
+        sessionAlias: receiptRow.session_alias,
+        observedAt: receiptRow.observed_at,
+        requiredAfter: receiptRow.required_after,
+        serverTotal: receiptRow.server_total,
+        serverDone: receiptRow.server_done,
+        isFresh: Boolean(receiptRow.is_fresh),
+        isFinal: Boolean(receiptRow.is_final),
+        updatedAt: receiptRow.updated_at
+      },
+      items: itemRows.map((i) => ({
+        accountId: i.account_id,
+        taskKey: i.task_key,
+        status: i.status,
+        ordinal: i.ordinal
+      }))
+    };
+  }
+
+  /** Same-run proof is separate from exact status/receipt membership. */
+  listUnsettledProofs(accountId: string, runId: string): Array<{ key: string; opId: string; provedAt: string }> {
+    return this.db.prepare(`
+      SELECT task_key AS key, op_id AS opId, proved_at AS provedAt
+      FROM account_unsettled_proofs WHERE account_id = ? AND run_id = ? ORDER BY task_key
+    `).all(accountId, runId) as Array<{ key: string; opId: string; provedAt: string }>;
+  }
+
+  /** Dọn tiến độ khi account bị xoá. */
   deleteByAccount(accountId: string): number {
+    this.db.prepare('DELETE FROM account_task_receipt_items WHERE account_id = ?').run(accountId);
+    this.db.prepare('DELETE FROM account_task_receipts WHERE account_id = ?').run(accountId);
     const result = this.db.prepare('DELETE FROM account_tasks WHERE account_id = ?').run(accountId);
     return result.changes;
   }

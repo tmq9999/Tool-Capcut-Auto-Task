@@ -24,11 +24,39 @@ export function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+export class OperationDeadlineError extends Error {
+  constructor() { super('Operation deadline exceeded'); }
+}
+
+export class DomReadTimeoutError extends Error {
+  readonly code = 'DOM_READ_TIMEOUT';
+  constructor(stage: string) { super('DOM_READ_TIMEOUT: ' + stage); }
+}
+
+export function isDomReadTimeout(error: unknown): error is DomReadTimeoutError {
+  return error instanceof DomReadTimeoutError ||
+    (error instanceof Error && (error as { code?: unknown }).code === 'DOM_READ_TIMEOUT');
+}
+
+/** A timeout abandons the wait, not the browser command. Do not retry it blindly. */
+export async function boundedDomRead<T>(
+  read: () => Promise<T>, stage: string, timeoutMs = 1000, signal?: AbortSignal
+): Promise<T> {
+  signal?.throwIfAborted();
+  try {
+    return await withinDeadline(read(), timeoutMs, signal);
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (error instanceof OperationDeadlineError) throw new DomReadTimeoutError(stage);
+    throw error;
+  }
+}
+
 /** Bounds a read/teardown promise; resource-creating calls must keep ownership. */
 export async function withinDeadline<T>(operation: Promise<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error('Operation deadline exceeded')), Math.max(0, timeoutMs));
+    timer = setTimeout(() => reject(new OperationDeadlineError()), Math.max(0, timeoutMs));
   });
   const bounded = Promise.race([operation, timeout]);
   try {

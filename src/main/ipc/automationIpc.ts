@@ -15,10 +15,27 @@ export function registerAutomationIpc(
   registrar: IpcRegistrar,
   runService: Pick<
     AutomationRunService,
-    'start' | 'stop' | 'stopThread' | 'getProgress' | 'getRunningThreads'
+    'start' | 'stop' | 'stopThread' | 'getProgress' | 'getRunningThreads' | 'runHealthCheck' | 'getUserDataDir'
   >,
   emailService: Pick<EmailPurchaseService, 'getProviderConfigs' | 'readOtp'>
 ): () => void {
+  registrar.handle(IPC_CHANNELS.RUN_HEALTH, async (_event: unknown, request?: unknown) => {
+    const parsed = IpcContractRegistry.run.health.request.safeParse(request);
+    if (!parsed.success) return validationError(parsed.error);
+    try {
+      return ok(await runService.runHealthCheck(parsed.data));
+    } catch {
+      return toErrorEnvelope(new Error('ROLLOUT_HEALTH_FAILED'));
+    }
+  });
+  registrar.handle(IPC_CHANNELS.RUN_USER_DATA, async () => {
+    try {
+      const handshake = process.env.AUTOMANAGER_ROLLOUT_HANDSHAKE;
+      return ok({ userDataDir: runService.getUserDataDir(),
+        ...(handshake && /^[a-f0-9]{32,128}$/i.test(handshake) ? { rolloutHandshake: handshake } : {}) });
+    }
+    catch { return toErrorEnvelope(new Error('ROLLOUT_USER_DATA_UNAVAILABLE')); }
+  });
   registrar.handle(
     IPC_CHANNELS.RUN_START,
     async (_event: unknown, request?: unknown): Promise<IpcEnvelope<{ runId: string }>> => {
@@ -109,6 +126,8 @@ export function registerAutomationIpc(
     if (cleanedUp) return;
     cleanedUp = true;
     registrar.removeHandler(IPC_CHANNELS.RUN_START);
+    registrar.removeHandler(IPC_CHANNELS.RUN_HEALTH);
+    registrar.removeHandler(IPC_CHANNELS.RUN_USER_DATA);
     registrar.removeHandler(IPC_CHANNELS.RUN_STOP);
     registrar.removeHandler(IPC_CHANNELS.RUN_STOP_THREAD);
     registrar.removeHandler(IPC_CHANNELS.RUN_THREADS);

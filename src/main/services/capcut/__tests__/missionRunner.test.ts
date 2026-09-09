@@ -6,10 +6,13 @@ import {
   selectGroups,
 } from '../missionRunner';
 import { parseTaskList, TaskStore } from '../taskApi';
+import { DomReadTimeoutError } from '../cancellation';
 import type {
   CapcutMissionEnv,
   MissionGroup,
 } from '../types';
+
+import { createDirectUiInteraction } from '../uiInteractionScheduler';
 
 // Snapshot DAU luot: chi capcut_web_newbie_register da xong.
 const SNAP = parseTaskList(fs.readFileSync('tools/fixtures/task-list-initial.json', 'utf8'))!;
@@ -26,6 +29,7 @@ const ENV = {
   sampleImage: 'C:/tmp/sample.png',
   log: () => {},
   signal: new AbortController().signal,
+  ui: createDirectUiInteraction(new AbortController().signal),
 } satisfies CapcutMissionEnv;
 
 afterEach(() => {
@@ -33,7 +37,9 @@ afterEach(() => {
 });
 
 const design: MissionGroup = {
+  id: 'design-studio',
   name: 'Design Studio',
+  workspace: 'editor',
   keys: [
     'capcut_web_design_studio_ai_chat',
     'capcut_web_design_studio_upload_img',
@@ -44,7 +50,9 @@ const design: MissionGroup = {
 };
 
 const install: MissionGroup = {
+  id: 'pwa-install',
   name: 'PWA',
+  workspace: 'none',
   keys: ['capcut_web_pwa_install'],
   proofTimeoutMs: 30000,
   act: noop,
@@ -74,7 +82,9 @@ describe('selectGroups', () => {
     // Trước đây bản cũ coi key lạ là "chưa xong" rồi đứng chờ do_action 45 giây
     // cho một nhiệm vụ mà account không hề có.
     const ghost: MissionGroup = {
+      id: 'pwa-install',
       name: 'ghost',
+      workspace: 'none',
       keys: ['khong_ton_tai'],
       proofTimeoutMs: 1,
       act: noop,
@@ -120,11 +130,64 @@ describe('selectGroups — biến thể account', () => {
 });
 
 describe('reconcileMissionEvidence', () => {
+  it('does not dispatch a grouped mission under strict verification without explicit leaf boundaries', async () => {
+    vi.useFakeTimers();
+    const store = new TaskStore();
+    const verifyRewardStep = vi.fn();
+    const act = vi.fn(async () => {});
+    const group: MissionGroup = {
+      id: 'design-studio',
+      name: 'Design Studio',
+      workspace: 'editor',
+      keys: [...design.keys],
+      proofTimeoutMs: 90_000,
+      act,
+    };
+
+    const result = await reconcileMissionEvidence(
+      group,
+      {
+        ...ENV,
+        rewardSessionAlias: 'worker-1-session-1',
+        verifyRewardStep,
+      },
+      store,
+      new Set(group.keys)
+    );
+
+    expect(act).not.toHaveBeenCalled();
+    expect(verifyRewardStep).not.toHaveBeenCalled();
+    expect([...result.evidence.values()]).toHaveLength(3);
+    expect([...result.evidence.values()]).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        state: 'failed',
+        error: expect.objectContaining({ message: 'REWARD_LEAF_BOUNDARY_REQUIRED' }),
+      }),
+    ]));
+  });
+
+  it('propagates an unresponsive renderer so the owner can tear down instead of retrying UI', async () => {
+    const group: MissionGroup = {
+      id: 'design-studio',
+      name: 'Design Studio',
+      workspace: 'editor',
+      keys: ['capcut_web_design_studio_canvas_edit'],
+      proofTimeoutMs: 90000,
+      act: async () => { throw new DomReadTimeoutError('canvas-ready'); }
+    };
+    const result = await reconcileMissionEvidence(group, ENV, new TaskStore(), new Set(group.keys));
+    expect(result.evidence.get('capcut_web_design_studio_canvas_edit')?.error).toBeInstanceOf(DomReadTimeoutError);
+    expect(result.fatalError).toBeInstanceOf(DomReadTimeoutError);
+  });
   it('uses a confirming snapshot received after proof but before the action settled', async () => {
     vi.useFakeTimers();
     const store = new TaskStore();
     const group: MissionGroup = {
-      name: 'PWA', keys: ['capcut_web_pwa_install'], proofTimeoutMs: 12_000,
+      id: 'pwa-install',
+      name: 'PWA',
+      workspace: 'none',
+      keys: ['capcut_web_pwa_install'],
+      proofTimeoutMs: 12_000,
       act: async () => {
         store.pushAction({ actionKey: 'capcut_web_pwa_install', opId: 'proof-during-act', errNo: 0, errTips: '', at: Date.now() });
         await new Promise((resolve) => setTimeout(resolve, 1));
@@ -142,7 +205,9 @@ describe('reconcileMissionEvidence', () => {
     vi.useFakeTimers();
     const store = new TaskStore();
     const group: MissionGroup = {
+      id: 'pwa-install',
       name: 'PWA',
+      workspace: 'none',
       keys: ['capcut_web_pwa_install'],
       proofTimeoutMs: 12_000,
       act: async () => {
@@ -177,7 +242,9 @@ describe('reconcileMissionEvidence', () => {
     vi.useFakeTimers();
     const store = new TaskStore();
     const group: MissionGroup = {
+      id: 'pwa-install',
       name: 'PWA',
+      workspace: 'none',
       keys: ['capcut_web_pwa_install'],
       proofTimeoutMs: 12_000,
       act: async () => {},
@@ -217,7 +284,9 @@ describe('reconcileMissionEvidence', () => {
     const messages: string[] = [];
     const store = new TaskStore();
     const group: MissionGroup = {
+      id: 'pwa-install',
       name: 'PWA',
+      workspace: 'none',
       keys: ['capcut_web_pwa_install'],
       proofTimeoutMs: 12_000,
       act: async () => {

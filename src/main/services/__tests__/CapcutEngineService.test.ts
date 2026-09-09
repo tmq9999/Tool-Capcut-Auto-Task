@@ -12,8 +12,10 @@
  * =============================================================================
  */
 
+import { EventEmitter } from 'node:events';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { BrowserContext, Page } from 'playwright-core';
+import { createDirectUiInteraction } from '../capcut/uiInteractionScheduler';
 
 const ensureInApp = vi.fn();
 const checkProTrial = vi.fn();
@@ -36,7 +38,8 @@ vi.mock('../capcut/trial', () => ({
 vi.mock('../capcut/image', () => ({
   ensureSampleImage: (...args: unknown[]) => ensureSampleImage(...args)
 }));
-vi.mock('../capcut/runTasks', () => ({
+vi.mock('../capcut/runTasks', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../capcut/runTasks')>(),
   runAllTasks: (...args: unknown[]) => runAllTasks(...args)
 }));
 vi.mock('../capcut/diag', () => ({
@@ -48,6 +51,7 @@ const { CapcutEngineService } = await import('../CapcutEngineService');
 type AuthOptions = { forceSignup?: boolean; log: (msg: string) => void };
 
 function runInput(overrides: Record<string, unknown> = {}) {
+  const signal = (overrides.signal as AbortSignal | undefined) ?? new AbortController().signal;
   return {
     // Page giả phải có `on`: `runAccount` đăng ký nghe `close`/`crash` của tab.
     page: listeningPage().page,
@@ -56,7 +60,8 @@ function runInput(overrides: Record<string, unknown> = {}) {
     password: 'Str0ngPass',
     accountId: 'acc-1',
     isNewAccount: false,
-    signal: new AbortController().signal,
+    signal,
+    ui: createDirectUiInteraction(signal),
     log: () => {},
     ...overrides
   } as Parameters<InstanceType<typeof CapcutEngineService>['runAccount']>[0];
@@ -80,19 +85,65 @@ function lastAuthOptions(): AuthOptions {
   return ensureInApp.mock.calls.at(-1)?.[3] as AuthOptions;
 }
 
+function exactSnapshot(overrides: Record<string, unknown> = {}) {
+  return {
+    observedAt: 201,
+    requiredAfter: 200,
+    tasks: [{ key: 'pwa', title: 'Install', reward: 70, status: 4 }],
+    total: 1,
+    done: 1,
+    credits: 70,
+    creditsTotal: 70,
+    missing: [],
+    fresh: true,
+    final: true,
+    ...overrides
+  };
+}
+
 beforeEach(() => {
   ensureInApp.mockReset().mockResolvedValue({ mode: 'signup', created: true });
-  checkProTrial.mockReset().mockResolvedValue({ days: 7, isPro: false });
+  checkProTrial.mockReset().mockResolvedValue({
+    status: 'eligible',
+    canTrial: true,
+    days: 7,
+    trialPrice: '0₫',
+    listPrice: '222,000₫',
+    hasStartButton: true
+  });
   isEligible.mockReset().mockReturnValue(true);
   ensureSampleImage.mockReset().mockReturnValue('C:/tmp/assets/sample.png');
   runAllTasks.mockReset().mockResolvedValue({
     outcomes: [],
-    snapshot: { total: 12, done: 12, credits: 1800, creditsTotal: 1800, missing: [] }
+    snapshot: exactSnapshot(),
+    unsettledProofs: []
   });
   setDumpDir.mockReset();
 });
 
 describe('CapcutEngineService.runAccount', () => {
+  it.each(['success', 'auth-error', 'cancel'])('installs opt-in task diagnostics before auth and disposes on %s', async (mode) => {
+    vi.stubEnv('CAPCUT_DIAG_TASK_LIST', '1');
+    const context = new EventEmitter();
+    const controller = new AbortController();
+    const log = vi.fn();
+    ensureInApp.mockImplementationOnce(async () => {
+      context.emit('request', { url: () => 'https://edit-api-sg.capcut.com/task/v1/task_list?token=private-key' });
+      if (mode === 'auth-error') throw new Error('auth failed');
+      if (mode === 'cancel') controller.abort(new Error('Stop'));
+      return { mode: 'signup', created: true };
+    });
+    const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
+    const run = engine.runAccount(runInput({ context, signal: controller.signal, log }));
+    if (mode === 'success') await run;
+    else await expect(run).rejects.toThrow();
+    const diagnostics = log.mock.calls.filter(call => call[1] === 'Task diagnostics');
+    expect(diagnostics).toHaveLength(1);
+    expect(JSON.parse(diagnostics[0][2])).toMatchObject({ phase: 'request', requestId: 1 });
+    expect(JSON.stringify(diagnostics)).not.toContain('private-key');
+    expect(context.eventNames()).toEqual([]);
+  });
+
   it.each(['success', 'auth-error', 'cancel', 'skipped'])('awaits capture flush for %s without losing account outcome', async (mode) => {
     vi.stubEnv('CAPCUT_CAPTURE_HTTP', '1');
     const events: string[] = [];
@@ -117,11 +168,29 @@ describe('CapcutEngineService.runAccount', () => {
   it('returns observed partial progress with a fatal error instead of discarding it', async () => {
     runAllTasks.mockResolvedValueOnce({
       outcomes: [{ key: 'pwa', title: 'Install', reward: 70, done: true, attempts: 1 }],
-      snapshot: { total: 2, done: 1, credits: 70, creditsTotal: 110, missing: ['canvas'] },
+      snapshot: exactSnapshot({
+        tasks: [
+          { key: 'pwa', title: 'Install', reward: 70, status: 4 },
+          { key: 'canvas', title: 'Canvas', reward: 40, status: 1 }
+        ],
+        total: 2,
+        done: 1,
+        creditsTotal: 110,
+        missing: ['canvas'],
+        final: false
+      }),
+      unsettledProofs: [],
       fatalError: new Error('DOM_READ_TIMEOUT: canvas-area:mouse-move')
     });
     const result = await new CapcutEngineService({ userDataDir: 'C:/tmp/userData' }).runAccount(runInput());
-    expect(result).toMatchObject({ credits: 70, fatalError: 'DOM_READ_TIMEOUT: canvas-area:mouse-move', tasks: [{ key: 'pwa', status: 4 }] });
+    expect(result).toMatchObject({
+      credits: 70,
+      fatalError: 'DOM_READ_TIMEOUT: canvas-area:mouse-move',
+      tasks: [
+        { key: 'pwa', title: 'Install', reward: 70, status: 4 },
+        { key: 'canvas', title: 'Canvas', reward: 40, status: 1 }
+      ]
+    });
   });
   it('does not recover another page or start trial after Stop during authentication', async () => {
     const controller = new AbortController();
@@ -202,13 +271,40 @@ describe('CapcutEngineService.runAccount', () => {
   });
 
   it('nói rõ khi account không có ưu đãi, thay vì để trống', async () => {
-    checkProTrial.mockResolvedValue({ canTrial: false, days: 0, trialPrice: '', listPrice: '' });
+    checkProTrial.mockResolvedValue({ status: 'ineligible', canTrial: false, days: 0, trialPrice: '', listPrice: '', hasStartButton: false });
     isEligible.mockReturnValue(false);
     const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
 
     const result = await engine.runAccount(runInput());
 
     expect(result.subscription).toBe('Không có ưu đãi');
+  });
+
+  it('blocks an unknown trial read without inventing seven days or running tasks', async () => {
+    checkProTrial.mockResolvedValue({
+      status: 'unknown',
+      canTrial: false,
+      days: 0,
+      trialPrice: '',
+      listPrice: '',
+      hasStartButton: false,
+      error: 'không thấy thẻ gói Pro trong modal'
+    });
+    isEligible.mockReturnValue(false);
+    const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
+
+    const result = await engine.runAccount(runInput({ skipWithoutTrial: false }));
+
+    expect(runAllTasks).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      authenticated: true,
+      skipped: true,
+      subscription: 'Không xác định ưu đãi',
+      fatalError: 'không thấy thẻ gói Pro trong modal',
+      verification: null,
+      unsettledProofs: []
+    });
+    expect(result.subscription).not.toBe('Pro trial 7 ngày');
   });
 
   it('logs authentication and trial-check stage timings', async () => {
@@ -254,7 +350,18 @@ describe('CapcutEngineService.runAccount', () => {
   it('engine returns authenticated true for a mission-level fatal result', async () => {
     runAllTasks.mockResolvedValueOnce({
       outcomes: [{ key: 'pwa', title: 'Install', reward: 70, done: true, attempts: 1 }],
-      snapshot: { total: 2, done: 1, credits: 70, creditsTotal: 110, missing: ['canvas'] },
+      snapshot: exactSnapshot({
+        tasks: [
+          { key: 'pwa', title: 'Install', reward: 70, status: 4 },
+          { key: 'canvas', title: 'Canvas', reward: 40, status: 1 }
+        ],
+        total: 2,
+        done: 1,
+        creditsTotal: 110,
+        missing: ['canvas'],
+        final: false
+      }),
+      unsettledProofs: [],
       fatalError: new Error('DOM_READ_TIMEOUT: canvas-area:mouse-move')
     });
     const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
@@ -269,7 +376,18 @@ describe('CapcutEngineService.runAccount', () => {
     const { DomReadTimeoutError } = await import('../capcut/cancellation');
     runAllTasks.mockResolvedValueOnce({
       outcomes: [{ key: 'pwa', title: 'Install', reward: 70, done: true, attempts: 1 }],
-      snapshot: { total: 2, done: 1, credits: 70, creditsTotal: 110, missing: ['canvas'] },
+      snapshot: exactSnapshot({
+        tasks: [
+          { key: 'pwa', title: 'Install', reward: 70, status: 4 },
+          { key: 'canvas', title: 'Canvas', reward: 40, status: 1 }
+        ],
+        total: 2,
+        done: 1,
+        creditsTotal: 110,
+        missing: ['canvas'],
+        final: false
+      }),
+      unsettledProofs: [],
       fatalError: new DomReadTimeoutError('canvas-area:mouse-move')
     });
     const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
@@ -291,5 +409,103 @@ describe('CapcutEngineService.runAccount', () => {
     expect(skipResult.authenticated).toBe(true);
     expect(skipResult.skipped).toBe(true);
     expect(skipResult.verification).toBeNull();
+  });
+
+  it('forwards unsettledProofs to runAllTasks', async () => {
+    const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
+    const unsettledProofs = [{ key: 'task_1', proof: { actionKey: 'task_1', opId: 'op_1', errNo: 0, errTips: '', at: 100 } }];
+    await engine.runAccount(runInput({ unsettledProofs }));
+    expect(runAllTasks).toHaveBeenCalledWith(expect.objectContaining({
+      unsettledProofs
+    }));
+  });
+
+  it('delivers omitted-key proof beside exact checkpoint rows without inventing a receipt row', async () => {
+    const proof = { actionKey: 'old-task', opId: 'op-old', errNo: 0 as const, errTips: '', at: 150 };
+    const checkpointSnapshot = exactSnapshot({
+      tasks: [{ key: 'server-task', title: 'Server task', reward: 20, status: 1 }],
+      total: 1,
+      done: 0,
+      credits: 0,
+      creditsTotal: 20,
+      missing: ['server-task'],
+      final: false
+    });
+    runAllTasks.mockImplementationOnce(async (input: {
+      onCheckpoint(checkpoint: unknown): Promise<void>;
+    }) => {
+      await input.onCheckpoint({
+        outcomes: [],
+        unsettledProofs: [{ key: 'old-task', proof }],
+        snapshot: checkpointSnapshot
+      });
+      return { outcomes: [], snapshot: checkpointSnapshot, unsettledProofs: [{ key: 'old-task', proof }] };
+    });
+    const onTaskCheckpoint = vi.fn(async () => {});
+
+    await new CapcutEngineService({ userDataDir: 'C:/tmp/userData' }).runAccount(runInput({ onTaskCheckpoint }));
+
+    expect(onTaskCheckpoint).toHaveBeenCalledWith({
+      rows: [{ key: 'server-task', title: 'Server task', reward: 20, status: 1 }],
+      receipt: expect.objectContaining({ final: false, complete: false }),
+      unsettledProofs: [{ key: 'old-task', proof }]
+    });
+  });
+
+  it.each([
+    ['fresh', { fresh: false, final: true }],
+    ['final', { fresh: true, final: false }]
+  ])('copies a false %s receipt flag without inferring completion', async (_field, flags) => {
+    runAllTasks.mockResolvedValueOnce({
+      outcomes: [],
+      snapshot: {
+        observedAt: 201,
+        requiredAfter: 200,
+        tasks: [{ key: 'pwa', title: 'Install', reward: 70, status: 4 }],
+        total: 1,
+        done: 1,
+        credits: 70,
+        creditsTotal: 70,
+        missing: [],
+        ...flags
+      },
+      unsettledProofs: []
+    });
+
+    const result = await new CapcutEngineService({ userDataDir: 'C:/tmp/userData' }).runAccount(runInput());
+
+    expect(result.verification).toMatchObject({ ...flags, complete: false });
+  });
+
+  it('does not manufacture receipt metadata for a legacy-shaped UI snapshot', async () => {
+    runAllTasks.mockResolvedValueOnce({
+      outcomes: [],
+      snapshot: {
+        tasks: [],
+        total: 0,
+        done: 0,
+        credits: 0,
+        creditsTotal: 0,
+        missing: []
+      },
+      unsettledProofs: []
+    });
+
+    await expect(new CapcutEngineService({ userDataDir: 'C:/tmp/userData' }).runAccount(runInput()))
+      .rejects.toThrow('UI_VERIFICATION_METADATA_REQUIRED');
+  });
+
+  it.each([
+    ['non-done row', { tasks: [{ key: 'pwa', title: 'Install', reward: 70, status: 1 }] }],
+    ['duplicate rows', { total: 2, done: 2, tasks: [
+      { key: 'pwa', title: 'Install', reward: 70, status: 4 },
+      { key: 'pwa', title: 'Install', reward: 70, status: 4 }
+    ] }],
+    ['equal timestamps', { observedAt: 200, requiredAfter: 200 }],
+    ['older timestamp', { observedAt: 199, requiredAfter: 200 }]
+  ])('does not certify contradictory %s as complete', async (_name, patch) => {
+    runAllTasks.mockResolvedValueOnce({ outcomes: [], unsettledProofs: [], snapshot: exactSnapshot(patch) });
+    const result = await new CapcutEngineService({ userDataDir: 'C:/tmp/userData' }).runAccount(runInput());
+    expect(result.verification?.complete).toBe(false);
   });
 });

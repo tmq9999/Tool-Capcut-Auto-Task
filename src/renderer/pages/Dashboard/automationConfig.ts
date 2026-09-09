@@ -18,6 +18,8 @@ import {
  */
 export interface AutomationConfigState {
   threadCount: number;
+  mailLimit: number;
+  maxBillablePurchases: number;
   browser: BrowserRuntime;
   headless: boolean;
   retryCount: number;
@@ -47,6 +49,8 @@ export interface AutomationConfigState {
 
 export const DEFAULT_AUTOMATION_CONFIG: AutomationConfigState = {
   threadCount: 10,
+  mailLimit: 0,
+  maxBillablePurchases: 0,
   browser: 'multilogin',
   headless: false,
   retryCount: 3,
@@ -143,6 +147,8 @@ export function toRunConfig(state: AutomationConfigState): RunConfigResult {
 
   const candidate = {
     threadCount: state.threadCount,
+    mailLimit: state.mailLimit,
+    maxBillablePurchases: state.emailSourceMode === 'api' ? state.maxBillablePurchases : 0,
     browser: state.browser,
     headless: state.headless,
     retryCount: state.retryCount,
@@ -208,6 +214,8 @@ type SecretField = 'emailList' | 'proxyList' | 'proxyKeyList' | 'customPassword'
 export function toPersistedConfig(state: AutomationConfigState): AutomationConfigSettingsDTO {
   return {
     threadCount: state.threadCount,
+    ...(state.mailLimit > 0 ? { mailLimit: state.mailLimit } : {}),
+    maxBillablePurchases: state.maxBillablePurchases,
     browser: state.browser,
     headless: state.headless,
     retryCount: state.retryCount,
@@ -259,6 +267,7 @@ export function fromPersistedConfig(
   return {
     ...DEFAULT_AUTOMATION_CONFIG,
     ...knobs,
+    mailLimit: knobs.mailLimit ?? 0,
     emailSourceMode,
     emailList: keep?.emailList ?? '',
     proxyList: keep?.proxyList ?? '',
