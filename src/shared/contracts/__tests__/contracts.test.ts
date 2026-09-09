@@ -125,7 +125,7 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
   it('preserves ElectronBridge compile-time structure and platform/version compatibility', () => {
     const mockBridge: ElectronBridge = {
       platform: 'win32',
-      version: '3.0.0',
+      version: '3.0.1',
       ping: async () => ({
         success: true,
         data: { pong: true, timestamp: Date.now() }
@@ -159,8 +159,11 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
                 skipWithoutTrial: false,
                 proxyMode: 'direct',
                 proxyRegion: 'random',
+                proxyList: '',
+                proxyKeyList: '',
                 emailSourceMode: 'manual',
                 emailApiProvider: 'gmail94',
+                emailRetryIntervalSeconds: 15,
                 otpService: 'facebook',
                 passwordMode: 'random',
                 passwordLength: 12,

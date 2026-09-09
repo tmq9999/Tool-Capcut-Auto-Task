@@ -28,6 +28,22 @@ export const DEFAULT_OTP_SERVICE = CAPCUT_OTP_SERVICE;
 const DEFAULT_DONGVAN_ACCOUNT_TYPE = 1;
 const DEFAULT_DONGVAN_QUALITY = 3;
 
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('Aborted'));
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(signal?.reason ?? new Error('Aborted'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 export interface EmailCapacitySnapshot {
   provider: 'gmail94';
   service: 'capcut';
@@ -121,6 +137,8 @@ export interface PurchaseOptions {
   quality?: number | string;
   maxBillablePurchases: number;
   onPurchaseEvent?: (event: BillablePurchaseEvent) => void;
+  emailRetryIntervalMs?: number;
+  onRetryWait?: (message: string) => void;
 }
 
 export interface EmailPurchaseServiceDeps {
@@ -360,6 +378,11 @@ export class EmailPurchaseService {
         throw poisonPurchaseAccounting();
       }
     };
+    const rollbackAttempt = (): void => {
+      if (stats.attempted > 0) {
+        stats.attempted -= 1;
+      }
+    };
     const confirmPurchase = (): void => {
       stats.confirmed += 1;
       try {
@@ -476,40 +499,58 @@ export class EmailPurchaseService {
             remainingAffordablePurchases = affordable;
           }
 
-          workerSignal.throwIfAborted();
-          assertPurchaseBudget();
-          recordPurchaseIntent();
-          beginPurchase();
+          const retryIntervalMs = options.emailRetryIntervalMs ?? 15_000;
+          let retryCount = 0;
           let order: { email: string; orderId: string };
-          try {
-            order = await this.observe(
-              { provider: 'gmail94', operation: 'mailbox-purchase' },
-              () => this.apis.gmail94.createOtpOrder(gmailToken, gmailServiceSlug)
-            );
-          } catch (err: unknown) {
-            if (err instanceof ProviderError && err.code === 'INSUFFICIENT_FUNDS') {
-              const refreshedProfile = await this.observe(
-                { provider: 'gmail94', operation: 'profile' },
-                () => this.apis.gmail94.getProfile(gmailToken)
-              ).catch(() => null);
-              const refreshedBalance = refreshedProfile?.balance ?? 0;
-              const affordable = Math.floor(refreshedBalance / unitPrice);
-              throw new AutomationTerminalError(
-                'blocked',
-                {
-                  code: 'INSUFFICIENT_FUNDS',
-                  provider: 'gmail94',
-                  details: {
-                    balance: refreshedBalance,
-                    unitPrice,
-                    affordablePurchaseCount: affordable
-                  }
-                },
-                'Số dư Gmail94 không đủ.'
+
+          while (true) {
+            workerSignal.throwIfAborted();
+            assertPurchaseBudget();
+            recordPurchaseIntent();
+            beginPurchase();
+
+            try {
+              order = await this.observe(
+                { provider: 'gmail94', operation: 'mailbox-purchase' },
+                () => this.apis.gmail94.createOtpOrder(gmailToken, gmailServiceSlug)
               );
+              break;
+            } catch (err: unknown) {
+              if (err instanceof ProviderError && err.code === 'INSUFFICIENT_FUNDS') {
+                const refreshedProfile = await this.observe(
+                  { provider: 'gmail94', operation: 'profile' },
+                  () => this.apis.gmail94.getProfile(gmailToken)
+                ).catch(() => null);
+                const refreshedBalance = refreshedProfile?.balance ?? 0;
+                const affordable = Math.floor(refreshedBalance / unitPrice);
+                throw new AutomationTerminalError(
+                  'blocked',
+                  {
+                    code: 'INSUFFICIENT_FUNDS',
+                    provider: 'gmail94',
+                    details: {
+                      balance: refreshedBalance,
+                      unitPrice,
+                      affordablePurchaseCount: affordable
+                    }
+                  },
+                  'Số dư Gmail94 không đủ.'
+                );
+              }
+
+              if (err instanceof ProviderError && err.code === 'OUT_OF_STOCK') {
+                rollbackAttempt();
+                retryCount += 1;
+                const retrySeconds = Math.round(retryIntervalMs / 1000);
+                const retryMsg = `Kho email Gmail94 tạm hết. Đang chờ nạp lại sau ${retrySeconds}s (lần ${retryCount})...`;
+                options.onRetryWait?.(retryMsg);
+                await abortableDelay(retryIntervalMs, workerSignal);
+                continue;
+              }
+
+              if (isDefinitiveProviderFailure(err)) throw err;
+              throw ambiguousPurchase();
             }
-            if (isDefinitiveProviderFailure(err)) throw err;
-            throw ambiguousPurchase();
           }
           if (
             typeof order?.email !== 'string' || order.email.length === 0 ||
@@ -543,27 +584,56 @@ export class EmailPurchaseService {
           const accountType = options.accountType ?? DEFAULT_DONGVAN_ACCOUNT_TYPE;
           const quality = options.quality ?? DEFAULT_DONGVAN_QUALITY;
 
-          assertPurchaseBudget();
-          recordPurchaseIntent();
-          beginPurchase();
+          const retryIntervalMs = options.emailRetryIntervalMs ?? 15_000;
+          let retryCount = 0;
           let mails: DongVanPurchasedMail[];
-          try {
-            mails = await this.observe(
-              { provider: 'dongvanfb', operation: 'mailbox-purchase' },
-              () => this.apis.dongvanfb.buyMail(apiKey, {
-                accountType,
-                quality,
-                type: 'full'
-              })
-            );
-          } catch (err: unknown) {
-            if (
-              err instanceof ProviderError &&
-              (err.code === 'AUTH_ERROR' || err.code === 'PROVIDER_NOT_IMPLEMENTED')
-            ) {
-              throw err;
+
+          while (true) {
+            workerSignal.throwIfAborted();
+            assertPurchaseBudget();
+            recordPurchaseIntent();
+            beginPurchase();
+
+            try {
+              mails = await this.observe(
+                { provider: 'dongvanfb', operation: 'mailbox-purchase' },
+                () => this.apis.dongvanfb.buyMail(apiKey, {
+                  accountType,
+                  quality,
+                  type: 'full'
+                })
+              );
+              break;
+            } catch (err: unknown) {
+              if (err instanceof ProviderError && err.code === 'INSUFFICIENT_FUNDS') {
+                throw new AutomationTerminalError(
+                  'blocked',
+                  {
+                    code: 'INSUFFICIENT_FUNDS',
+                    provider: 'dongvanfb'
+                  },
+                  'Số dư DongVanFB không đủ.'
+                );
+              }
+
+              if (err instanceof ProviderError && err.code === 'OUT_OF_STOCK') {
+                rollbackAttempt();
+                retryCount += 1;
+                const retrySeconds = Math.round(retryIntervalMs / 1000);
+                const retryMsg = `Kho email DongVanFB tạm hết. Đang chờ nạp lại sau ${retrySeconds}s (lần ${retryCount})...`;
+                options.onRetryWait?.(retryMsg);
+                await abortableDelay(retryIntervalMs, workerSignal);
+                continue;
+              }
+
+              if (
+                err instanceof ProviderError &&
+                (err.code === 'AUTH_ERROR' || err.code === 'PROVIDER_NOT_IMPLEMENTED')
+              ) {
+                throw err;
+              }
+              throw ambiguousPurchase();
             }
-            throw ambiguousPurchase();
           }
           const mail = mails[0];
           if (!mail || typeof mail.email !== 'string' || mail.email.length === 0) {

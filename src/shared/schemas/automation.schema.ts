@@ -139,6 +139,7 @@ export const AutomationRunConfigSchema = z.object({
    */
   skipWithoutTrial: z.boolean(),
   emailSource: EmailSourceConfigSchema,
+  emailRetryIntervalSeconds: z.number().int().min(5).max(300).default(15).optional(),
   proxy: ProxyConfigSchema,
   password: PasswordConfigSchema,
   testDurationMs: z.number().int().min(0).max(600_000).default(DEFAULT_TEST_RUN_DURATION_MS)

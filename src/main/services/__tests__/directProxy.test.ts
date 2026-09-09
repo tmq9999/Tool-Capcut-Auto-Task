@@ -57,6 +57,21 @@ describe('parseDirectProxy — có scheme', () => {
   it('tên miền cũng dùng được, không chỉ IP', () => {
     expect(parseDirectProxy('socks5://proxy.example.com:1080')?.host).toBe('proxy.example.com');
   });
+
+  it('hỗ trợ định dạng chuẩn URL user:pass@host:port (HTTP và SOCKS5)', () => {
+    expect(parseDirectProxy('http://bob:s3cret@1.2.3.4:8080')).toEqual({
+      host: '1.2.3.4', port: 8080, type: 'http', username: 'bob', password: 's3cret'
+    });
+    expect(parseDirectProxy('socks5://alice:p@ssword@proxy.domain.com:1080')).toEqual({
+      host: 'proxy.domain.com', port: 1080, type: 'socks5', username: 'alice', password: 'p@ssword'
+    });
+  });
+
+  it('hỗ trợ user:pass@host:port không có scheme (mặc định http)', () => {
+    expect(parseDirectProxy('bob:s3cret@1.2.3.4:8080')).toEqual({
+      host: '1.2.3.4', port: 8080, type: 'http', username: 'bob', password: 's3cret'
+    });
+  });
 });
 
 describe('parseDirectProxy — dòng hỏng', () => {

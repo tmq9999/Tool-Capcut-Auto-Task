@@ -110,6 +110,7 @@ class FakeBridge implements IDashboardBridge {
     }
   };
 
+  public clearLogsCalls = 0;
   logs = {
     list: async (): Promise<IpcEnvelope<{ items: CanonicalRuntimeLog[]; total: number }>> => ({
       success: true,
@@ -118,6 +119,10 @@ class FakeBridge implements IDashboardBridge {
     onEntry: (listener: (entry: CanonicalRuntimeLog) => void): (() => void) => {
       this.logListeners.push(listener);
       return () => { this.unsubscribeCalls += 1; };
+    },
+    clear: async (): Promise<IpcEnvelope<{ success: boolean }>> => {
+      this.clearLogsCalls += 1;
+      return { success: true, data: { success: true } };
     }
   };
 
@@ -245,6 +250,19 @@ describe('DashboardController.start', () => {
     await controller.start();
 
     expect(controller.getState().error).toBeNull();
+  });
+
+  it('xóa logs runtime và gọi bridge.logs.clear khi bắt đầu phiên mới', async () => {
+    const controller = new DashboardController(bridge);
+    await controller.load();
+    expect(controller.getState().logs).toHaveLength(1);
+
+    controller.updateConfig({ emailList: 'a@x.com|p' });
+    const started = await controller.start();
+
+    expect(started).toBe(true);
+    expect(controller.getState().logs).toHaveLength(0);
+    expect(bridge.clearLogsCalls).toBe(1);
   });
 });
 
@@ -440,6 +458,15 @@ describe('DashboardController.removeAccounts', () => {
     expect(bridge.accountsListCalls).toBeGreaterThan(before);
   });
 
+  it('deletes multiple account IDs including failed and stopped runs', async () => {
+    const controller = new DashboardController(bridge);
+
+    const removed = await controller.removeAccounts(['acc-err-1', 'acc-done-2', 'acc-stopped-3']);
+
+    expect(removed).toBe(true);
+    expect(bridge.removed).toEqual([['acc-err-1', 'acc-done-2', 'acc-stopped-3']]);
+  });
+
   it('ignores an empty selection without calling the bridge', async () => {
     const controller = new DashboardController(bridge);
 
@@ -536,12 +563,13 @@ describe('DashboardController lưu cấu hình', () => {
     expect(new Set(ops)).toEqual(new Set(['keep']));
   });
 
-  it('không bao giờ ghi email, proxy hay mật khẩu đã dán vào Settings', async () => {
+  it('không bao giờ ghi email hoặc mật khẩu đã dán vào Settings nhưng lưu cấu hình proxy', async () => {
     const controller = new DashboardController(bridge);
     await controller.load();
     controller.updateConfig({
       emailList: 'a@x.com|secret-pass',
       proxyList: '9.9.9.9:1:user:secret',
+      proxyKeyList: 'K-SAVED-KEY',
       passwordMode: 'custom',
       customPassword: 'Str0ng!Secret'
     });
@@ -550,8 +578,9 @@ describe('DashboardController lưu cấu hình', () => {
 
     const asJson = JSON.stringify(bridge.savedSettings[0]);
     expect(asJson).not.toContain('secret-pass');
-    expect(asJson).not.toContain('9.9.9.9');
     expect(asJson).not.toContain('Str0ng!Secret');
+    expect(asJson).toContain('9.9.9.9:1:user:secret');
+    expect(asJson).toContain('K-SAVED-KEY');
   });
 
   it('báo lỗi khi lưu thất bại', async () => {

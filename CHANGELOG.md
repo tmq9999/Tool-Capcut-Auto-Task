@@ -6,6 +6,56 @@ theo [SemVer](https://semver.org/lang/vi/).
 Lịch sử trước `2.4.0` không được dựng lại ở đây vì repo không có git history —
 chỉ ghi những gì có bằng chứng trong mã nguồn, log chạy thật và báo cáo nghiệm thu.
 
+## [3.0.2] — 2026-09-09
+
+Bản phát hành bổ sung cơ chế **Polling chờ nạp lại kho email (Chỉ dừng khi hết tiền mua mail)** và cho phép tùy biến chu kỳ chờ trực tiếp trên giao diện Dashboard, ngăn chặn triệt để việc phiên chạy bị gián đoạn oan uổng khi các nhà cung cấp email tạm thời hết hàng hoặc phản hồi HTTP 400.
+
+### Added
+
+- **Cơ chế Polling chờ nạp lại kho mail tự động (Auto-Polling & Restock Waiting):**
+  - Khi nhà cung cấp email (Gmail94 / DongVanFB) phản hồi HTTP 400, 429 hoặc `success: false` do kho email tạm thời hết hàng (`OUT_OF_STOCK`), hệ thống **không dừng phiên chạy**.
+  - Các luồng đang thực hiện nhiệm vụ vẫn tiếp tục chạy bình thường; luồng cần cấp phát email mới sẽ tự động chuyển sang chế độ chờ và thử lại định kỳ cho đến khi có mail mới hoặc người dùng chủ động bấm DỪNG LẠI.
+  - Tự động rollback bộ đếm `stats.attempted` khi kho mail hết hàng để bảo toàn nguyên vẹn hạn mức mua email của lượt chạy (`maxBillablePurchases`).
+  - **Chỉ dừng phiên (`blocked`) khi thực sự hết tiền mua mail (`INSUFFICIENT_FUNDS`)** hoặc sai thông tin xác thực (`AUTH_ERROR`), bảo vệ số dư tài khoản người dùng tuyệt đối.
+- **Tùy biến chu kỳ chờ ngay trên Dashboard (Configurable Retry Interval):**
+  - Tại Panel **Nguồn Email** (chế độ API Thuê Mail), bổ sung tùy chọn **"Chờ nạp lại khi hết email"** với các mức: `10 giây`, `15 giây (Khuyên dùng)`, `30 giây`, `60 giây` (mặc định: `15 giây`).
+  - Tự động lưu và phục hồi cấu hình qua Settings.
+- **Hiển thị tiến trình và log thời gian thực khi chờ nạp mail:**
+  - Thanh trạng thái Dashboard và log hệ thống cập nhật liên tục: `Kho email [Gmail94/DongVanFB] tạm hết. Đang chờ nạp lại sau Xs (lần N)...`.
+
+---
+
+## [3.0.1] — 2026-09-09
+
+Bản phát hành tối ưu hóa chuyên sâu cho cơ chế vận hành **Đa luồng song song (Multi-threaded Isolation & Continuous Renewal)**, loại bỏ triệt để hiện tượng đóng băng hiển thị luồng trên Dashboard, hoàn thiện hỗ trợ các định dạng Proxy tĩnh và nâng cấp khả năng phân tích lỗi từ nhà cung cấp email.
+
+### Added
+
+- **Cơ chế đa luồng song song hoàn toàn cách ly (100% Isolated Multi-Threading):**
+  - Mỗi luồng chạy độc lập hoàn toàn: 1 Proxy riêng (xoay vòng KiotProxy key hoặc Proxy tĩnh theo danh sách), 1 Profile Multilogin riêng biệt, 1 Email riêng biệt cấp phát JIT (Gmail94/DongVanFB hoặc danh sách manual), 1 Mật khẩu riêng, bộ nhớ đối soát bằng chứng (`proofMemory`) riêng biệt.
+  - Vòng đời nạp mới liên tục (Continuous Worker Renew Cycle): Luồng nào hoàn thành 12 nhiệm vụ trước sẽ lập tức thu hồi tài nguyên (dừng profile Multilogin, giải phóng proxy lease), cấp phát tài nguyên mới và khởi chạy tài khoản tiếp theo ngay lập tức mà không phải chờ các luồng còn lại, chạy bền bỉ cho đến khi chạm giới hạn số lượng tài khoản (`maxAccounts`) hoặc nguồn email hết số dư.
+  - Giãn cách khởi chạy an toàn (`headlessWorkerStaggerMs`) nhằm ngăn ngừa xung đột cổng CDP hoặc quá tải cục bộ tại Multilogin Agent khi mở nhiều profile cùng một thời điểm.
+- **Hỗ trợ toàn diện các định dạng Proxy tĩnh (Direct IP Proxy):**
+  - Mở rộng bộ phân tích cú pháp proxy hỗ trợ đầy đủ các tiền tố scheme `http://` và `socks5://`.
+  - Hỗ trợ đầy đủ các cú pháp: `http://ip:port`, `socks5://ip:port`, `http://user:pass@ip:port`, `socks5://user:pass@ip:port`, `ip:port:user:pass`, `ip:port`.
+
+### Changed
+
+- **Cải thiện độ chi tiết của thông báo lỗi API Email:**
+  - Nâng cấp `Gmail94Provider` trích xuất thông điệp chi tiết từ server phản hồi khi gặp mã lỗi HTTP (ví dụ: thông báo hết số dư, tạm hết kho mail, giới hạn tần suất yêu cầu) thay vì chỉ hiển thị thông báo `(HTTP 400)` chung chung.
+
+### Fixed
+
+- **Khắc phục triệt để lỗi "1 luồng đứng chờ" / Đóng băng hiển thị trên Dashboard:**
+  - Sửa lỗi luồng cuối cùng trong danh sách (luồng thứ 5 khi chạy 5 luồng, hoặc luồng thứ 2 khi chạy 2 luồng) bị đóng băng hiển thị ở trạng thái sơ khai ban đầu (`Proxy: -`, `Browser: multilogin`, `Bước: Đang khởi chạy browser`) do cơ chế trước đó chỉ làm mới danh sách khi có luồng tiếp theo bắt đầu.
+  - Tích hợp bộ hẹn giờ cập nhật thời gian thực (chu kỳ 1 giây) trong `dashboardController.ts` khi phiên tự động đang chạy (`isRunning || workersActive > 0`).
+  - Phát sự kiện `RUN_PROGRESS` ngay khi profile Multilogin mở thành công và khi chuyển sang bước "Đang làm nhiệm vụ".
+  - Giúp bảng điều khiển hiển thị đầy đủ, chính xác và trực quan thời gian thực toàn bộ các luồng song song.
+- **Khắc phục lỗi mất Proxy Keys khi chuyển Tab:**
+  - Đảm bảo draft state của danh sách Proxy Keys (KiotProxy) được lưu giữ nguyên vẹn khi chuyển qua lại giữa Dashboard, Settings, Accounts và Logs mà không bị xóa trống dữ liệu.
+- **Tự động dọn dẹp Log runtime theo phiên (Per-Session Log Cleanup):**
+  - Tự động làm sạch log runtime cũ khi khởi chạy phiên tự động mới, giúp khung System Logs luôn phản ánh chính xác nhật ký của phiên chạy hiện tại.
+
 ---
 
 ## [3.0.0] — 2026-09-09

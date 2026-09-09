@@ -32,7 +32,7 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 
 const bridge: ElectronBridge = {
   platform: process.platform,
-  version: '3.0.0',
+  version: '3.0.1',
   ping: () => ipcRenderer.invoke(IPC_CHANNELS.PING),
   settings: {
     get: () => ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET),

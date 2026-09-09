@@ -244,7 +244,8 @@ function initializePrimaryInstance(): void {
     const cleanupAutomationIpc = registerAutomationIpc(
       ipcMain,
       providerStack.automationRunService,
-      providerStack.emailPurchaseService
+      providerStack.emailPurchaseService,
+      logRepo
     );
 
     cleanupIpc = () => {

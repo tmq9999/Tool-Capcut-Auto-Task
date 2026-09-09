@@ -75,13 +75,13 @@ describe('Gmail94Provider.createOtpOrder', () => {
     await expect(provider.createOtpOrder(TOKEN, 'facebook')).rejects.toBeInstanceOf(ProviderError);
   });
 
-  it('reports a business failure as a CONFIG_ERROR', async () => {
+  it('reports a business failure as OUT_OF_STOCK', async () => {
     const http = new FakeHttpClient();
     http.enqueue({ body: { success: false, message: 'Invalid request' } });
     const provider = new Gmail94Provider(http);
 
     await expect(provider.createOtpOrder(TOKEN, 'facebook')).rejects.toMatchObject({
-      code: 'CONFIG_ERROR'
+      code: 'OUT_OF_STOCK'
     });
   });
 

@@ -38,6 +38,7 @@ export interface AutomationConfigState {
   proxyRegion: ProxyRegionChoice;
   emailSourceMode: 'manual' | 'api' | 'custom';
   emailApiProvider: EmailApiProvider;
+  emailRetryIntervalSeconds: number;
   emailList: string;
   passwordMode: 'custom' | 'random';
   customPassword: string;
@@ -66,6 +67,7 @@ export const DEFAULT_AUTOMATION_CONFIG: AutomationConfigState = {
   proxyRegion: 'random',
   emailSourceMode: 'manual',
   emailApiProvider: 'gmail94',
+  emailRetryIntervalSeconds: 15,
   emailList: '',
   passwordMode: 'random',
   customPassword: '',
@@ -158,6 +160,7 @@ export function toRunConfig(state: AutomationConfigState): RunConfigResult {
     typeDelayMaxMs: state.typeDelayMaxMs,
     module: state.module,
     skipWithoutTrial: state.skipWithoutTrial,
+    emailRetryIntervalSeconds: state.emailRetryIntervalSeconds,
     emailSource: state.emailSourceMode === 'api'
       // Không gửi `service`: slug OTP là hằng của site (`CAPCUT_OTP_SERVICE`) và
       // do main process quyết, nên giá trị cũ trong app_settings không theo vào.
@@ -227,8 +230,11 @@ export function toPersistedConfig(state: AutomationConfigState): AutomationConfi
     skipWithoutTrial: state.skipWithoutTrial,
     proxyMode: state.proxyMode,
     proxyRegion: state.proxyRegion,
+    proxyList: state.proxyList,
+    proxyKeyList: state.proxyKeyList,
     emailSourceMode: state.emailSourceMode,
     emailApiProvider: state.emailApiProvider,
+    emailRetryIntervalSeconds: state.emailRetryIntervalSeconds,
     /**
      * Khoá `otpService` còn trong `AutomationConfigSettingsSchema` vì schema là
      * `.strict()`: bỏ khoá đi thì row đã lưu trên máy người dùng parse thất bại
@@ -270,8 +276,12 @@ export function fromPersistedConfig(
     mailLimit: knobs.mailLimit ?? 0,
     emailSourceMode,
     emailList: keep?.emailList ?? '',
-    proxyList: keep?.proxyList ?? '',
-    proxyKeyList: keep?.proxyKeyList ?? '',
+    proxyList: keep?.proxyList !== undefined && keep.proxyList !== ''
+      ? keep.proxyList
+      : (knobs.proxyList ?? ''),
+    proxyKeyList: keep?.proxyKeyList !== undefined && keep.proxyKeyList !== ''
+      ? keep.proxyKeyList
+      : (knobs.proxyKeyList ?? ''),
     customPassword: keep?.customPassword ?? ''
   };
 }

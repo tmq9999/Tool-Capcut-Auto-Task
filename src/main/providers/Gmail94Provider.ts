@@ -52,9 +52,26 @@ export class Gmail94Provider {
     const envelope = asRecord(response.body);
 
     if (!response.ok) {
+      const message = typeof envelope?.message === 'string' ? envelope.message : null;
+      const insufficient =
+        action === 'mua email' &&
+        typeof message === 'string' &&
+        /không đủ tiền|hết tiền|số dư/i.test(message);
+
+      let code = statusToProviderCode(response.status);
+      if (action === 'mua email') {
+        if (insufficient) {
+          code = 'INSUFFICIENT_FUNDS';
+        } else if (response.status === 400 || response.status === 429) {
+          code = 'OUT_OF_STOCK';
+        }
+      }
+
       throw new ProviderError(
-        statusToProviderCode(response.status),
-        'Gmail94 ' + action + ' thất bại (HTTP ' + response.status + ').',
+        code,
+        message
+          ? 'Gmail94 ' + action + ' thất bại: ' + message + ' (HTTP ' + response.status + ').'
+          : 'Gmail94 ' + action + ' thất bại (HTTP ' + response.status + ').',
         GMAIL94_SERVICE_NAME
       );
     }
@@ -65,10 +82,16 @@ export class Gmail94Provider {
       const insufficient =
         action === 'mua email' &&
         typeof message === 'string' &&
-        /không đủ tiền/i.test(message);
+        /không đủ tiền|hết tiền|số dư/i.test(message);
+
+      const code = insufficient
+        ? 'INSUFFICIENT_FUNDS'
+        : action === 'mua email'
+          ? 'OUT_OF_STOCK'
+          : 'CONFIG_ERROR';
 
       throw new ProviderError(
-        insufficient ? 'INSUFFICIENT_FUNDS' : 'CONFIG_ERROR',
+        code,
         insufficient
           ? 'Số dư Gmail94 không đủ để mua email CapCut.'
           : 'Gmail94 ' + action + ' thất bại: ' + (message ?? 'không rõ nguyên nhân') + '.',

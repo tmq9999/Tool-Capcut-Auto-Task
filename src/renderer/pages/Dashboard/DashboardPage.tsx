@@ -12,7 +12,7 @@ import { AutomationConfigGrid } from './AutomationConfigGrid';
 import { DashboardActionBar } from './DashboardActionBar';
 import { DockedLiveLogs } from './DockedLiveLogs';
 import { createDashboardColumns } from './columns';
-import { DashboardController, type IDashboardBridge } from './dashboardController';
+import { getSharedDashboardController, type IDashboardBridge } from './dashboardController';
 
 /** Offline fallback so the page still renders outside Electron. */
 const OFFLINE_BRIDGE: IDashboardBridge = {
@@ -76,7 +76,7 @@ export const DashboardPage: React.FC = () => {
           settings: api.settings,
         }
       : OFFLINE_BRIDGE;
-    return new DashboardController(bridge);
+    return getSharedDashboardController(bridge);
   }, []);
 
   const state = useSyncExternalStore(
@@ -111,7 +111,8 @@ export const DashboardPage: React.FC = () => {
         (statusFilter === 'running' && (account.status === 'active' || account.status === 'processing')) ||
         (statusFilter === 'waiting' && account.status === 'waiting') ||
         (statusFilter === 'done' && account.status === 'done') ||
-        (statusFilter === 'error' && account.status === 'error');
+        (statusFilter === 'error' && account.status === 'error') ||
+        (statusFilter === 'stopped' && account.status === 'stopped');
 
       return matchesSearch && matchesStatus;
     });
@@ -124,6 +125,31 @@ export const DashboardPage: React.FC = () => {
     () => new Set(state.runningThreads.map((thread) => thread.accountId)),
     [state.runningThreads]
   );
+
+  const selectedAccountIds = useMemo(
+    () => Object.keys(rowSelection).filter((id) => rowSelection[id]),
+    [rowSelection]
+  );
+  const selectedCount = selectedAccountIds.length;
+
+  const handleClearAccounts = () => {
+    const targetIds =
+      selectedCount > 0
+        ? selectedAccountIds.filter((id) => !runningAccountIds.has(id))
+        : filteredAccounts
+            .filter(
+              (account) =>
+                !runningAccountIds.has(account.id) &&
+                account.status !== 'processing'
+            )
+            .map((account) => account.id);
+
+    if (targetIds.length > 0) {
+      void controller.removeAccounts(targetIds).then(() => {
+        setRowSelection({});
+      });
+    }
+  };
 
   const columns = useMemo(
     () =>
@@ -287,17 +313,15 @@ export const DashboardPage: React.FC = () => {
                   size="sm"
                   icon={<Trash2 className="w-3 h-3 text-error" />}
                   disabled={isRunning}
-                  onClick={() => {
-                    const doneIds = state.accounts
-                      .filter((account) => account.status === 'done')
-                      .map((account) => account.id);
-                    if (doneIds.length > 0) {
-                      void controller.removeAccounts(doneIds);
-                    }
-                  }}
+                  onClick={handleClearAccounts}
                   className="text-on-surface-variant hover:text-error"
+                  title={
+                    selectedCount > 0
+                      ? `Xoá ${selectedCount} tài khoản đã chọn`
+                      : 'Xoá danh sách tài khoản khỏi màn hình (trừ luồng đang chạy)'
+                  }
                 >
-                  Clear
+                  {selectedCount > 0 ? `Clear (${selectedCount})` : 'Clear'}
                 </Button>
               </div>
             </div>

@@ -28,6 +28,7 @@ export interface IDashboardBridge {
   logs: {
     list(filter: LogFilterDTO): Promise<IpcEnvelope<{ items: CanonicalRuntimeLog[]; total: number }>>;
     onEntry(listener: (entry: CanonicalRuntimeLog) => void): () => void;
+    clear?(): Promise<IpcEnvelope<{ success: boolean }>>;
   };
   run: {
     start(config: AutomationRunConfigDTO): Promise<IpcEnvelope<{ runId: string }>>;
@@ -154,7 +155,7 @@ export class DashboardController {
   }
 
   isRunning(): boolean {
-    return ACTIVE_STATES.has(this.state.progress.state);
+    return ACTIVE_STATES.has(this.state.progress.state) || this.state.progress.workersActive > 0;
   }
 
   updateConfig(patch: Partial<AutomationConfigState>): void {
@@ -311,6 +312,15 @@ export class DashboardController {
       })
     );
 
+    const pollInterval = setInterval(() => {
+      const isLive = this.isRunning() || this.state.progress.workersActive > 0;
+      if (isLive) {
+        void this.refreshRunningThreads();
+        void this.refreshAccounts();
+      }
+    }, 1000);
+    this.detachers.push(() => clearInterval(pollInterval));
+
     return () => this.dispose();
   }
 
@@ -322,7 +332,16 @@ export class DashboardController {
       return false;
     }
 
-    this.setState({ isSubmitting: true, error: null });
+    // Clear runtime logs for the new session immediately
+    this.setState({ logs: [], isSubmitting: true, error: null });
+    try {
+      if (this.bridge.logs.clear) {
+        await this.bridge.logs.clear();
+      }
+    } catch {
+      // Best-effort clear
+    }
+
     const response = await this.bridge.run.start(mapped.config);
     this.setState({ isSubmitting: false });
 
@@ -385,3 +404,20 @@ export class DashboardController {
     this.listeners.clear();
   }
 }
+
+let sharedDashboardController: DashboardController | null = null;
+
+export function getSharedDashboardController(
+  bridge: IDashboardBridge,
+  options?: DashboardControllerOptions
+): DashboardController {
+  if (!sharedDashboardController) {
+    sharedDashboardController = new DashboardController(bridge, options);
+  }
+  return sharedDashboardController;
+}
+
+export function resetSharedDashboardController(): void {
+  sharedDashboardController = null;
+}
+

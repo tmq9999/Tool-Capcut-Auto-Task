@@ -55,7 +55,13 @@ export interface AutomationWorkSource {
 }
 
 export interface AutomationWorkSourceFactory {
-  create(config: AutomationRunConfigDTO, runId: string, onPurchaseEvent?: (event: BillablePurchaseEvent) => void, mutationContext?: DiagnosticMutationContext): AutomationWorkSource;
+  create(
+    config: AutomationRunConfigDTO,
+    runId: string,
+    onPurchaseEvent?: (event: BillablePurchaseEvent) => void,
+    mutationContext?: DiagnosticMutationContext,
+    onRetryWait?: (message: string) => void
+  ): AutomationWorkSource;
 }
 
 function noPurchases(): BillablePurchaseStats {
@@ -190,7 +196,9 @@ class ContinuousEmailWorkSource implements AutomationWorkSource {
     private readonly budget: number,
     private readonly onPurchaseEvent?: (event: BillablePurchaseEvent) => void,
     private readonly observation?: ObservationScope,
-    private readonly mutationContext?: DiagnosticMutationContext
+    private readonly mutationContext?: DiagnosticMutationContext,
+    private readonly emailRetryIntervalMs?: number,
+    private readonly onRetryWait?: (message: string) => void
   ) {}
 
   async prepare(initialConcurrency: number, signal: AbortSignal): Promise<SourceReadiness> {
@@ -198,7 +206,13 @@ class ContinuousEmailWorkSource implements AutomationWorkSource {
     this.session = await this.emailService.openAcquisitionSession(
       this.provider,
       workerTarget,
-      { service: this.service, maxBillablePurchases: this.budget, onPurchaseEvent: this.onPurchaseEvent },
+      {
+        service: this.service,
+        maxBillablePurchases: this.budget,
+        onPurchaseEvent: this.onPurchaseEvent,
+        emailRetryIntervalMs: this.emailRetryIntervalMs,
+        onRetryWait: this.onRetryWait
+      },
       signal
     );
     return {
@@ -282,7 +296,7 @@ export function createAutomationWorkSourceFactory(
   observation?: ObservationScope
 ): AutomationWorkSourceFactory {
   return {
-    create(config, runId, onPurchaseEvent, mutationContext) {
+    create(config, runId, onPurchaseEvent, mutationContext, onRetryWait) {
       if (config.emailSource.mode === 'existing') {
         return new ExistingAccountWorkSource(config.emailSource.accountIds, credentialReader);
       }
@@ -303,6 +317,9 @@ export function createAutomationWorkSourceFactory(
         }
         budget = config.maxBillablePurchases;
       }
+      const emailRetryIntervalMs = config.emailRetryIntervalSeconds !== undefined
+        ? config.emailRetryIntervalSeconds * 1000
+        : undefined;
       return new ContinuousEmailWorkSource(
         emailService,
         provider,
@@ -312,7 +329,9 @@ export function createAutomationWorkSourceFactory(
         budget,
         onPurchaseEvent,
         observation,
-        mutationContext
+        mutationContext,
+        emailRetryIntervalMs,
+        onRetryWait
       );
     }
   };

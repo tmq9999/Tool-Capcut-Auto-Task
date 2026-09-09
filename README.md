@@ -1,6 +1,6 @@
-# CapCut Automation v3.0.0 — CapCut Free Credits Automation Desktop Client
+# CapCut Automation v3.0.2 — CapCut Free Credits Automation Desktop Client
 
-> Hệ thống tự động hóa Desktop chuyên nghiệp trên Windows: Tự động hóa đăng ký, đăng nhập tài khoản CapCut Web và cày trọn bộ 12 nhiệm vụ Free Credits (lên tới 2.060 credits/tài khoản) thông qua kiến trúc kép **CycleTLS Native Direct HTTP Execution** kết hợp Playwright Browser Session, kiểm tra và kích hoạt dùng thử 7 ngày VIP, quản lý lease proxy xoay vòng KiotProxy và cấp phát email Just-In-Time (JIT) qua Gmail94/DongVanFB.
+> Hệ thống tự động hóa Desktop chuyên nghiệp trên Windows: Tự động hóa đăng ký, đăng nhập tài khoản CapCut Web và cày trọn bộ 12 nhiệm vụ Free Credits (lên tới 2.060 credits/tài khoản) thông qua kiến trúc kép **CycleTLS Native Direct HTTP Execution** kết hợp Playwright Browser Session, kiểm tra và kích hoạt dùng thử 7 ngày VIP, quản lý lease proxy xoay vòng KiotProxy và cấp phát email Just-In-Time (JIT) qua Gmail94/DongVanFB với **cơ chế đa luồng song song hoàn toàn cách ly** và **tự động polling chờ nạp lại kho mail khi hết hàng (chỉ dừng khi hết tiền)**.
 
 [![Electron](https://img.shields.io/badge/Electron-35.0.0-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-19.1.0-61DAFB?logo=react&logoColor=black)](https://react.dev/)
@@ -12,12 +12,10 @@
 
 ## Tải bản phát hành live
 
-Release v3.0.0 đã được đóng gói và xác minh end-to-end trên Windows:
+Release v3.0.2 (Polling chờ nạp lại kho email & Đa luồng song song) đã sẵn sàng trên Windows:
 
-- [Tải CapCut Automation-3.0.0-x64.exe](https://github.com/tmq9999/Tool-Capcut-Auto-Task/releases/download/v3.0.0-live/CapCut%20Automation-3.0.0-x64.exe)
+- [Tải CapCut Automation-3.0.2-x64.exe](https://github.com/tmq9999/Tool-Capcut-Auto-Task/releases/download/v3.0.2-live/CapCut%20Automation-3.0.2-x64.exe)
 - [Xem release notes và changelog chi tiết](CHANGELOG.md)
-
-SHA256 installer: `14210fcd813c6e05b284c15ae95f406ea667ef0dfea2befa899328691fb8193c`
 
 ---
 
@@ -48,15 +46,16 @@ SHA256 installer: `14210fcd813c6e05b284c15ae95f406ea667ef0dfea2befa899328691fb81
 
 ## 1. Giới thiệu tổng quan
 
-**CapCut Automation v3.0.0** là phiên bản nâng cấp toàn diện (Big Update), phát triển chuyên biệt cho môi trường Windows, phục vụ nhu cầu tự động hóa quy trình nuôi, tạo và làm nhiệm vụ nhận Free Credits cho tài khoản CapCut Web số lượng lớn với tốc độ và độ ổn định cao nhất.
+**CapCut Automation v3.0.2** là phiên bản tối ưu hóa cao cấp phát triển chuyên biệt cho môi trường Windows, phục vụ nhu cầu tự động hóa quy trình nuôi, tạo và làm nhiệm vụ nhận Free Credits cho tài khoản CapCut Web số lượng lớn với tốc độ cao, khả năng chạy đa luồng song song độc lập và đồng bộ giao diện thời gian thực.
 
-### Điểm đột phá của phiên bản 3.0.0:
-- **Động cơ HTTP Direct Tasks & CycleTLS Native Transport:** Thay thế hoàn toàn thao tác click giả lập UI nặng nề, chậm chạp và dễ gãy bằng việc gọi trực tiếp các API endpoints của CapCut qua cầu nối CycleTLS (Go native) chạy trên loopback. Giúp hoàn tất 12 nhiệm vụ chỉ trong vài giây.
+### Điểm đột phá của phiên bản 3.0.2:
+- **Tự động Polling chờ nạp lại kho Email (Smart Stock Polling):** Khi nhà cung cấp Gmail94 hoặc DongVanFB tạm thời hết mail (HTTP 400 / OUT_OF_STOCK), hệ thống tự động giữ luồng và polling chờ nạp lại kho theo chu kỳ tùy chọn (10s, 15s, 30s, 60s) thay vì dừng phiên chạy. Hệ thống chỉ dừng phiên (`blocked`) khi thực sự hết số dư (`INSUFFICIENT_FUNDS`) hoặc sai API key.
+- **Đa luồng song song cách ly 100% (Isolated Multi-Threading):** Mỗi luồng chạy độc lập hoàn toàn với 1 Proxy riêng (KiotProxy hoặc Direct IP), 1 Profile Multilogin riêng, 1 Email riêng (JIT qua Gmail94/DongVanFB hoặc danh sách thủ công), 1 Mật khẩu riêng, bộ nhớ bằng chứng độc lập.
+- **Vòng đời nạp mới liên tục (Continuous Worker Renew Cycle):** Luồng nào hoàn thành nhiệm vụ trước sẽ tự động thu hồi tài nguyên và nạp ngay tài khoản mới mà không cần chờ các luồng còn lại, chạy liên tục tới khi đạt giới hạn email đã đặt.
+- **Đồng bộ Dashboard thời gian thực (Real-time UI Sync):** Khắc phục triệt để lỗi đóng băng hiển thị luồng cuối cùng; toàn bộ thông tin IP Proxy, Profile ID và bước làm nhiệm vụ được cập nhật tức thì.
+- **Động cơ HTTP Direct Tasks & CycleTLS Native Transport:** Gọi trực tiếp các API endpoints của CapCut qua cầu nối CycleTLS (Go native) chạy loopback, hoàn tất 12 nhiệm vụ chỉ trong vài giây.
 - **Tự động Claim Credits & Kích hoạt Trial 7 ngày:** Tự động gửi lệnh nhận thưởng (`claim`) ngay sau khi hoàn thành nhiệm vụ và kiểm tra kích hoạt gói dùng thử VIP 7 ngày nếu tài khoản đủ điều kiện.
-- **Linh hoạt Headed / Headless:** Tùy chọn mở cửa sổ trình duyệt (Headed) để quan sát trực quan hoặc chạy ngầm hoàn toàn (Headless) để tiết kiệm tối đa CPU/RAM khi chạy đa luồng.
-- **Kiểm tra kết nối Live Draft:** Kiểm tra ngay tính hợp lệ của tài khoản Multilogin, KiotProxy, Gmail94, DongVanFB ngay khi đang nhập liệu mà không cần phải bấm Lưu trước.
-- **Bộ nhận diện thương hiệu CapCut Automation:** Đồng bộ tên ứng dụng, logo vector CapCut gradient chuẩn trên cửa sổ, thanh tác vụ (Task Manager) và bộ cài Windows.
-- **Mô hình công nhân liên tục (Continuous Worker Pool):** Tự động xoay vòng nạp công việc liên tục, cấp phát Email Just-In-Time (JIT) sau khi giữ thành công proxy, bảo mật mã hóa AES qua `Electron safeStorage`.
+- **Hỗ trợ đầy đủ Direct Proxy & Trích xuất lỗi chi tiết:** Hỗ trợ đầy đủ scheme `http://` và `socks5://` (có/không có user:pass), phân tích chi tiết thông điệp lỗi từ nhà cung cấp email.
 
 ---
 

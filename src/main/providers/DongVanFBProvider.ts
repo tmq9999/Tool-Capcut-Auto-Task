@@ -88,9 +88,26 @@ export class DongVanFBProvider {
     const envelope = asRecord(response.body);
 
     if (!response.ok) {
+      const message = typeof envelope?.message === 'string' ? envelope.message : null;
+      const insufficient =
+        action === 'mua email' &&
+        typeof message === 'string' &&
+        /không đủ tiền|hết tiền|số dư/i.test(message);
+
+      let code = statusToProviderCode(response.status);
+      if (action === 'mua email') {
+        if (insufficient) {
+          code = 'INSUFFICIENT_FUNDS';
+        } else if (response.status === 400 || response.status === 429) {
+          code = 'OUT_OF_STOCK';
+        }
+      }
+
       throw new ProviderError(
-        statusToProviderCode(response.status),
-        'DongVanFB ' + action + ' thất bại (HTTP ' + response.status + ').',
+        code,
+        message
+          ? 'DongVanFB ' + action + ' thất bại: ' + message + ' (HTTP ' + response.status + ').'
+          : 'DongVanFB ' + action + ' thất bại (HTTP ' + response.status + ').',
         DONGVANFB_SERVICE_NAME
       );
     }
@@ -98,8 +115,17 @@ export class DongVanFBProvider {
     const status = readBoolean(envelope, 'status') ?? readBoolean(envelope, 'success');
     if (status === false) {
       const message = readString(envelope, 'message');
+      const insufficient =
+        action === 'mua email' &&
+        typeof message === 'string' &&
+        /không đủ tiền|hết tiền|số dư/i.test(message);
+      const code = insufficient
+        ? 'INSUFFICIENT_FUNDS'
+        : action === 'mua email'
+          ? 'OUT_OF_STOCK'
+          : 'CONFIG_ERROR';
       throw new ProviderError(
-        'CONFIG_ERROR',
+        code,
         'DongVanFB ' + action + ' thất bại: ' + (message ?? 'không rõ nguyên nhân') + '.',
         DONGVANFB_SERVICE_NAME
       );
@@ -225,7 +251,7 @@ export class DongVanFBProvider {
     const mails = rows.flatMap((entry) => this.toPurchasedMail(entry));
     if (mails.length === 0) {
       throw new ProviderError(
-        'CONFIG_ERROR',
+        'OUT_OF_STOCK',
         'DongVanFB mua email không trả về tài khoản nào.',
         DONGVANFB_SERVICE_NAME
       );

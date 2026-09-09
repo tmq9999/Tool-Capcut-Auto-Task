@@ -68,6 +68,11 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
     .map((line) => line.trim())
     .filter((line) => line.length > 0).length;
 
+  const directProxyCount = config.proxyList
+    .split(LINE_BREAK)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0).length;
+
   return (
     <div className="flex flex-col gap-1.5 shrink-0">
       {onToggleCollapse && (
@@ -239,9 +244,12 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                   </div>
                 ) : (
                   <div className="flex flex-col gap-1">
-                    <label className="font-label-xs text-[11px] text-on-surface-variant font-medium">Cấu trúc</label>
-                    <div className="h-8 flex items-center px-2 rounded bg-surface-container-low border border-panel-border text-[11px] text-on-surface-variant font-mono">
-                      ip:port:user:pass
+                    <label className="font-label-xs text-[11px] text-on-surface-variant font-medium">Cấu trúc chuẩn</label>
+                    <div
+                      className="h-8 flex items-center px-2 rounded bg-surface-container-low border border-panel-border text-[11px] text-primary font-mono truncate"
+                      title="http://ip:port hoặc socks5://ip:port (tùy chọn user:pass)"
+                    >
+                      scheme://ip:port[:user:pass]
                     </div>
                   </div>
                 )}
@@ -269,13 +277,21 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
               ) : (
                 <div className="flex flex-col gap-1 flex-1">
                   <Textarea
-                    placeholder="Mỗi dòng một proxy (IP:PORT hoặc IP:PORT:USER:PASS)..."
+                    placeholder={"Mỗi dòng một proxy (HTTP hoặc SOCKS5). Ví dụ:\nhttp://1.2.3.4:8080\nsocks5://1.2.3.4:1080\nhttp://1.2.3.4:8080:user:pass\nsocks5://user:pass@1.2.3.4:1080"}
                     value={config.proxyList}
                     disabled={disabled}
                     onChange={(e) => onChange({ proxyList: e.target.value })}
                     className="h-28 min-h-[110px] py-1.5 text-xs font-mono resize-y"
                     rows={5}
                   />
+                  <span className="flex items-center gap-1.5 text-[11px] text-on-surface-variant leading-snug">
+                    <ShieldCheck className="w-3.5 h-3.5 text-primary shrink-0" />
+                    <span>
+                      {directProxyCount > 0
+                        ? `Đã nạp ${directProxyCount} proxy tĩnh (HTTP/SOCKS5), tối đa ${directProxyCount} luồng song song.`
+                        : 'Hỗ trợ: http://ip:port hoặc socks5://ip:port (tùy chọn user:pass).'}
+                    </span>
+                  </span>
                 </div>
               )}
             </div>
@@ -332,6 +348,21 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                           {EMAIL_PROVIDER_LABEL[entry.provider]}
                         </option>
                       ))}
+                    </Select>
+                  </div>
+
+                  <div className="flex flex-col gap-1">
+                    <label className="font-label-xs text-[11px] text-on-surface-variant font-medium">Chờ nạp lại khi hết email</label>
+                    <Select
+                      controlSize="sm"
+                      value={config.emailRetryIntervalSeconds}
+                      disabled={disabled}
+                      onChange={(e) => onChange({ emailRetryIntervalSeconds: Number(e.target.value) })}
+                    >
+                      <option value={10}>10 giây</option>
+                      <option value={15}>15 giây (Khuyên dùng)</option>
+                      <option value={30}>30 giây</option>
+                      <option value={60}>60 giây</option>
                     </Select>
                   </div>
 

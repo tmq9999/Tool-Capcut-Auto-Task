@@ -375,21 +375,21 @@ describe('lưu và nạp lại cấu hình', () => {
     customPassword: 'Str0ng!Secret'
   });
 
-  it('không bao giờ ghi secret vào phần cấu hình được lưu', () => {
+  it('không bao giờ ghi email hoặc mật khẩu đã dán vào phần cấu hình được lưu, nhưng lưu proxy', () => {
     const persisted = toPersistedConfig(edited);
     const asJson = JSON.stringify(persisted);
 
     expect(asJson).not.toContain('secret-pass');
-    expect(asJson).not.toContain('1.1.1.1');
+    expect(asJson).toContain('1.1.1.1:8080:user:secret');
     expect(asJson).not.toContain('Str0ng!Secret');
-    expect(asJson).not.toContain('K-SECRET-PROXY-KEY');
+    expect(asJson).toContain('K-SECRET-PROXY-KEY');
     expect(Object.keys(persisted)).not.toContain('emailList');
-    expect(Object.keys(persisted)).not.toContain('proxyList');
-    expect(Object.keys(persisted)).not.toContain('proxyKeyList');
+    expect(Object.keys(persisted)).toContain('proxyList');
+    expect(Object.keys(persisted)).toContain('proxyKeyList');
     expect(Object.keys(persisted)).not.toContain('customPassword');
   });
 
-  it('giữ lại toàn bộ nút điều chỉnh không phải secret', () => {
+  it('giữ lại toàn bộ nút điều chỉnh và danh sách proxy', () => {
     expect(toPersistedConfig(edited)).toEqual({
       threadCount: 25,
       maxBillablePurchases: 0,
@@ -404,8 +404,11 @@ describe('lưu và nạp lại cấu hình', () => {
       skipWithoutTrial: false,
       proxyMode: 'proxykey',
       proxyRegion: 'random',
+      proxyList: '1.1.1.1:8080:user:secret',
+      proxyKeyList: 'K-SECRET-PROXY-KEY',
       emailSourceMode: 'api',
       emailApiProvider: 'dongvanfb',
+      emailRetryIntervalSeconds: 15,
       otpService: 'capcut',
       passwordMode: 'custom',
       passwordLength: 20,
@@ -428,7 +431,7 @@ describe('lưu và nạp lại cấu hình', () => {
     expect(resaved.otpService).toBe('capcut');
   });
 
-  it('nạp lại đúng những gì đã lưu và để trống các ô secret', () => {
+  it('nạp lại đúng những gì đã lưu bao gồm proxy và để trống email/mật khẩu', () => {
     const restored = fromPersistedConfig(toPersistedConfig(edited));
 
     expect(restored.threadCount).toBe(25);
@@ -436,8 +439,8 @@ describe('lưu và nạp lại cấu hình', () => {
     expect(restored.emailApiProvider).toBe('dongvanfb');
     expect(restored.passwordMode).toBe('custom');
     expect(restored.emailList).toBe('');
-    expect(restored.proxyList).toBe('');
-    expect(restored.proxyKeyList).toBe('');
+    expect(restored.proxyList).toBe('1.1.1.1:8080:user:secret');
+    expect(restored.proxyKeyList).toBe('K-SECRET-PROXY-KEY');
     expect(restored.customPassword).toBe('');
   });
 

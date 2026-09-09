@@ -94,8 +94,11 @@ export const AutomationConfigSettingsSchema = z.object({
    * tay (`http://ip:port`) không có vùng nên khoá này không ảnh hưởng.
    */
   proxyRegion: ProxyRegionChoiceEnum.default('random'),
+  proxyList: z.string().default(''),
+  proxyKeyList: z.string().default(''),
   emailSourceMode: z.enum(['manual', 'api', 'custom']).default('manual'),
   emailApiProvider: z.enum(['gmail94', 'dongvanfb']).default('gmail94'),
+  emailRetryIntervalSeconds: z.number().int().min(5).max(300).default(15),
   /**
    * Slug dịch vụ gmail94. KHÔNG còn là nút điều chỉnh: Dashboard luôn ghi
    * `CAPCUT_OTP_SERVICE` (xem `automationConfig.toPersistedConfig`). Khoá vẫn ở
@@ -122,8 +125,11 @@ export const AutomationConfigSettingsSchema = z.object({
   skipWithoutTrial: false,
   proxyMode: 'direct',
   proxyRegion: 'random',
+  proxyList: '',
+  proxyKeyList: '',
   emailSourceMode: 'manual',
   emailApiProvider: 'gmail94',
+  emailRetryIntervalSeconds: 15,
   otpService: CAPCUT_OTP_SERVICE,
   passwordMode: 'random',
   passwordLength: 12,

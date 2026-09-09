@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type { BrowserContext as CapcutContext, Page as CapcutPage } from 'playwright-core';
 import { ProviderError } from '../providers/ProviderError';
 import { AutomationTerminalError } from './AutomationTerminalError';
+import { DirectProxyPool } from './DirectProxyPool';
 import { generateCapcutPassword } from './passwordGenerator';
 import { measureStage } from './stageTiming';
 import type { BrowserLauncher, LauncherProxy } from './capcut/launcher';
@@ -387,17 +388,45 @@ export function parseDirectProxy(entry: string): BrowserProxySettings | null {
     const scheme = schemeMatch[1].toLowerCase();
     if (!(PROXY_SCHEMES as readonly string[]).includes(scheme)) return null;
     type = scheme;
-    rest = schemeMatch[2];
+    rest = schemeMatch[2].trim();
   }
 
-  const parts = rest.split(':').map((part) => part.trim());
-  const host = parts[0];
-  const port = Number(parts[1]);
+  let host = '';
+  let port = 0;
+  let username: string | undefined;
+  let password: string | undefined;
+
+  if (rest.includes('@')) {
+    // Format: [user:pass@]host:port
+    const atIndex = rest.lastIndexOf('@');
+    const authPart = rest.slice(0, atIndex).trim();
+    const hostPortPart = rest.slice(atIndex + 1).trim();
+
+    const authColon = authPart.indexOf(':');
+    if (authColon >= 0) {
+      username = authPart.slice(0, authColon).trim();
+      password = authPart.slice(authColon + 1).trim();
+    } else {
+      username = authPart;
+    }
+
+    const hostPortParts = hostPortPart.split(':').map((p) => p.trim());
+    host = hostPortParts[0] ?? '';
+    port = Number(hostPortParts[1]);
+  } else {
+    // Format: host:port[:user:pass]
+    const parts = rest.split(':').map((part) => part.trim());
+    host = parts[0] ?? '';
+    port = Number(parts[1]);
+    if (parts[2] !== undefined && parts[2] !== '') username = parts[2];
+    if (parts[3] !== undefined && parts[3] !== '') password = parts[3];
+  }
+
   if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null;
 
   const settings: BrowserProxySettings = { host, port, type };
-  if (parts[2]) settings.username = parts[2];
-  if (parts[3]) settings.password = parts[3];
+  if (username) settings.username = username;
+  if (password) settings.password = password;
   return settings;
 }
 
@@ -492,6 +521,7 @@ export class AutomationRunService {
   private sourceForEvidence: AutomationWorkSource | null = null;
   private activeProfileCount = 0;
   private activeProxyCount = 0;
+  private activeDirectProxyPool: DirectProxyPool | null = null;
   private activeMailReservationCount = 0;
   private startedProfiles: string[] = [];
   private readonly activeThreads = new Map<string, ThreadRuntime>();
@@ -880,8 +910,8 @@ export class AutomationRunService {
       throw new ProviderError(
         'CONFIG_ERROR',
         'Không đọc được ' + badLines.length + ' dòng proxy (' + badLines.join(', ') + '). ' +
-          'Định dạng: ip:port[:user:pass] hoặc socks5://ip:port[:user:pass] ' +
-          '(scheme: http, https, socks4, socks5). Không chạy tiếp để tránh luồng đi bằng IP thật.'
+          'Định dạng đầy đủ: http://ip:port[:user:pass] hoặc socks5://ip:port[:user:pass] ' +
+          '(hỗ trợ cả user:pass@ip:port, scheme: http, https, socks4, socks5). Không chạy tiếp để tránh luồng đi bằng IP thật.'
       );
     }
 
@@ -1166,7 +1196,9 @@ export class AutomationRunService {
     committed: boolean,
     thread: ThreadRuntime | undefined,
     lease: AcquiredProxyLease | undefined,
-    acquisitionIdentity?: Readonly<ObservationIdentity>
+    acquisitionIdentity?: Readonly<ObservationIdentity>,
+    directProxy?: BrowserProxySettings,
+    directProxyPool?: DirectProxyPool
   ): Promise<void> {
     const cleanupSessionAlias = thread?.session?.alias ?? 'unassigned';
     if (item && item.kind !== 'existing' && !committed) {
@@ -1220,9 +1252,16 @@ export class AutomationRunService {
       } catch {
         this.noteCleanupFailure(thread, 'proxy-lease');
       }
-    } else if (thread?.directProxy) {
-      this.activeProxyCount = Math.max(0, this.activeProxyCount - 1);
-      this.recordResourceSnapshot();
+    } else {
+      const proxyToRelease = directProxy ?? thread?.directProxy;
+      if (proxyToRelease && directProxyPool) {
+        directProxyPool.release(proxyToRelease);
+        this.activeProxyCount = Math.max(0, this.activeProxyCount - 1);
+        this.recordResourceSnapshot();
+      } else if (thread?.directProxy) {
+        this.activeProxyCount = Math.max(0, this.activeProxyCount - 1);
+        this.recordResourceSnapshot();
+      }
     }
   }
 
@@ -1430,6 +1469,7 @@ export class AutomationRunService {
         browserProfileId: session.profileId,
         proxy: proxy ? proxy.host + ':' + proxy.port : null
       });
+      this.publish(this.progress.state, this.progress.message);
       this.log(
         'SUCCESS',
         thread.email,
@@ -1771,6 +1811,7 @@ export class AutomationRunService {
     }
 
     this.deps.accounts.update(thread.accountId, { automationStep: 'Đang làm nhiệm vụ' });
+    this.publish(this.progress.state, this.progress.message);
     try {
       if (config.missionTransport === 'http-only') {
         const httpRunner = this.deps.httpOnlyRunner;
@@ -1913,7 +1954,7 @@ export class AutomationRunService {
     workerId: string,
     source: AutomationWorkSource,
     config: AutomationRunConfigDTO,
-    slotProxy: BrowserProxySettings | undefined,
+    directProxyPool: DirectProxyPool | undefined,
     acquisitionSignal: AbortSignal,
     initialWave: InitialWaveBarrier | null
   ): Promise<void> {
@@ -1956,6 +1997,7 @@ export class AutomationRunService {
       });
 
       let lease: AcquiredProxyLease | undefined;
+      let directProxy: BrowserProxySettings | undefined;
       let thread: ThreadRuntime | undefined;
       let committed = false;
       try {
@@ -1983,6 +2025,23 @@ export class AutomationRunService {
           this.activeProxyCount += 1;
           this.recordResourceSnapshot();
           this.log('SUCCESS', item?.email ?? workerId, 'Proxy', 'Đã nhận proxy ' + lease.ip + ':' + lease.port);
+        } else if (directProxyPool) {
+          this.log('INFO', item?.email ?? workerId, 'Proxy', 'Đang cấp phát proxy tĩnh...');
+          directProxy = await measureStage(
+            'proxy-acquisition',
+            () => directProxyPool.acquire(acquisitionSignal),
+            (message) =>
+              this.log(
+                'INFO',
+                item?.email ?? workerId,
+                'Timing',
+                message,
+                thread?.accountId
+              )
+          );
+          this.activeProxyCount += 1;
+          this.recordResourceSnapshot();
+          this.log('SUCCESS', item?.email ?? workerId, 'Proxy', `Đã cấp proxy ${directProxy.type}://${directProxy.host}:${directProxy.port}`);
         }
         if (source.kind === 'continuous') {
           item = await measureStage(
@@ -1993,7 +2052,7 @@ export class AutomationRunService {
         }
         if (!item) {
           if (firstIteration) this.releaseRunningWaiters();
-          await this.cleanupIteration(source, item, committed, thread, lease, acquisitionIdentity);
+          await this.cleanupIteration(source, item, committed, thread, lease, acquisitionIdentity, directProxy, directProxyPool);
           this.publish(this.progress.state, this.progress.message, {
             workersActive: Math.max(0, this.progress.workersActive - 1)
           });
@@ -2017,13 +2076,13 @@ export class AutomationRunService {
             thread = this.createThreadRecord(
               item!,
               config,
-              slotProxy,
+              directProxy,
               lease,
               this.progress.runId,
               workerId
             );
             try {
-              if (thread.directProxy) {
+              if (thread.directProxy && !directProxyPool) {
                 this.activeProxyCount += 1;
                 this.recordResourceSnapshot();
               }
@@ -2097,7 +2156,7 @@ export class AutomationRunService {
               await measureStage(
                 'cleanup',
                 async () => {
-                  await this.cleanupIteration(source, item, committed, thread, lease, acquisitionIdentity);
+                  await this.cleanupIteration(source, item, committed, thread, lease, acquisitionIdentity, directProxy, directProxyPool);
                   if (this.cleanupFailures > cleanupFailuresBefore) {
                     throw new Error('sanitized cleanup failure');
                   }
@@ -2127,7 +2186,7 @@ export class AutomationRunService {
           this.acceptTerminalError(error);
         }
         if (!thread) {
-          await this.cleanupIteration(source, item, committed, thread, lease, acquisitionIdentity);
+          await this.cleanupIteration(source, item, committed, thread, lease, acquisitionIdentity, directProxy, directProxyPool);
           this.publish(this.progress.state, this.progress.message, {
             workersActive: Math.max(0, this.progress.workersActive - 1)
           });
@@ -2150,7 +2209,7 @@ export class AutomationRunService {
     source: AutomationWorkSource,
     readiness: SourceReadiness,
     config: AutomationRunConfigDTO,
-    directProxies: BrowserProxySettings[]
+    directProxyPool?: DirectProxyPool
   ): Promise<AutomationRunSummary> {
     try {
       const workerTarget = readiness.workerTarget;
@@ -2158,12 +2217,11 @@ export class AutomationRunService {
       const acquisitionSignal = this.acquisitionAbort!.signal;
 
       const workers = Array.from({ length: workerTarget }, (_, i) => {
-        const slotProxy = config.proxy.mode === 'direct' ? directProxies[i] : undefined;
         return this.workerLoop(
           'worker-' + (i + 1),
           source,
           config,
-          slotProxy,
+          directProxyPool,
           acquisitionSignal,
           initialWave
         );
@@ -2177,6 +2235,11 @@ export class AutomationRunService {
           this.acceptTerminalError(result.reason);
         }
       }
+
+      if (directProxyPool) {
+        directProxyPool.drain();
+      }
+
 
       try {
         await this.observe({
@@ -2494,10 +2557,14 @@ export class AutomationRunService {
     }
 
     let directProxies: BrowserProxySettings[] = [];
+    let directProxyPool: DirectProxyPool | undefined;
     try {
-      directProxies = config.proxy.mode === 'direct'
-        ? this.parseDirectProxyList(config.proxy.entries, workerTarget)
-        : [];
+      if (config.proxy.mode === 'direct') {
+        directProxies = this.parseDirectProxyList(config.proxy.entries, workerTarget);
+        if (directProxies.length > 0) {
+          directProxyPool = new DirectProxyPool(directProxies);
+        }
+      }
       if (config.missionTransport !== 'http-only') {
         this.assertLauncherSupportsConfig(config, directProxies);
       }
@@ -2544,14 +2611,23 @@ export class AutomationRunService {
       workerTarget, maxBillablePurchases: config.maxBillablePurchases ?? 0
     });
     this.recordResourceSnapshot();
-    const source = this.deps.workSources.create(config, runId, (event) => {
-      this.recordEvidence({
-        schemaVersion: 1, runId, at: new Date().toISOString(), type: 'purchase',
-        provider: event.provider, outcome: event.outcome,
-        attempted: event.stats.attempted, confirmed: event.stats.confirmed,
-        ambiguous: event.stats.ambiguous, budget: event.stats.budget
-      });
-    }, this.deps.mutationContext);
+    const source = this.deps.workSources.create(
+      config,
+      runId,
+      (event) => {
+        this.recordEvidence({
+          schemaVersion: 1, runId, at: new Date().toISOString(), type: 'purchase',
+          provider: event.provider, outcome: event.outcome,
+          attempted: event.stats.attempted, confirmed: event.stats.confirmed,
+          ambiguous: event.stats.ambiguous, budget: event.stats.budget
+        });
+      },
+      this.deps.mutationContext,
+      (message) => {
+        this.log('INFO', 'system', 'Email', message);
+        this.publish(this.progress.state, message);
+      }
+    );
     this.sourceForEvidence = source;
     let readiness: SourceReadiness;
     try {
@@ -2588,7 +2664,8 @@ export class AutomationRunService {
       workerTarget: readiness.workerTarget
     });
 
-    this.activeRun = this.runPrepared(source, readiness, config, directProxies)
+    this.activeDirectProxyPool = directProxyPool ?? null;
+    this.activeRun = this.runPrepared(source, readiness, config, directProxyPool)
       .then((summary) => {
         this.lastSummary = summary;
         this.activeRun = null;
@@ -2599,6 +2676,9 @@ export class AutomationRunService {
         this.lastSummary = { ...this.progress, startedProfiles: [...this.startedProfiles] };
         this.activeRun = null;
         return this.lastSummary;
+      })
+      .finally(() => {
+        this.activeDirectProxyPool = null;
       });
 
     return { runId };
@@ -2636,6 +2716,7 @@ export class AutomationRunService {
     this.runAbort?.abort(new Error(code));
     this.acquisitionAbort?.abort(new Error(code));
     this.healthAbort?.abort(new Error(code));
+    this.activeDirectProxyPool?.drain(new Error(code));
     this.shutdownAllUiSchedulers({ code: 'RUN_ABORTED', message: code });
     for (const controller of this.iterationAbort.values()) {
       controller.abort(new Error(code));
