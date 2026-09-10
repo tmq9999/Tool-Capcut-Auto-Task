@@ -57,13 +57,15 @@ export async function runPackagedSmoke(options = {}) {
   const isTempOwned = !options.userDataDir;
   const tempUserDataDir = options.userDataDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'automanager-smoke-'));
 
-  validateSmokeTarget(exePath, tempUserDataDir);
-
-  console.log('[PKG] mở:', exePath);
-  console.log('[PKG] userData:', tempUserDataDir);
-
   let app = null;
+  let primaryError = null;
+
   try {
+    validateSmokeTarget(exePath, tempUserDataDir);
+
+    console.log('[PKG] mở:', exePath);
+    console.log('[PKG] userData:', tempUserDataDir);
+
     app = await _electron.launch({
       executablePath: exePath,
       args: [`--user-data-dir=${tempUserDataDir}`],
@@ -130,9 +132,9 @@ export async function runPackagedSmoke(options = {}) {
       }));
       check(`tab ${tab} không lỗi trong bản đóng gói`, s.loi.length === 0, s.loi);
     }
-
-    console.log(`\n${fail === 0 ? '✅ BẢN ĐÓNG GÓI CHẠY ĐÚNG' : `❌ BẢN ĐÓNG GÓI CÒN ${fail} LỖI`}`);
-    return { success: fail === 0, failCount: fail };
+  } catch (err) {
+    primaryError = err;
+    fail += 1;
   } finally {
     let closeErr = null;
     if (app) {
@@ -142,20 +144,42 @@ export async function runPackagedSmoke(options = {}) {
         closeErr = err;
       }
     }
+    let cleanupErr = null;
     if (isTempOwned && fs.existsSync(tempUserDataDir)) {
       if (!closeErr) {
         try {
           fs.rmSync(tempUserDataDir, { recursive: true, force: true });
         } catch (err) {
+          cleanupErr = err;
           console.error('Failed to clean up temp user data dir:', err);
           fail += 1;
         }
       }
     }
+
     if (closeErr) {
+      if (primaryError) {
+        throw new AggregateError(
+          [primaryError, closeErr],
+          `Primary failure (${primaryError.message}) and close failure (${closeErr.message}) occurred`
+        );
+      }
       throw closeErr;
     }
+
+    if (primaryError) {
+      if (cleanupErr) {
+        throw new AggregateError(
+          [primaryError, cleanupErr],
+          `Primary failure (${primaryError.message}) and cleanup failure (${cleanupErr.message}) occurred`
+        );
+      }
+      throw primaryError;
+    }
   }
+
+  console.log(`\n${fail === 0 ? '✅ BẢN ĐÓNG GÓI CHẠY ĐÚNG' : `❌ BẢN ĐÓNG GÓI CÒN ${fail} LỖI`}`);
+  return { success: fail === 0, failCount: fail };
 }
 
 // Khi chạy trực tiếp qua node

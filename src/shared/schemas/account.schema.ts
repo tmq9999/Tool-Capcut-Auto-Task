@@ -93,7 +93,8 @@ export const AccountListItemSchema = z.object({
   browserProfileId: z.string().nullable(),
   notes: z.string().nullable(),
   createdAt: z.string(),
-  updatedAt: z.string()
+  updatedAt: z.string(),
+  passwordCapcut: z.string().nullable().optional()
 }).strict();
 
 export type AccountListItemDTO = z.infer<typeof AccountListItemSchema>;

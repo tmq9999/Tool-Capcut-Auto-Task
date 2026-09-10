@@ -86,6 +86,10 @@ export class LogsController {
   private loadToken = 0;
   private clearedThrough: number | null = null;
   private pendingPushes: CanonicalRuntimeLog[] = [];
+  private clearPromise: Promise<boolean> | null = null;
+  private clearPushes: CanonicalRuntimeLog[] = [];
+  private clearSurvivors: CanonicalRuntimeLog[] = [];
+  private disposed = false;
 
   constructor(
     private readonly bridge: ILogsBridge,
@@ -106,6 +110,7 @@ export class LogsController {
   }
 
   private setState(patch: Partial<LogsState>): void {
+    if (this.disposed) return;
     this.state = { ...this.state, ...patch };
     for (const listener of this.listeners) {
       listener(this.state);
@@ -124,6 +129,7 @@ export class LogsController {
   }
 
   async load(filter?: LogsQuery): Promise<void> {
+    if (this.disposed) return;
     /**
      * Gọi kèm bộ lọc thì THAY luôn bộ nhớ cũ, không merge: người dùng chọn lại
      * "Tất cả" phải xoá được `level` đã nhớ, merge thì họ kẹt ở ERROR vĩnh viễn.
@@ -133,6 +139,13 @@ export class LogsController {
         level: normalizeFilterValue(filter.level),
         email: normalizeFilterValue(filter.email)
       };
+    }
+
+    if (this.clearPromise !== null) {
+      const waitToken = ++this.loadToken;
+      this.setState({ isLoading: true, error: null });
+      await this.clearPromise;
+      if (this.disposed || waitToken !== this.loadToken) return;
     }
 
     const token = ++this.loadToken;
@@ -157,7 +170,7 @@ export class LogsController {
     if (this.lastQuery.email !== undefined) request.email = this.lastQuery.email;
 
     const response = await this.bridge.logs.list(request);
-    if (token !== this.loadToken) return;
+    if (this.disposed || token !== this.loadToken) return;
 
     if (!response.success) {
       this.setState({ isLoading: false, error: 'Không tải được nhật ký runtime.' });
@@ -184,6 +197,16 @@ export class LogsController {
       }
     }
 
+    for (const item of this.clearSurvivors) {
+      if (this.clearedThrough !== null && item.streamSequence !== undefined && item.streamSequence <= this.clearedThrough) {
+        continue;
+      }
+      if (!seenIds.has(item.id)) {
+        seenIds.add(item.id);
+        merged.push(item);
+      }
+    }
+
     for (const item of historyItems) {
       if (!seenIds.has(item.id)) {
         seenIds.add(item.id);
@@ -192,6 +215,7 @@ export class LogsController {
     }
 
     this.pendingPushes = [];
+    this.clearSurvivors = [];
     this.setState({
       isLoading: false,
       error: null,
@@ -200,10 +224,17 @@ export class LogsController {
   }
 
   attach(): void {
-    if (this.detach) return;
+    if (this.detach || this.disposed) return;
     this.detach = this.bridge.logs.onEntry((entry) => {
-      if (this.state.isPaused) return;
+      if (this.disposed || this.state.isPaused) return;
       if (this.clearedThrough !== null && entry.streamSequence !== undefined && entry.streamSequence <= this.clearedThrough) {
+        return;
+      }
+      if (this.clearPromise !== null) {
+        this.clearPushes.unshift(entry);
+        if (this.clearPushes.length > this.maxLogs) {
+          this.clearPushes.length = this.maxLogs;
+        }
         return;
       }
       if (!this.matchesFilter(entry)) return;
@@ -223,34 +254,119 @@ export class LogsController {
   }
 
   async clear(): Promise<boolean> {
-    const token = ++this.loadToken;
-    const previousLogs = this.state.logs;
+    if (this.disposed) return false;
+    if (this.clearPromise !== null) {
+      return this.clearPromise;
+    }
+
+    ++this.loadToken;
+    const previousLogs = [...this.state.logs];
     this.pendingPushes = [];
+    this.clearPushes = [];
+    this.clearSurvivors = [];
     this.setState({ logs: [], isLoading: false, error: null });
 
-    const response = await this.bridge.logs.clear();
-    if (token !== this.loadToken) return false;
+    this.clearPromise = (async () => {
+      try {
+        const response = await this.bridge.logs.clear();
+        if (this.disposed) return false;
 
-    if (!response.success) {
-      this.setState({ logs: previousLogs, error: response.error.message });
-      return false;
-    }
+        if (!response.success) {
+          const seenIds = new Set<string>();
+          const combined: RuntimeLog[] = [];
 
-    if (response.data?.clearedThrough !== undefined) {
-      this.clearedThrough = response.data.clearedThrough;
-      const filtered = this.state.logs.filter((l) =>
-        l.streamSequence === undefined || l.streamSequence > this.clearedThrough!
-      );
-      this.setState({ logs: filtered });
-    }
-    return true;
+          for (const item of this.clearPushes) {
+            if (this.matchesFilter(item) && !seenIds.has(item.id)) {
+              seenIds.add(item.id);
+              combined.push(toViewLog(item));
+            }
+          }
+          for (const prev of previousLogs) {
+            if (!seenIds.has(prev.id)) {
+              seenIds.add(prev.id);
+              combined.push(prev);
+            }
+          }
+
+          this.setState({
+            logs: combined.slice(0, this.maxLogs),
+            error: response.error?.message ?? 'Clear failed',
+            isLoading: false
+          });
+          return false;
+        }
+
+        if (response.data?.clearedThrough !== undefined) {
+          this.clearedThrough = this.clearedThrough !== null
+            ? Math.max(this.clearedThrough, response.data.clearedThrough)
+            : response.data.clearedThrough;
+        }
+
+        const survivors: CanonicalRuntimeLog[] = [];
+        for (const item of this.clearPushes) {
+          if (
+            this.clearedThrough !== null &&
+            item.streamSequence !== undefined &&
+            item.streamSequence <= this.clearedThrough
+          ) {
+            continue;
+          }
+          if (this.matchesFilter(item)) {
+            survivors.push(item);
+          }
+        }
+
+        this.clearSurvivors = [...survivors];
+        this.setState({
+          logs: survivors.map(toViewLog).slice(0, this.maxLogs),
+          error: null,
+          isLoading: false
+        });
+        return true;
+      } catch (err: unknown) {
+        if (this.disposed) return false;
+        const seenIds = new Set<string>();
+        const combined: RuntimeLog[] = [];
+
+        for (const item of this.clearPushes) {
+          if (this.matchesFilter(item) && !seenIds.has(item.id)) {
+            seenIds.add(item.id);
+            combined.push(toViewLog(item));
+          }
+        }
+        for (const prev of previousLogs) {
+          if (!seenIds.has(prev.id)) {
+            seenIds.add(prev.id);
+            combined.push(prev);
+          }
+        }
+
+        const message = err instanceof Error ? err.message : 'Clear failed';
+        this.setState({
+          logs: combined.slice(0, this.maxLogs),
+          error: message,
+          isLoading: false
+        });
+        return false;
+      } finally {
+        this.clearPromise = null;
+        this.clearPushes = [];
+      }
+    })();
+
+    return this.clearPromise;
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.detach) {
       this.detach();
       this.detach = null;
     }
     this.listeners.clear();
+    this.clearPromise = null;
+    this.clearPushes = [];
+    this.clearSurvivors = [];
+    this.pendingPushes = [];
   }
 }

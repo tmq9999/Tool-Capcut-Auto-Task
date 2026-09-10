@@ -21,6 +21,13 @@ export class ProviderError extends Error {
   }
 }
 
+export class ConfirmedOutOfStockError extends ProviderError {
+  constructor(serviceName: string) {
+    super('OUT_OF_STOCK', 'Provider xác nhận hết hàng, chưa cấp mailbox.', serviceName);
+    this.name = 'ConfirmedOutOfStockError';
+  }
+}
+
 export function statusToProviderCode(status: number): ProviderErrorCode {
   if (status === 401 || status === 403) return 'AUTH_ERROR';
   if (status === 429) return 'RATE_LIMITED';

@@ -2,583 +2,509 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
 
-**Goal:** Đóng B01–B16 từ review mới nhất, giữ do_action và dữ liệu Dashboard đọc/copy được.
+**Goal:** Đóng R01–R09 của review mới nhất, giữ nguyên flow do_action và hiển thị rõ dữ liệu Dashboard.
 
-**Architecture:** Vá trực tiếp các service/controller/repository đang có; dùng error carrying evidence chỉ cho lỗi mất proof và owner token chỉ cho cleanup. Không redesign credential storage hoặc flow nghiệp vụ.
+**Architecture:** Hoàn thiện các error/ownership boundaries đang có. Tận dụng TaskEvidenceError, pending-proof repository và log cutoff đã được triển khai; không tạo framework hay migration mới. Các bản sửa cũ đã đạt được giữ nguyên.
 
-**Tech Stack:** TypeScript, Vitest, React, Electron, Playwright-core, better-sqlite3 đang cài; không thêm dependency mặc định.
+**Tech Stack:** TypeScript, Vitest, React/Electron, Playwright-core và better-sqlite3 trong package.json.
 
 **Spec:** [2026-09-10-tool-bugfix-spec.md](../specs/2026-09-10-tool-bugfix-spec.md)
 
 ## Global Constraints
 
-- Giữ do_action → task_list → claim → đối soát, danh sách action, endpoint, op_id, thứ tự, transport và pacing hiện tại.
-- API key/password/proxy trên Dashboard phải đọc/copy được; không mask, auto-hide hoặc đổi storage trong đợt bugfix.
-- Không thêm product_mission, media-artifact gate, blanket refusal hay flow thay thế.
-- Sửa đúng nguyên nhân bằng patch nhỏ và test hồi quy; happy path hiện tại vẫn hoạt động.
-- Giữ thay đổi của người dùng; SQL ở repository, renderer không tự mở Node/SQLite.
-- Tests dùng dữ liệu giả. Không chạy live, mua mailbox, activate trial, commit/push/deploy khi chưa có quyền riêng.
+- Giữ browser do_action → task_list → claim → đối soát; giữ endpoints, op_id, thứ tự, pacing và retry nghiệp vụ hiện tại.
+- Dashboard phải hiển thị/copy được API key, password và proxy; không mask/reveal, auto-hide, xóa cấu hình hoặc redesign storage.
+- Không thêm product_mission, media-artifact gate hay blanket refusal.
+- Chỉ sửa lỗi có bằng chứng, theo test RED/GREEN; không refactor hoặc mở rộng chức năng không liên quan.
+- Giữ changes người dùng và schema đã triển khai; không sửa checksum migrations cũ.
+- Tests dùng fixture. Live/purchase/activate trial/commit/push/deploy chỉ khi có quyền riêng.
 
-## Cách chạy
+## Sử dụng kế hoạch
 
-Thay đổi thực hiện khi được giao triển khai. Code trong plan là phương án đặt vào file được nêu, chưa phải code đã chạy. Đọc fixture hiện tại trước ghép snippets; lỗi ABI/missing-tool không tính là RED chức năng. Không dùng kết quả 1.972 test của lượt review làm kết quả sau sửa.
+Baseline lúc viết ebf8b0a; kiểm lại HEAD và source khi bắt đầu. Tài liệu không phải code đã được chạy. Các code blocks đặt vào file được chỉ định và dùng fixture hiện hữu đã nêu.
 
-Thứ tự: T0 → T1 → T2/T3 → T4 → T5/T6 → T7 → T8/T9/T10 → T11 → gate cuối. Các task sửa cùng file chạy tuần tự. Mỗi task review/commit riêng; chỉ commit khi được phép, stage đúng hunks, không git add toàn workspace.
+Thứ tự: T1 → T2; T3 và T4 có thể độc lập sau khi owner thống nhất file; T5/T6/T7 độc lập. Không hai agent cùng sửa EmailPurchaseService hoặc cùng controller. Mỗi task có RED/GREEN/review; commit scoped chỉ sau quyền triển khai. Không tạo thêm file đính chính hay áp lại toàn bộ kế hoạch cũ.
 
-## T0 — D00: bảo toàn hiển thị rõ trên Dashboard
+## T1 — R01/R02/R03: chung một boundary cho paid mailbox
 
-**Files đọc/đụng chỉ khi đang cản yêu cầu:** src/renderer/pages/Dashboard/columns.tsx, DashboardPage.tsx, AutomationConfigGrid.tsx, dashboardController.ts; src/shared/schemas/account.schema.ts; src/main/services/AccountService.ts; src/preload/preload.ts.
+**Files:** src/main/services/EmailPurchaseService.ts; src/main/services/__tests__/EmailPurchaseService.test.ts.
 
-- [ ] Ghi baseline hành vi xem/copy API key/password/proxy bằng dữ liệu fixture. Đây là acceptance constraint, không phải “lỗ hổng cần khắc phục”.
-- [ ] Không thêm task encrypt/mask/reveal/clear-config. Không xóa API key/password khi Save refresh. Existing storage hoạt động thì giữ nguyên.
-- [ ] Nếu Dashboard đang chỉ có hasPassword thay vì value, bổ sung value đúng account qua service/main bridge hẹp và hiển thị text/copy; không truy SQLite trực tiếp từ renderer. Không thay mọi màn hình hay cấu trúc database.
-- [ ] Regression UI: nhập KEY-DEMO/PASS-DEMO/proxy-demo → save/load → cùng giá trị đọc/copy được. Không lấy credentials thật để chạy fixture.
-- [ ] Các task sau đều phải giữ D00; nếu proposed patch làm dấu sao/chuỗi rỗng xuất hiện thay value thì không nhận patch.
+**Interfaces:** giữ openAcquisitionSession/acquireOne/ReservedEmail/CAS; không thêm schema. Stats.confirmed vẫn được tăng sau response thành công dù persistence thất bại. Observer phải chạy sau persistence.
 
-## T1 — B01: malformed purchase chỉ dispatch một lần
-
-**Files:** src/main/providers/DongVanFBProvider.ts; tests src/main/providers/__tests__/DongVanFBProvider.test.ts và src/main/services/__tests__/EmailPurchaseService.test.ts.
-
-**Interfaces:** không đổi public API. Provider NETWORK_ERROR hiện được EmailPurchaseService chuyển thành PURCHASE_OUTCOME_UNKNOWN.
-
-- [ ] RED thêm vào EmailPurchaseService.test.ts, sử dụng fixtures credRepo/purchasedRepo/vault/gmail/customDomain/storeKey và imports HttpResponse/DongVanFBProvider đã có:
+- [ ] RED tests dưới đây đặt trong file EmailPurchaseService.test.ts có các fixtures db/credRepo/purchasedRepo/vault/gmail/dongvan/customDomain/idCounter/storeKey và import AccountMutationRepository, vi:
 
 ~~~ts
-it('B01 stops malformed success without order_code after one dispatch',async()=>{
-  storeKey('dongvanfb','DV-DEMO');
-  let calls=0;
-  const realProvider=new DongVanFBProvider({
-    async send():Promise<HttpResponse>{
-      calls++;
-      if(calls>1)throw new Error('fixture retry detected');
-      return {ok:true,status:200,rawText:'',
-        body:{status:true,data:{list_data:[]}}};
-    }
-  });
-  const service=new EmailPurchaseService(credRepo,purchasedRepo,vault,
-    {gmail94:gmail,dongvanfb:realProvider,customdomain:customDomain});
-  const signal=new AbortController().signal;
-  const session=await service.openAcquisitionSession('dongvanfb',1,
-    {maxBillablePurchases:1,emailRetryIntervalMs:0},signal);
-  await expect(session.acquireOne('w1',signal)).rejects.toMatchObject({
-    reason:{code:'PURCHASE_OUTCOME_UNKNOWN'}});
-  expect(calls).toBe(1);
-  expect(session.purchaseStats()).toEqual({budget:1,attempted:1,confirmed:0,ambiguous:1});
-});
-~~~
-
-- [ ] Run: node node_modules/vitest/vitest.mjs run src/main/services/__tests__/EmailPurchaseService.test.ts -t B01. RED calls=2 (fixture chặn retry, không treo test).
-- [ ] GREEN thay riêng mails.length===0 branch sau successful unwrap:
-
-~~~ts
-if (mails.length === 0) {
-  throw new ProviderError('NETWORK_ERROR',
-    'Kết quả mua không có mailbox hợp lệ; cần đối soát đơn mua.',
-    DONGVANFB_SERVICE_NAME);
-}
-~~~
-
-Không phụ thuộc order_code. Giữ explicit stock response/polling hiện có; không đổi endpoint, quantity hoặc delay. Không thêm lần mua dự phòng.
-
-- [ ] GREEN focused và provider tests; table có/không order_code, missing data, malformed list; explicit stock→success vẫn theo cấu hình.
-- [ ] Review budget/calls; proposed commit: fix: stop ambiguous mailbox purchases from retrying.
-
-## T2 — B02: account owned đến hết cleanup
-
-**Files:** src/main/services/AutomationRunService.ts; src/main/services/__tests__/AutomationRunService.test.ts; src/main/services/__tests__/AccountService.test.ts.
-
-**Interfaces:** giữ isAccountActive(accountId):boolean. Thêm private iterationOwners:Map<string,object>, không đổi chức năng Stop/Delete.
-
-- [ ] RED trong AutomationRunService.test.ts với fixtures emailSource/createService/baseConfig/proxySource:
-
-~~~ts
-it('B02 keeps account owned during delayed proxy cleanup',async()=>{
-  emailSource.available=1;
-  const service=createService();
-  await service.start(baseConfig({threadCount:1,testDurationMs:600000,mailLimit:1}));
-  await service.waitUntilRunning();
-  let enter!:()=>void,finish!:()=>void;
-  const entered=new Promise<void>(r=>{enter=r;});
-  const gate=new Promise<void>(r=>{finish=r;});
-  const release=proxySource.release.bind(proxySource);
-  proxySource.release=async lease=>{enter();await gate;await release(lease);};
-  const stopping=service.stopThread('acc-1');
-  try{
-    await entered;
-    expect(service.isAccountActive('acc-1')).toBe(true);
-  }finally{
-    finish();await stopping;await service.waitForCompletion();
+it.each(['observer','settlement'] as const)(
+  'R01/R03 keeps paid row and releases undelivered reservation on %s failure',
+  async point=>{
+    storeKey('dongvanfb','DV-DEMO');
+    const ledger=new AccountMutationRepository(db);
+    ledger.registerApproval({authorityRef:'auth-paid',budgetOwnerRef:'budget-paid',
+      provider:'dongvanfb',approvedUnits:2});
+    const failure=new Error('fixture-'+point);
+    const settle=vi.spyOn(ledger,'settleIntent');
+    if(point==='settlement')settle.mockImplementationOnce(()=>{throw failure;});
+    dongvan.rows=[[{email:'paid@example.test',password:'PASS-DEMO',
+      refreshToken:null,clientId:null,raw:'fixture'}]];
+    const service=new EmailPurchaseService(credRepo,purchasedRepo,vault,
+      {gmail94:gmail,dongvanfb:dongvan,customdomain:customDomain},{
+        nextId:()=> 'pe-'+ ++idCounter,
+        mutationContext:{repository:ledger,authorityRef:'auth-paid',budgetOwnerRef:'budget-paid'}
+      });
+    const signal=new AbortController().signal;
+    const session=await service.openAcquisitionSession('dongvanfb',1,{
+      maxBillablePurchases:2,
+      onPurchaseEvent:event=>{
+        if(point==='observer' && event.outcome==='confirmed')throw failure;
+      }
+    },signal);
+    try{
+      await expect(session.acquireOne('w1',signal,{
+        ownerRef:'owner-paid',runId:'run-paid',stepAttemptId:'attempt-paid'
+      })).rejects.toBe(failure);
+      expect(purchasedRepo.listRecent(10)).toHaveLength(1);
+      expect(purchasedRepo.countAvailable('dongvanfb')).toBe(1);
+      expect(dongvan.buyCalls).toBe(1);
+      expect(dongvan.oauthCalls).toEqual([]);
+      expect(session.purchaseStats()).toMatchObject({attempted:1,confirmed:1});
+      expect(ledger.getIntent('auth-paid','purchase:owner-paid:attempt-paid')?.state)
+        .toBe(point==='settlement'?'outcome-unknown':'effect-confirmed');
+    }finally{settle.mockRestore();}
   }
-  expect(service.isAccountActive('acc-1')).toBe(false);
-});
-~~~
-
-- [ ] Run focused B02; RED false trước finish.
-- [ ] GREEN đăng ký ownership trong createThreadRecord cạnh completionPromise:
-
-~~~ts
-const token={};
-this.iterationOwners.set(accountId,token);
-let notifyDone:()=>void=()=>{};
-const completionPromise=new Promise<void>(resolve=>{
-  notifyDone=()=>{
-    if(this.iterationOwners.get(accountId)===token)this.iterationOwners.delete(accountId);
-    resolve();
-  };
-});
-~~~
-
-isAccountActive OR iterationOwners/activeThreads/iterationAbort. Start không cho run mới khi iterationOwners chưa rỗng. Không clear token giữa cleanup/stop; notifyDone hiện ở sau cleanup. Failed profile stop vẫn owned qua activeThreads.
-
-- [ ] GREEN whole-run Stop, HTTP-only injected fake và failed-stop cases; existing AccountService.remove test phải reject trực tiếp với active callback. Sau cleanup settled lỗi proxy, account token có thể hết nhưng T3 vẫn giữ proxy owner để cleanup; không giữ account vĩnh viễn vô lý.
-- [ ] Review không auto-stop khi Delete; commit: fix: retain account ownership through iteration completion.
-
-## T3 — B03/B04: stale lease và thay manager
-
-**Files:** src/main/services/ProxyLeaseManager.ts; src/main/services/LazyProxyLeaseSource.ts; hai file __tests__ tương ứng.
-
-**Interfaces:** giữ release/configure/acquire/releaseAll. Thêm local ownedLeases:Set<string> và acquisitionsInFlight:number ở lazy wrapper.
-
-- [ ] RED trong ProxyLeaseManager.test.ts, helpers StubProxyApi/createManager/leaseRepo:
-
-~~~ts
-it('B03 ignores completed lease when the key has a successor',async()=>{
-  const api=new StubProxyApi(['K1']);
-  api.setIps('K1',['80.0.0.1','80.0.0.2','80.0.0.3']);
-  const manager=createManager(api,{keys:['K1'],acquireTimeoutMs:200});
-  const first=await manager.acquire();await manager.release(first);
-  const second=await manager.acquire();await manager.release(first);
-  expect(api.released).toEqual(['K1']);
-  expect(manager.activeLeaseCount()).toBe(1);
-  await expect(manager.acquire()).rejects.toMatchObject({code:'CONFIG_ERROR'});
-  await manager.release(second);
-});
-~~~
-
-- [ ] RED lazy wrapper bằng FakeManager:
-
-~~~ts
-it('B04 refuses changed config until leases are released',async()=>{
-  const built:FakeManager[]=[];
-  const source=new LazyProxyLeaseSource({readSimpleKey:()=> 'TOKEN'},options=>{
-    const manager=new FakeManager(options.apiToken,options.keys);built.push(manager);return manager;
-  });
-  source.configure({keys:['K1']});
-  const lease=await source.acquire();
-  expect(()=>source.configure({keys:['K2']})).toThrow();
-  expect(built).toHaveLength(1);
-  expect(()=>source.configure({keys:['K1']})).not.toThrow();
-  await source.release(lease);
-  source.configure({keys:['K2']});await source.acquire();
-  expect(built.map(x=>x.keys)).toEqual([['K1'],['K2']]);
-});
-~~~
-
-- [ ] Run both files, confirm RED extra /out/configure allowed.
-- [ ] GREEN after current single-flight lookup:
-
-~~~ts
-const owned=this.activeLeases.get(lease.leaseId);
-if(!owned)return;
-~~~
-
-Remote/local release dùng owned.keyValue/owned.leaseId, không dùng unchecked caller metadata. Local DB failure giữ active; stale release không clear key mới.
-
-Lazy acquire nắm manager local, increment inFlight trước await, add leaseId sau acquire thành công, decrement trong finally. Release xóa tracked ID sau manager release thành công. ReleaseAll clears set/reference chỉ khi underlying success; pending/failure vẫn giữ. Changed configure kiểm owned/inFlight trước gán keys/region; same config no-op. ReleaseAll lúc acquire pending báo ownership pending, không drop late lease.
-
-- [ ] GREEN deferred acquire/release, stale twice, key khác concurrent, DB release throw→retry. Sửa các test “giữa hai phiên” để release trước đổi config.
-- [ ] Commit riêng theo B03/B04: fix: preserve proxy lease and manager ownership.
-
-## T4 — B05/B06: recovery mailbox không tạo account sai
-
-**Files:** src/main/services/EmailPurchaseService.ts; src/main/services/__tests__/EmailPurchaseService.test.ts; current AccountMutationRepository read methods. Không thay credential storage.
-
-**Interfaces:** DiagnosticMutationContext.repository require getOwnerByMailbox/getBinding đã có ở concrete repo (không optional fallback giấu lỗi adapter); delivery vẫn ReservedEmail.
-
-- [ ] RED trong EmailPurchaseService.test.ts:
-
-~~~ts
-it('B06 refuses a mailbox already bound to another account before delivery',async()=>{
-  const ledger=new AccountMutationRepository(db);
-  ledger.registerApproval({authorityRef:'auth-r',budgetOwnerRef:'budget-r',
-    provider:'dongvanfb',approvedUnits:2});
-  const service=new EmailPurchaseService(credRepo,purchasedRepo,vault,
-    {gmail94:gmail,dongvanfb:dongvan,customdomain:customDomain},
-    {nextId:()=> 'pe-'+ ++idCounter,mutationContext:{repository:ledger,
-      authorityRef:'auth-r',budgetOwnerRef:'budget-r'}});
+);
+it('R02 never delivers a fresh mailbox after OAuth CAS loses ownership',async()=>{
   storeKey('dongvanfb','DV-DEMO');
-  dongvan.rows=[[{email:'a@example.test',password:'p',refreshToken:'r',clientId:'c',raw:'fixture'}]];
-  const signal=new AbortController().signal;
-  const session=await service.openAcquisitionSession('dongvanfb',1,{maxBillablePurchases:1},signal);
-  const first=await session.acquireOne('w1',signal,
-    {ownerRef:'owner-A',runId:'run-A',stepAttemptId:'attempt-A'});
-  session.bindAccount!(first,'account-A');session.release(first);
-  await expect(session.acquireOne('w2',signal,
-    {ownerRef:'owner-B',runId:'run-B',stepAttemptId:'attempt-B'})).rejects.toMatchObject({
-      reason:{code:'PROVIDER_CONFIG_ERROR',details:{accountId:'account-A'}}});
-  expect(dongvan.buyCalls).toBe(1);
-  expect(ledger.getBinding('owner-A')?.accountId).toBe('account-A');
-  expect(purchasedRepo.countAvailable('dongvanfb')).toBe(1);
-});
-~~~
-
-Thêm B05 no-key test ngay trong file fixture đó:
-
-~~~ts
-it('B05 releases the reservation when reusable OAuth setup fails',async()=>{
-  purchasedRepo.insert({id:'mail-reuse',provider:'dongvanfb',email:'reuse@example.test',
-    passwordEncrypted:vault.encrypt('PASS-DEMO')});
+  dongvan.rows=[[{email:'cas@example.test',password:'PASS-DEMO',
+    refreshToken:null,clientId:null,raw:'fixture'}]];
+  let other:ReturnType<PurchasedEmailRepository['reserveOldestAvailable']>=null;
+  const oauth=vi.spyOn(dongvan,'getOauth2').mockImplementationOnce(async()=>{
+    purchasedRepo.clearStaleReservations(); // isolated test DB only
+    other=purchasedRepo.reserveOldestAvailable('dongvanfb','other-owner');
+    return {refreshToken:'REFRESH-DEMO',clientId:'CLIENT-DEMO'};
+  });
   const signal=new AbortController().signal;
   const session=await createService().openAcquisitionSession('dongvanfb',1,
-    {maxBillablePurchases:0},signal);
-  await expect(session.acquireOne('w1',signal)).rejects.toMatchObject({code:'CONFIG_ERROR'});
-  expect(purchasedRepo.countAvailable('dongvanfb')).toBe(1);
-  expect(dongvan.buyCalls).toBe(0);
-});
-~~~
-
-Không storeKey ở case này để tái hiện đúng lỗi cấu hình. Fake getOwnerByMailbox throw, vault.decrypt throw, getSecrets missing và updateReservedOauth false cũng release đúng reservation.
-
-- [ ] Run B05/B06 focused, RED delivery resolves/available0.
-- [ ] GREEN cả Gmail và DongVan reusable branches: một try/catch từ owner lookup tới enrichment/CAS/delivery. Catch release reservation hiện tại rồi throw. Không có decrypt/readApiKey ngoài boundary. CAS false:
-
-~~~ts
-if(!updated)throw new AutomationTerminalError('failed',{code:'INTERNAL_ERROR'},
-  'Quyền sở hữu mailbox đã thay đổi; chưa cấp mailbox cho worker.');
-~~~
-
-Fenced reusable: assertNoUnknown trước, getBinding(originalOwner), nếu đã accountId → terminal blocked PROVIDER_CONFIG_ERROR với details.accountId và hướng dẫn kiểm tra account có sẵn. Trả lỗi trước work source tạo account B. Không xóa binding hoặc tự resume/repurchase. Ngoài fenced composition giữ behavior hiện có.
-
-- [ ] GREEN owner chưa bind vẫn reuse, post-await abort, CAS conflict, lookup failure, UNKNOWN persistence. Lưu payload đã mua trước OAuth là bản sửa tốt cần giữ.
-- [ ] Commit: fix: release failed mailbox reservations and detect bound recovery.
-
-## T5 — B08/B10/B11: snapshot/current proof
-
-**Files:** src/main/services/capcut/httpTasks.ts; tests src/main/services/capcut/__tests__/httpTasks.test.ts; engine receipt tests.
-
-**Interfaces:** giữ RunTasksResult/TaskSnapshotSummary/TaskOutcome.
-
-- [ ] RED tests đặt trong describe có callbackPage/taskRows hiện hữu:
-
-~~~ts
-it('B08 equal timestamp is not fresh and does not clear pending proof',async()=>{
-  const {page}=callbackPage({err_no:0},{err_no:0,data:{task_list:taskRows()}});
-  vi.spyOn(Date,'now').mockReturnValue(2000);
-  const result=await executeHttpTasks({page,signal:new AbortController().signal,
-    log:()=>{},actionDelayMs:0,sessionStartedAt:1000});
-  expect(result.snapshot).toMatchObject({fresh:false,final:false});
-  expect(result.unsettledProofs).toHaveLength(9);
-});
-it.each([undefined,null,'bad',{}])('B10 malformed list container is invalid: %j',async list=>{
-  const {page}=callbackPage({err_no:0},{err_no:0,data:{task_list:list}});
-  const r=await executeHttpTasks({page,signal:new AbortController().signal,
-    log:()=>{},actionDelayMs:0});
-  expect(r.snapshot).toBeNull();
-  expect(r.fatalError?.message).toBe('TASK_LIST_RESPONSE_INVALID');
-});
-it('B11 failed current mutation does not claim old proof as new',async()=>{
-  const key=LEAF_TASKS[0];
-  const proof={actionKey:key,opId:'old-op',at:1000,errNo:0 as const,errTips:''};
-  const {page}=callbackPage({err_no:1},{err_no:0,data:{task_list:taskRows(1)}});
-  const r=await executeHttpTasks({page,signal:new AbortController().signal,
-    log:()=>{},actionDelayMs:0,unsettledProofs:[{key,proof}]});
-  expect(r.outcomes.find(x=>x.key===key)?.proof).toBeUndefined();
-  expect(r.unsettledProofs).toContainEqual({key,proof});
-});
-~~~
-
-- [ ] Run focused IDs; RED equals fresh/malformed list accepted/old proof current.
-- [ ] GREEN:
-
-~~~ts
-// Trong browser callback, trước normalize rawList:
-const hasTaskList=Array.isArray(dataObj.task_list);
-const valid=r.ok && numeric && body.err_no===0 && hasTaskList;
-// Trong host summary:
-const fresh=listRes.valid && observedAt>requiredAfter;
-// Cạnh merged proofMemory:
-const currentAcceptedProofs=new Map<string,ActionProof & {errNo:0}>();
-~~~
-
-Accepted current response cập nhật cả maps; outcomes.proof chỉ lấy currentAcceptedProofs, pending dùng merged memory. Settle từng carried proof chỉ khi observedAt>proof.at và status4; không xóa proof tương lai/stale. Invalid refresh sau claim trả cùng invalid-result path với pending proofs, không rows cũ+timestamp lỗi.
-
-- [ ] GREEN T1 happy trace9actions, parents/preexisting status4 không bắt current proof; claim passes/delay/op_id không đổi.
-- [ ] Commit: fix: align task freshness and proof attribution.
-
-## T6 — B09: Stop cắt auxiliary DOM waits
-
-**Files:** src/main/services/capcut/httpTasks.ts; existing HTTP/cancellation tests.
-
-**Interfaces:** dùng boundedDomRead từ ./cancellation; không đổi locator/click/pacing.
-
-- [ ] RED:
-
-~~~ts
-it('B09 Stop interrupts an auxiliary visibility read',async()=>{
-  let enter!:()=>void,release!:()=>void;
-  const entered=new Promise<void>(r=>{enter=r;});
-  const pending=new Promise<boolean>(r=>{release=()=>r(false);});
-  const controller=new AbortController(),stop=new Error('STOP');
-  const evaluate=vi.fn();
-  const locator={first(){return this;},isVisible:()=>{enter();return pending;}};
-  const run=executeHttpTasks({page:{locator:()=>locator,evaluate} as unknown as Page,
-    signal:controller.signal,log:()=>{},actionDelayMs:0});
-  await entered;controller.abort(stop);
-  let timer:ReturnType<typeof setTimeout>|undefined;
+    {maxBillablePurchases:1},signal);
   try{
-    const outcome=await Promise.race([
-      run.then(()=> 'resolved',error=>error),
-      new Promise<string>(resolve=>{timer=setTimeout(()=>resolve('still-pending'),100);})
-    ]);
-    expect(outcome).toBe(stop);
-    expect(evaluate).not.toHaveBeenCalled();
-  }finally{
-    clearTimeout(timer);release();await run.catch(()=>{});
-  }
+    await expect(session.acquireOne('original',signal)).rejects.toMatchObject({
+      state:'failed',reason:{code:'INTERNAL_ERROR'}});
+    expect(other).not.toBeNull();
+    expect(purchasedRepo.countAvailable('dongvanfb')).toBe(0);
+    expect(purchasedRepo.consumeReserved(other!.id,'other-owner',null)).toBe(true);
+    expect(dongvan.buyCalls).toBe(1);
+  }finally{oauth.mockRestore();}
 });
 ~~~
 
-- [ ] Run B09; RED waiter timeout, không gọi live.
-- [ ] GREEN mỗi isVisible/count hiện hữu:
+- [ ] Run node node_modules/vitest/vitest.mjs run src/main/services/__tests__/EmailPurchaseService.test.ts -t "R01|R02|R03". RED observer lưu0row, settlement available0, CAS acquisition resolve.
+- [ ] GREEN tách counting khỏi observer. Thay mọi call confirmPurchase sau valid response bằng increment không callback; persist rồi thực hiện post-insert work trong một try/catch:
 
 ~~~ts
-const visible=await boundedDomRead(()=>btn.isVisible(),
-  'http-task-popup:visible',1000,signal).catch(error=>{
-    signal.throwIfAborted();
-    if(isDomReadTimeout(error))throw error;
-    return false;
-  });
+// Successful provider result đã validate:
+stats.confirmed += 1;
+// Generate id/reservation trước insert để có identity khi phải kiểm lỗi persistence.
+let purchasedEmail = this.purchasedRepo.insertReserved(paidInput, reservationId);
+try {
+  settlePurchase(purchasedEmail.id);
+  try {
+    emitPurchaseEvent('confirmed');
+  } catch (error) {
+    poisonPurchaseAccounting();
+    throw error;
+  }
+  // Đặt khối OAuth hiện hữu tại đây, giữ cùng request/payload.
+  // Sau updateReservedOauth:
+  if (!updated) {
+    throw new AutomationTerminalError('failed',{code:'INTERNAL_ERROR'},
+      'Quyền sở hữu mailbox đã thay đổi; chưa cấp mailbox cho worker.');
+  }
+  workerSignal.throwIfAborted();
+  return {purchasedEmail,reservationId,
+    ...(mutationIdentity?{ownerRef:mutationIdentity.ownerRef}:{})};
+} catch (error) {
+  try {
+    this.purchasedRepo.releaseReservation(purchasedEmail.id,reservationId);
+  } catch (cleanupError) {
+    throw new AggregateError([error, cleanupError],
+      'Paid mailbox delivery and reservation cleanup both failed.');
+  }
+  throw error;
+}
 ~~~
 
-Dùng deadline phù hợp từng read; import isDomReadTimeout. Không swallow abort/deadline vào “không thấy”. Giữ foreground adapter đã có, không thêm UI mission/jitter. Host timeout chỉ ngừng chờ, không hứa remote rollback.
+Fragment mô tả vị trí ghép, không thêm biến không khai báo: paidInput là object insert hiện tại giữ nguyên, updated là boolean CAS trong khối OAuth hiện tại; CAS check chỉ nằm trong branch có OAuth. Gmail không có OAuth nhưng phải cùng boundary settlement/observer/delivery. Nếu callback original đã là AutomationTerminalError thì giữ nguyên, không đổi thành generic success.
 
-- [ ] GREEN popup/task-entry/claim count, late resolver không bắt đầu checkpoint/action kế tiếp; happy trace giữ nguyên.
-- [ ] Commit: fix: bound auxiliary reads during task cancellation.
+Không đặt release trước khi biết row/ownership: insertReserved có thể insert rồi DTO-read fail; generate id trước, persistence error giữ failed state và chặn automatic repurchase, xử lý exact row nếu tồn tại, không xóa dữ liệu. Failure release của chính reservation cũng phải được báo, không thả owner khác.
 
-## T7 — B07: giữ pending proofs qua engine failure
+- [ ] GREEN thêm bindMailbox fail riêng (không yêu cầu binding được tạo khi chính bind fail), post-purchase abort, final gate khi đã có OAuth, Gmail observer failure và insert failure confirmed count. Existing reuse/CAS/early-bound-account tests vẫn pass.
+- [ ] Test observer+cleanup failure bằng `vi.spyOn(purchasedRepo,'releaseReservation').mockImplementationOnce(()=>{throw cleanupError;})` trong fixture observer ở trên: expect error là AggregateError với errors=[failure,cleanupError], paid row còn1; cleanup success vẫn reject đúng original failure, không AggregateError giả.
+- [ ] Review “paid response trước fallible callback” và “no second purchase”; commit nếu được phép: fix: preserve paid mailbox through post-purchase failures.
 
-**Files:** Create src/main/services/capcut/TaskEvidenceError.ts; modify CapcutEngineService.ts, AutomationRunService.ts, runtime/providerStack.ts, repositories/AccountTaskRepository.ts; create database/migrations/009_unsettled_proofs_without_receipt.ts và đăng ký index.ts; tests engine/automationTaskProgress/accountTaskRepository/migrator.
+## T2 — R04: fenced restock retry không trùng intent
 
-**Interfaces mới nhỏ:**
+**Files:** src/main/services/EmailPurchaseService.ts; src/main/providers/ProviderError.ts; Gmail94Provider.ts/DongVanFBProvider.ts khi đã có fixture raw stock; tests provider và EmailPurchaseService.test.ts.
+
+**Interfaces:** thêm ConfirmedOutOfStockError extends ProviderError để phân biệt no-effect có chứng cứ; không đổi API request. AccountMutationRepository.recordIntent/settleIntent đã có dùng nguyên.
+
+Test import phải thêm `import { ConfirmedOutOfStockError } from '../../providers/ProviderError';`; provider fixture phải chứng minh explicit stock trước dùng marker.
+
+- [ ] RED using createFencedService có2approval units, fixtures gmail/orderFailures:
 
 ~~~ts
-// TaskEvidenceError.ts
-import type {UnsettledTaskProof} from './types';
-export class TaskEvidenceError extends Error {
-  readonly unsettledProofs:readonly UnsettledTaskProof[];
-  constructor(message:string,proofs:readonly UnsettledTaskProof[]){
-    super(message);this.name='TaskEvidenceError';
-    this.unsettledProofs=proofs.map(x=>({key:x.key,proof:{...x.proof}}));
+it('R04 uses a distinct approved intent for confirmed-stock retry',async()=>{
+  storeKey('gmail94','GM-DEMO');
+  const service=createFencedService();
+  const ledger=new AccountMutationRepository(db);
+  const recorded=vi.spyOn(AccountMutationRepository.prototype,'recordIntent');
+  gmail.orderFailures=[new ConfirmedOutOfStockError('gmail94')];
+  const signal=new AbortController().signal;
+  const session=await service.openAcquisitionSession('gmail94',1,
+    {maxBillablePurchases:1,emailRetryIntervalMs:0},signal);
+  try{
+    const result=await session.acquireOne('w1',signal,{
+      ownerRef:'stock-owner',runId:'stock-run',stepAttemptId:'stock-attempt'});
+    const [first,second]=recorded.mock.calls.map(call=>call[0]);
+    expect(gmail.createCalls).toHaveLength(2);
+    expect(first.stepAttemptId).toBe('stock-attempt');
+    expect(second.stepAttemptId).not.toBe(first.stepAttemptId);
+    expect(second.operationKey).not.toBe(first.operationKey);
+    expect(second.ownerRef).toBe(first.ownerRef);
+    expect(ledger.getIntent('auth-test',first.operationKey)?.state).toBe('no-effect-confirmed');
+    expect(ledger.getIntent('auth-test',second.operationKey)?.state).toBe('effect-confirmed');
+    expect(ledger.getApproval('auth-test')?.consumedUnits).toBe(2);
+    expect(session.purchaseStats()).toEqual({budget:1,attempted:1,confirmed:1,ambiguous:0});
+    session.release(result);
+  }finally{recorded.mockRestore();}
+});
+~~~
+
+- [ ] Run R04, expect duplicate intent before fix. ConfirmedOutOfStockError new type missing lúc đầu là setup RED; phải thấy behavioral RED sau khi thêm type nhưng chưa sửa loop.
+- [ ] GREEN marker code:
+
+~~~ts
+export class ConfirmedOutOfStockError extends ProviderError {
+  constructor(serviceName:string) {
+    super('OUT_OF_STOCK','Provider xác nhận hết hàng, chưa cấp mailbox.',serviceName);
+    this.name='ConfirmedOutOfStockError';
   }
 }
 ~~~
 
-ICapcutTaskProgressSink thêm recordUnsettled(accountId,runId,proofs):Promise<void>. Repository thêm recordUnsettledProofs(accountId,runId,proofs):void upsert-only. Chỉ sửa luồng error, không thêm request/retry/normal step.
+Provider chỉ tạo marker từ raw error shape stock đã xác minh bằng fixture. Generic400/429, invalid request/status:false hoặc malformed success không được đánh marker. Đây là bắt buộc để không settle UNKNOWN sai. Đọc fixture hiện có; nếu chỉ có generic “Invalid request” thì chưa đủ để certify provider stock, không invent code/message.
 
-- [ ] RED trong CapcutEngineService.test.ts với runAllTasks/runInput fixtures:
+Trong acquireOne dùng dispatchAttemptId: first giữ supplied identity, retry dùng this.nextId() mới (safe ref). recordPurchaseIntent và settlePurchase dùng cùng attempt đang active. Trong catch stock:
+- non-fenced: giữ policy hiện có.
+- fenced ConfirmedOutOfStockError: settle exact attempt no-effect-confirmed, không hoàn consumedUnits; rollback local attempted theo semantics không-purchase hiện có; wait cấu hình; retry phải qua approval recordIntent mới.
+- fenced error không có marker: giữ UNKNOWN, dừng qua ambiguous path, không retry.
+- Settlement fail: giữ failure và không dispatch kế tiếp.
+- Approval hết: báo exhausted trước dispatch, không duplicate-key generic error.
+
+- [ ] GREEN2units→stock/success;1unit→stock/no second dispatch; UNKNOWN/network/malformed/generic stock không unlock; Stop trong wait; owner/run giữ nguyên. Unit marker pass chưa đồng nghĩa upstream classification có evidence: provider fixture còn thiếu thì ghi riêng unverified và không close R04 toàn phần.
+- [ ] Review scope chỉ fenced accounting, normal polling không bị thay. Commit: fix: account for fenced restock attempts explicitly.
+
+## T3 — R05: timeout không làm mất proofs đã accepted
+
+**Files:** src/main/services/capcut/httpTasks.ts; src/main/services/capcut/__tests__/httpTasks.test.ts; src/main/services/__tests__/automationTaskProgress.test.ts.
+
+**Interfaces:** tái sử dụng TaskEvidenceError và recordUnsettled đã có. Không schema/migration hoặc retry mới.
+
+- [ ] RED trong describe executeHttpTasks có callbackPage/taskRows/LEAF_TASKS, thêm TaskEvidenceError import:
 
 ~~~ts
-it('B07 carries proofs through an invalid-snapshot failure',async()=>{
-  const proofs=[{key:'capcut_web_pwa_install',proof:{
-    actionKey:'capcut_web_pwa_install',opId:'accepted-op',errNo:0 as const,
-    errTips:'',at:2000}}];
-  runAllTasks.mockResolvedValueOnce({outcomes:[],snapshot:null,
-    fatalError:new Error('TASK_LIST_RESPONSE_INVALID'),unsettledProofs:proofs});
-  const onTaskCheckpoint=vi.fn();
-  await expect(new CapcutEngineService({userDataDir:'C:/tmp/fixture'})
-    .runAccount(runInput({onTaskCheckpoint}))).rejects.toMatchObject({
-      name:'TaskEvidenceError',unsettledProofs:proofs});
-  expect(onTaskCheckpoint).not.toHaveBeenCalled();
+it.each(['list','claim-count'] as const)('R05 carries accepted proof on %s timeout',async failure=>{
+  vi.useFakeTimers();
+  let release!:()=>void,entered!:()=>void;
+  const reached=new Promise<void>(resolve=>{entered=resolve;});
+  const {page,fetchMock}=callbackPage({err_no:0},{err_no:0,data:{task_list:taskRows(2)}});
+  fetchMock.mockImplementation(async(url:string)=>{
+    if(url.includes('/account/info/'))return new Response(JSON.stringify({data:{user_id_str:'123456789'}}));
+    if(url.includes('/do_action')||url.includes('/grant_reward'))return new Response('{"err_no":0}');
+    if(url.includes('/task_list')){
+      if(failure==='list'){
+        entered();return new Promise<Response>(resolve=>{
+          release=()=>resolve(new Response(JSON.stringify({err_no:0,data:{task_list:taskRows()}})));
+        });
+      }
+      return new Response(JSON.stringify({err_no:0,data:{task_list:taskRows(2)}}));
+    }
+    throw new Error('Unexpected fixture URL');
+  });
+  if(failure==='claim-count')Object.assign(page,{locator:()=>({
+    first:()=>({isVisible:async()=>false}),
+    filter:()=>({count:()=>{entered();return new Promise<number>(resolve=>{release=()=>resolve(0);});}})
+  })});
+  const checkpoint=vi.fn(async()=>{});
+  const run=executeHttpTasks({page,signal:new AbortController().signal,
+    log:()=>{},actionDelayMs:0,onCheckpoint:checkpoint});
+  const settled=run.then(()=>null,error=>error);
+  try{
+    await reached;await vi.advanceTimersByTimeAsync(failure==='list'?30001:1001);
+    const error=await settled;
+    expect(error).toBeInstanceOf(TaskEvidenceError);
+    expect(error.unsettledProofs.map((x:{key:string})=>x.key)).toEqual([...LEAF_TASKS]);
+    expect(fetchMock.mock.calls.filter(([url])=>url.includes('/do_action'))).toHaveLength(9);
+    expect(checkpoint).not.toHaveBeenCalled();
+  }finally{release?.();await settled;vi.useRealTimers();}
 });
 ~~~
 
-- [ ] RED repo test record pending với account/run chưa có receipt; assert receipt null và task rows rỗng. Hiện FK receipt cản: không tạo fake receipt để pass.
-- [ ] GREEN engine null snapshot throw TaskEvidenceError với runResult proofs. Owner catch chỉ persist khi đúng current thread/session/account, signal chưa abort; sau persist rethrow original để giữ failed outcome. Persistence error dùng TASK_CHECKPOINT_PERSISTENCE_FAILED và cleanup path hiện có, không bypass nhánh xử lý bằng throw quá sớm.
+- [ ] Run R05; RED raw OperationDeadlineError/DomReadTimeoutError không proofs.
+- [ ] GREEN sau proofMemory init, thêm helper:
 
-Migration9 tối thiểu, transaction do migrator quản lý:
+~~~ts
+async function preserveTaskEvidence<T>(operation:()=>Promise<T>):Promise<T>{
+  try{return await operation();}
+  catch(error:unknown){
+    signal.throwIfAborted();
+    if(error instanceof TaskEvidenceError || proofMemory.size===0)throw error;
+    throw new TaskEvidenceError(error instanceof Error?error.message:String(error),
+      [...proofMemory].map(([key,proof])=>({key,proof})));
+  }
+}
+~~~
+
+Wrap existing task/browser awaits sau map init (action/list/grant/auxiliary DOM) bằng helper. Không wrap input.onCheckpoint/persistence errors. Với DOM read giữ existing catch interruption **bên trong** wrapper:
+
+~~~ts
+const claimCount=await preserveTaskEvidence(()=>
+  boundedDomRead(()=>claimButtons.count(),'http-task-claim:count',1000,signal)
+    .catch(error=>{
+      signal.throwIfAborted();
+      if(isDomReadTimeout(error))throw error;
+      return 0;
+    })
+);
+~~~
+
+Callback/payload/request order giữ nguyên. Không đổi accepted status của request timed-out; chỉ mang proof đã có. Stop propagate original signal reason, không TaskEvidenceError, không thêm recycle.
+
+- [ ] GREEN Stop-after-acceptance, late resolver zero next calls, owner test recordUnsettled once đúng account/run, completed0/failed1, checkpoint0. Pending sink failure vẫn TASK_CHECKPOINT_PERSISTENCE_FAILED path, không ordinary failed rồi lặng.
+- [ ] Commit: fix: carry accepted task evidence through thrown read failures.
+
+## T4 — R06: pending upsert chỉ nhận mới hơn
+
+**Files:** src/main/repositories/AccountTaskRepository.ts; src/main/repositories/__tests__/accountTaskRepository.test.ts.
+
+**Interfaces:** giữ recordUnsettledProofs và ISO format hiện tại; không migration mới.
+
+- [ ] RED với db fixture migrated:
+
+~~~ts
+it('R06 keeps newer evidence and allows a genuinely newer replacement',()=>{
+  const repo=new AccountTaskRepository(db),key='capcut_web_pwa_install';
+  const proof=(opId:string,at:number)=>[{key,proof:{actionKey:key,opId,errNo:0 as const,at}}];
+  repo.recordUnsettledProofs('a','r',proof('new',2000));
+  repo.recordUnsettledProofs('a','r',proof('old',1000));
+  repo.recordUnsettledProofs('a','r',proof('equal',2000));
+  expect(repo.listUnsettledProofs('a','r')[0]).toMatchObject({opId:'new',provedAt:new Date(2000).toISOString()});
+  repo.recordUnsettledProofs('a','r',proof('newest',3000));
+  expect(repo.listUnsettledProofs('a','r')[0].opId).toBe('newest');
+  expect(repo.getLatestReceipt('a')).toBeNull();
+  expect(repo.listByAccount('a')).toEqual([]);
+});
+~~~
+
+- [ ] Run R06; RED old/equal overwrite.
+- [ ] GREEN thêm đúng predicate vào existing conflict clause:
 
 ~~~sql
-CREATE TABLE account_unsettled_proofs_next (
- account_id TEXT NOT NULL, run_id TEXT NOT NULL, task_key TEXT NOT NULL,
- op_id TEXT NOT NULL, proved_at TEXT NOT NULL,
- PRIMARY KEY(account_id,run_id,task_key)
-);
-INSERT INTO account_unsettled_proofs_next
- SELECT account_id,run_id,task_key,op_id,proved_at FROM account_unsettled_proofs;
-DROP TABLE account_unsettled_proofs;
-ALTER TABLE account_unsettled_proofs_next RENAME TO account_unsettled_proofs;
+ON CONFLICT(account_id, run_id, task_key) DO UPDATE SET
+ op_id = excluded.op_id,
+ proved_at = excluded.proved_at
+WHERE excluded.proved_at > account_unsettled_proofs.proved_at
 ~~~
 
-Chỉ bỏ FK vào receipt để evidence tồn tại khi không có snapshot; không đổi credential tables, không thêm accounts FK gây mất compatibility orphan fixtures. deleteByAccount thêm DELETE pending explicit. Repository validate key/actionKey,errNo0,opId/time,duplicate before write; upsert newer proof, không xóa keys khác/receipt/status. Normal checkpoint vẫn reconcile pending như hiện tại.
+Giữ transaction/validation. Equal giữ record cũ; không clear keys khác. Timestamp phải được normalize hợp lệ trước ghi, không thay bằng string tùy ý.
+- [ ] GREEN newer/older/equal, duplicate input rollback, different run/account; existing migration009 tests giữ pass.
+- [ ] Commit: fix: retain the newest pending task proof.
 
-- [ ] GREEN migration8→9 bảo toàn rows, repeat migration, foreign_key_check, pending without receipt, batch invalid rollback, owner stale/Stop/persistence failure, runAccount gọi1 lần/no recycle mới.
-- [ ] Commit: fix: persist accepted pending evidence without a valid receipt.
+## T5 — R07: Clear và load không hủy kết quả nhau
 
-## T8 — B12: page/filter/export counts
+**Files:** src/renderer/pages/Logs/logsController.ts; src/renderer/pages/Logs/__tests__/logsController.test.ts. Main LogBus cutoff/schema đã có, không thay thêm protocol.
 
-**Files:** Accounts/accountsController.ts, AccountsPage.tsx, ExportDialog.tsx; existing controller/repository/export tests.
+**Interfaces:** public load/clear giữ signature. Thêm clearPromise single-flight và clearPushes độc lập pendingPushes của list. Token clear không dùng chung token load.
 
-**Interfaces:** state.page là nguồn duy nhất, thêm globalTotal; load(filter?,page?) giữ signature hiện tại. Không đổi scopes hoặc storage.
-
-- [ ] RED AccountsController tests:
+- [ ] RED với FakeBridge/log fixtures, thêm vi:
 
 ~~~ts
-it('B12 late page two never overwrites page three',async()=>{
-  const replies:Array<(v:IpcEnvelope<{items:AccountListItemDTO[];total:number}>)=>void>=[];
-  bridge.accounts.list=()=>new Promise(resolve=>replies.push(resolve));
-  const c=new AccountsController(bridge,50);
-  const p2=c.load({},2),p3=c.load({},3);
-  replies[1]({success:true,data:{items:[dto({id:'p3'})],total:150}});await p3;
-  replies[0]({success:true,data:{items:[dto({id:'p2'})],total:150}});await p2;
-  expect(c.getState().accounts[0].id).toBe('p3');
-  expect(c.getState().page).toBe(3);
+it('R07 still applies clear cutoff when load is requested during clear',async()=>{
+  let finishClear!:(v:Awaited<ReturnType<ILogsBridge['logs']['clear']>>)=>void;
+  bridge.rows=[];
+  bridge.logs.clear=()=>new Promise(resolve=>{finishClear=resolve;});
+  const c=new LogsController(bridge);c.attach();
+  const clearing=c.clear();
+  const loading=c.load({level:'ALL'});
+  bridge.push(log('pre',{streamSequence:5}));
+  bridge.push(log('post',{streamSequence:6}));
+  finishClear({success:true,data:{success:true,clearedThrough:5}});
+  expect(await clearing).toBe(true);
+  await loading;
+  bridge.push(log('late-pre',{streamSequence:4}));
+  expect(c.getState().logs.map(x=>x.id)).toEqual(['post']);
+  expect(c.getState().isLoading).toBe(false);
 });
-~~~
-
-- [ ] GREEN load capture requestedPage/query và ++token; response chỉ áp token hiện tại, page=requestedPage. Clamp theo filteredTotal, out-of-range reload một trang hợp lệ. Catch request rejection và loading=false. Remove page local riêng của page component. Không slice DataGrid lần2.
-- [ ] globalTotal lấy riêng list({},pageSize1) khi có filter; total hiện có = filteredTotal. Export props filteredCount=total,totalCount=globalTotal; 0filtered vẫn All. Giữ checked IDs cross-page.
-- [ ] GREEN out-of-order/filter changes, delete-last,1201IDs, browser-filter All/Filtered/Checked exact IDs. Default format cũng init lúc dialog mở sau settings load, không reset giữa phiên chọn.
-- [ ] Commit: fix: keep account pages and export scopes consistent.
-
-## T9 — B13: load/Clear/live race
-
-**Files:** Logs/logsController.ts; main LogBus.ts/logsIpc.ts; shared schemas/log.schema.ts/contracts/api.ts nếu cần cutoff; tests controller/LogBus/runtimeIpc.
-
-**Phương án gọn:** load token + buffer chỉ các pushes trong request; Clear invalidate old load. Do live emit đi trước DB batch, thêm optional sequence nội bộ main và clearedThrough response Clear để phân biệt post-clear unflushed push; không DB migration, broker hoặc event framework.
-
-**Interfaces:** CanonicalRuntimeLog.streamSequence?:safe integer; logs.clear result {success:boolean,clearedThrough?:number}. Main production có cutoff; legacy no-bus response không cutoff dùng reload, không hứa giữ unordered pushes.
-
-- [ ] RED controller với fixtures bridge/log:
-
-~~~ts
-it('B13 ignores history response started before Clear',async()=>{
-  let finish!:(v:IpcEnvelope<{items:CanonicalRuntimeLog[];total:number}>)=>void;
-  bridge.logs.list=()=>new Promise(r=>{finish=r;});
-  const c=new LogsController(bridge);const load=c.load();
-  await c.clear();
-  finish({success:true,data:{items:[log('old')],total:1}});await load;
-  expect(c.getState().logs).toEqual([]);
+it('R07 failed clear preserves old and intervening live rows',async()=>{
+  let finish!:(v:Awaited<ReturnType<ILogsBridge['logs']['clear']>>)=>void;
+  const c=new LogsController(bridge);c.attach();await c.load();
+  bridge.logs.clear=()=>new Promise(resolve=>{finish=resolve;});
+  const clearing=c.clear();bridge.push(log('during',{streamSequence:2}));
+  finish({success:false,error:{code:'ERR_PERSISTENCE_FAILED',message:'disk'}});
+  expect(await clearing).toBe(false);
+  expect(c.getState().logs.map(x=>x.id)).toEqual(['during','log-1']);
   expect(c.getState().isLoading).toBe(false);
 });
 ~~~
 
-Test riêng history pending + push new + empty reply giữ new; two filters reversed replies; clear fail giữ old; post-clear push sequence>cutoff được giữ dù chưa ghi DB.
-
-- [ ] GREEN LogBus counter tăng trước mỗi publish, không reset. clear(callback) gọi DB clear, queue=[], return current counter. Registry DTO optional cutoff; no unrelated bridge methods. Counter overflow fail trước publish, không wrap.
-- [ ] GREEN controller:
-  - Load có local token/filter, bounded pushes buffer. Success thay old history, merge buffer theo id, sort canonical createdAt/id. Không merge toàn state cũ.
-  - Clear single-flight invalidate token ngay, buffer pushes. Khi reply success set cutoff, bỏ sequence<=cutoff, giữ >cutoff; later old push cũng bị drop. Set loading=false và error rõ.
-  - Clear fail không bỏ displayed/pending pushes, loading=false. Không auto-retry xóa.
-  - Filter đổi đang clear: dùng latest filter để giải phóng buffer và load tiếp, không áp response filter cũ.
-  - Pause/dispose đúng lifecycle; unpaused-only buffer, stale completion không notify.
-- [ ] GREEN producer→schema→IPC→controller tests; FakeBridge.clear phải mô phỏng DB empty đúng. Không dùng timestamp để đoán trước/sau clear.
-- [ ] Commit: fix: reconcile live logs with history and clear ordering.
-
-## T10 — B14: Settings save không mất edit mới
-
-**Files:** src/renderer/pages/Settings/settingsController.ts; existing __tests__/settingsController.test.ts. Không đổi cách hiển thị/lưu key/password.
-
-- [ ] RED dùng createMockBridge fixture:
+- [ ] Run R07; RED clear returnsfalse/cutoff lost hoặc push disappears.
+- [ ] GREEN state thiết kế tối thiểu:
 
 ~~~ts
-it('B14 preserves edits made while an earlier save is pending',async()=>{
+private clearPromise:Promise<boolean>|null=null;
+private clearPushes:CanonicalRuntimeLog[]=[];
+private clearSurvivors:CanonicalRuntimeLog[]=[];
+~~~
+
+1. clear start ++loadToken để bỏ preclear replies; capture displayed rows; create clearPromise trước await. Repeated clear trả cùng operation, không xóa twice.
+2. load khi clearPromise pending: cập nhật lastQuery và loadToken rồi chờ promise; chỉ request token mới nhất tiếp tục fetch sau clear, không gọi list trong cửa sổ clear chưa settle.
+3. Live while clear: bounded clearPushes trước filter; không ghi vào list buffer dùng chung. Pause vẫn bỏ live như hiện tại.
+4. clear reply không so với loadToken. Success luôn cập nhật clearedThrough=max(old,new). Keep only clearPushes có seq>cutoff và matching latest query; drop previous history. Late seq<=cutoff vẫn reject.
+5. Surviving unflushed pushes được seed vào lần load sau clear; chỉ bỏ seed khi history đã chứa ID hoặc lần clear mới loại nó, buffer capped. Không merge arbitrary previous state.
+6. clear failure/rejection restore displayed rows + matching clearPushes, dedupe, loadingfalse/error. Never auto retry deletion.
+7. finally clearPromise=null; load đang đợi không deadlock vì clear không gọi public load. Dispose invalidates pending work; no notification sau disposed.
+8. Legacy missing cutoff: authoritative reload, không gán sequence giả và không hứa giữ unordered pushes.
+
+Giữ canonical time cho sorting/ID tie nếu buffer cần sắp xếp; không sort HH:mm:ss. Không thêm broker/migration.
+
+- [ ] GREEN duplicate clear oneIPC, filter changes twice during clear, success/failure/rejected promise, late old list/push, paused, unmount. Existing live/history tests giữ pass.
+- [ ] Commit: fix: separate log clear lifecycle from pending loads.
+
+## T6 — R08: Dashboard hiện value, Save fail giữ input
+
+**Files:** src/shared/schemas/account.schema.ts, provider.schema.ts; src/main/services/AccountService.ts, EmailPurchaseService.ts; src/renderer/pages/Dashboard/columns.tsx, AutomationConfigGrid.tsx; src/renderer/pages/Settings/settingsController.ts; tests service/contracts/preload/Dashboard rendering/Settings controller.
+
+**Interfaces:** additive passwordCapcut?:string|null trên AccountListItemDTO, apiKey?:string|null trên EmailProviderConfigDTO. Giữ flags/metadata để existing consumers không gãy; Dashboard dùng actual fields, không maskedHint/hasPassword làm value. Storage không thay đổi.
+
+- [ ] RED AccountService.test.ts dùng fixtures service/repo/vault:
+
+~~~ts
+it('R08 returns the saved account password for the personal Dashboard',()=>{
+  const service=createService();
+  service.create({email:'a@example.test',emailProvider:'manual',
+    passwordCapcut:'PASS-DEMO',credit:0,status:'active'});
+  expect(service.list({page:1,pageSize:50}).items[0].passwordCapcut).toBe('PASS-DEMO');
+});
+~~~
+
+EmailPurchaseService.test.ts:
+
+~~~ts
+it('R08 provides the configured email API key value',()=>{
+  storeKey('gmail94','KEY-DEMO');
+  expect(createService().getProviderConfigs().find(x=>x.provider==='gmail94')?.apiKey).toBe('KEY-DEMO');
+});
+~~~
+
+Settings controller test dùng createMockBridge/saveSpy:
+
+~~~ts
+it('R08 failed save retains the API key input',async()=>{
   const {bridge,saveSpy}=createMockBridge();
   let finish!:(v:IpcEnvelope<{success:boolean}>)=>void;
-  saveSpy.mockImplementationOnce(()=>new Promise(r=>{finish=r;}));
+  saveSpy.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
   const c=new SettingsController(bridge);await c.load();
+  const draft={action:'replace' as const,value:'KEY-DEMO'};
+  c.setSimpleDraft('gmail94',draft);
   const saving=c.save();
-  c.updateSettings(s=>({...s,browser:{...s.browser,
-    multilogin:{...s.browser.multilogin,port:54321}}}));
-  c.setSimpleDraft('gmail94',{action:'replace',value:'KEY-NEW-DEMO'});
-  finish({success:true,data:{success:true}});await saving;
-  expect(c.getState().settings.browser.multilogin.port).toBe(54321);
-  expect(c.getState().drafts.gmail94).toEqual({action:'replace',value:'KEY-NEW-DEMO'});
-  expect(c.getState().isSaved).toBe(false);
+  expect(c.getState().drafts.gmail94).toEqual(draft);
+  finish({success:false,error:{code:'ERR_PERSISTENCE_FAILED',message:'disk'}});
+  expect(await saving).toBe(false);
+  expect(c.getState().drafts.gmail94).toEqual(draft);
 });
 ~~~
 
-- [ ] GREEN editRevision tăng khi updateSettings/setSimpleDraft/setMultiloginDraft. Save chụp revision và payload. Refresh chỉ thay settings/drafts khi revision vẫn đúng; nếu user đã edit thì cập nhật statuses cần thiết nhưng giữ edits/isSaved=false. Failure giữ edits. Không dùng reset draft như biện pháp “bảo mật”.
-- [ ] Đảm bảo Dashboard hiển thị/copy plain text D00 vẫn đúng trước/sau Save. Test same revision success/isSaved, changed revision/saveagain, failure/load failure.
-- [ ] Commit: fix: preserve settings edited during pending save.
-
-## T11 — B15/B16: smoke và script SQL
-
-**Files:** scripts/check-packaged-app.mjs; scripts/__tests__/checkPackagedApp.test.ts; scripts/live-test-capcut-engine.cjs; create scripts/liveCredentials.cjs và test offline scripts/__tests__/liveCredentialsSql.test.ts.
-
-- [ ] RED fake _electron.launch trả metadata sai: firstWindow/renderer IPC không được gọi. Fake close reject phải result failure/throw, không success. Test DEFAULT_EXE bằng productName package thay vì AutoManager.exe. Trong checkPackagedApp.test.ts thêm vi, EventEmitter, _electron imports; dùng fake executable do fixture tạo và luôn dọn chính file đó:
+- [ ] Run focused R08; RED absent value/reset draft.
+- [ ] GREEN service mapping, không renderer SQL:
 
 ~~~ts
-it('B15 refuses wrong application identity before renderer access',async()=>{
-  const exe=path.join(os.tmpdir(),'smoke-identity-fixture.exe');
+// AccountService.list: lấy đúng page như cũ, rồi một batch records theo IDs.
+const result=this.repo.listAccounts(filter);
+const records=new Map(this.repo.queryAccountsForExport({
+  ids:result.items.map(item=>item.id)
+}).map(row=>[row.id,row]));
+return {
+  total:result.total,
+  items:result.items.map(item=>{
+    const value=records.get(item.id)?.passwordCapcutEncrypted;
+    return {...item,passwordCapcut:value?this.vault.decrypt(value):null};
+  })
+};
+~~~
+
+Empty page tránh query phụ nếu muốn; one batch không N+1. Đây chỉ đọc lại dữ liệu đang có, không đổi encryption/schema DB. Error đọc giá trị hiện rõ, không fallback thành dấu sao.
+
+getProviderConfigs thêm apiKey từ readApiKey(provider) khi configured, null nếu chưa cấu hình; existing readSimpleKey đã đọc đúng stored key. Update strict schemas và fixtures; không expose generic credential dump API. Dashboard columns accessor passwordCapcut render raw text; panel dùng selectedEmailProvider.apiKey. Giá trị hiện text/selectable hoặc readOnly text input, giữ layout; không reveal toggle.
+
+Settings.save không reset drafts trước await. Giữ snapshot draft/revision của save, failure giữ bản hiện tại. Success chỉ mark sent operations keep nếu revision không đổi; new edits giữ nguyên. Dashboard fetch từ backend nên success vẫn hiện key dù draft action đã keep. Validate-failure cũng giữ input để sửa, không clear toàn bộ.
+
+- [ ] GREEN service/contract/preload/render tests và actual Dashboard fixture: KEY-DEMO/PASS-DEMO đọc/copy được sau reload, proxy/custom password cũ giữ đúng; no mask/no auto-hide. Kiểm cột thực bằng renderToStaticMarkup tạo từ createDashboardColumns và panel thật, không chỉ test string trong code.
+- [ ] Existing “list never contains password” assertions đổi theo explicit personal-tool requirement; vẫn giữ Node/SQLite ở main. Không tự tháo vault hiện hữu hay migration toàn hệ thống.
+- [ ] Commit: fix: display personal Dashboard values and preserve failed-save drafts.
+
+## T7 — R09: quyết định smoke outcome sau cleanup
+
+**Files:** scripts/check-packaged-app.mjs; scripts/__tests__/checkPackagedApp.test.ts.
+
+**Interfaces:** runPackagedSmoke trả {success,failCount} như cũ; validation/launch/close errors vẫn báo thất bại. Không thay owned launch, không thêm process scanner.
+
+- [ ] RED test fake rmSync lỗi sau các kiểm tra pass. Existing test fixture dùng _electron spy, fs/temp paths; không chạy actual exe:
+
+~~~ts
+it('R09 temp cleanup failure cannot return success',async()=>{
+  const {_electron}=await import('playwright-core');
+  const exe=path.join(os.tmpdir(),'smoke-cleanup-fixture.exe');
+  const dir=path.join(os.tmpdir(),'smoke-cleanup-fixture-dir');
   fs.writeFileSync(exe,'fixture');
-  const firstWindow=vi.fn();
-  const owned={evaluate:vi.fn().mockResolvedValue({name:'wrong',isPackaged:true,
-    userData:path.join(os.tmpdir(),'wrong-profile')}),firstWindow,
-    close:vi.fn().mockResolvedValue(undefined)};
-  const launch=vi.spyOn(_electron,'launch').mockResolvedValue(owned as never);
+  let evaluations=0;
+  const page={waitForFunction:vi.fn().mockResolvedValue(undefined),
+    evaluate:vi.fn(async(_fn:unknown,arg?:unknown)=>{
+      if(arg!==undefined)return;
+      evaluations++;
+      if(evaluations===1)return{settings:true,logs:0,accounts:0};
+      if(evaluations===2)return{noRequire:true,noProcess:true};
+      return{rows:0,loi:[]};
+    })};
+  const app={evaluate:vi.fn().mockResolvedValue({
+    name:'CapCut Automation',isPackaged:true,userData:dir}),
+    firstWindow:vi.fn().mockResolvedValue(page),close:vi.fn().mockResolvedValue(undefined)};
+  const launch=vi.spyOn(_electron,'launch').mockResolvedValue(app as never);
+  const make=vi.spyOn(fs,'mkdtempSync').mockReturnValue(dir);
+  const exists=vi.spyOn(fs,'existsSync').mockReturnValue(true);
+  const remove=vi.spyOn(fs,'rmSync').mockImplementation(()=>{throw new Error('fixture locked');});
+  vi.useFakeTimers();
   try{
-    await expect(runPackagedSmoke({exePath:exe,
-      userDataDir:path.join(os.tmpdir(),'smoke-identity-profile')})).rejects.toThrow();
-    expect(firstWindow).not.toHaveBeenCalled();
-    expect(owned.close).toHaveBeenCalledTimes(1);
-  }finally{launch.mockRestore();fs.unlinkSync(exe);}
+    const run=runPackagedSmoke({exePath:exe});
+    const result=run.then(value=>value,error=>error);
+    await vi.runAllTimersAsync();
+    const outcome=await result;
+    expect(outcome instanceof Error || outcome.success===false).toBe(true);
+  }finally{
+    vi.useRealTimers();launch.mockRestore();make.mockRestore();
+    exists.mockRestore();remove.mockRestore();fs.unlinkSync(exe);
+  }
 });
 ~~~
 
-Chỉ test code dùng fake launcher nên không thực sự chạy file fixture; khi production helper thêm process()/close-event, fake phải triển khai EventEmitter tương ứng. Không biến test mismatch thành chỉ kiểm success=false sau khi đã gọi IPC.
-- [ ] GREEN resolve absolute executable từ package productName; expected exe/appPath/userData, isPackaged phải khớp. Lấy metadata từ owned main, mismatch throw trước firstWindow, không chỉ increment fail. Identity evaluate có deadline15s/child-close rejection; windows shell PID không phải Electron main PID.
-- [ ] Giữ _electron.launch owned transport, không port scan. Env fixture không VITE_DEV_SERVER_URL/ELECTRON_RUN_AS_NODE; cleanup await owned close thành công rồi mới xóa temp đã xác minh. Nếu cleanup fail → failure và giữ temp, không swallow. Count0 hợp lệ.
-- [ ] B16 sửa query theo schema hiện có:
-
-~~~sql
-SELECT service_name FROM service_credentials WHERE service_name = ?
-~~~
-
-Tách thao tác lưu thành pure helper trong scripts/liveCredentials.cjs (không app startup, không network), rồi live script gọi helper với CredentialRepository hiện có; không import toàn live script vào unit test. Helper nhận repository và payload đã chuẩn bị bởi caller hiện có, không đổi cách storage/UI:
-
-~~~js
-function insertMultiloginIfMissing(repo, payload) {
-  const existing=repo.getCredential('multilogin');
-  if(existing)return false;
-  repo.saveCredential('multilogin',payload);
-  return true;
-}
-module.exports={insertMultiloginIfMissing};
-~~~
-
-SQL test dùng Node DB in-memory hoặc better-sqlite3 đúng ABI và migration schema hiện tại; import pure helper bằng createRequire, không chạy live:
-
-~~~ts
-import {createRequire} from 'node:module';
-import Database from 'better-sqlite3';
-import {it,expect} from 'vitest';
-import {migration001} from '../../src/main/database/migrations/001_initial_schema';
-import {CredentialRepository} from '../../src/main/repositories/CredentialRepository';
-const {insertMultiloginIfMissing}=createRequire(import.meta.url)('../liveCredentials.cjs');
-it('B16 uses existing credential columns and preserves an existing record',()=>{
-  const db=new Database(':memory:');
-  try{
-    db.exec(migration001);
-    const repo=new CredentialRepository(db);
-    expect(insertMultiloginIfMissing(repo,Buffer.from('payload-A'))).toBe(true);
-    expect(insertMultiloginIfMissing(repo,Buffer.from('payload-B'))).toBe(false);
-    const row=db.prepare('SELECT encrypted_credentials FROM service_credentials WHERE service_name=?')
-      .get('multilogin') as {encrypted_credentials:Buffer};
-    expect(row.encrypted_credentials.toString()).toBe('payload-A');
-  }finally{db.close();}
-});
-~~~
-
-Không thêm id/created_at vào schema để làm code cũ chạy; không migration credentials và không ép Dashboard che giá trị. Existing repo giữ SQL đúng schema; live script đã dùng tsx/cjs nên có thể require CredentialRepository.ts như các service hiện có. RED B16 có thể thêm assertion source script không còn SELECT/INSERT dùng cột id/created_at rồi fail trước khi thay caller; test helper xác nhận đúng schema/không overwrite record. Không đưa SQL mới ra khỏi repository.
-
-- [ ] Test SQL bằng schema fixture, không chạy live script vì nó mua mail trước khi tới nhánh credentials. Test smoke missing exe/identity mismatch/closefail không GUI/network; actual artifact smoke sau permission.
-- [ ] Commit riêng: fix: validate packaged smoke identity and credential schema.
+- [ ] Run R09; RED object successtrue.
+- [ ] GREEN bỏ return và “chạy đúng” log trước finally. Capture primaryError, chạy cleanup, nếu temp remove fail tăng fail và ghi error; sau cleanup mới return/result log. Nếu app.close fail throw lỗi, giữ temp như hiện tại. Nếu cả primary và cleanup fail giữ cả hai bằng AggregateError hoặc result errors rõ, không overwrite nguyên nhân.
+- [ ] validateSmokeTarget đặt trong phạm vi cleanup temp đã tạo, để invalid exe không leak temp. Chỉ xóa đúng temp do mình tạo, không caller userData. Identity/close tests mới đã pass phải tiếp tục pass.
+- [ ] GREEN cleanup success/error, primary+cleanuperror, invalidtarget, launchreject, supplied userData không xóa, emptyDB pass.
+- [ ] Commit: fix: include cleanup failures in packaged smoke verdict.
 
 ## Gate cuối
 
-- [ ] Mỗi B-ID có RED/GREEN/AC; mục đã sửa trước khi nhận task có test chứng minh, không patch lại.
-- [ ] Happy trace UID→9actions→list→claim/reconcile vẫn nguyên; no product mission/refusal.
-- [ ] D00 đọc/copy API key/password/proxy đúng, không mask hoặc auto-clear/config migration.
-- [ ] Full Vitest độc lập, typecheck/lint/build/selectors; Electron/UI/package tests theo đúng ABI và permission.
-- [ ] Reviewer đọc source/test không chỉ count pass; giữ baseline file hashes, không commit hunks người khác.
-- [ ] [Runbook](2026-09-10-tool-bugfix-runbook.md) quy định cách bàn giao và phạm vi live riêng.
+- [ ] Chạy focused tests từng T1–T7 rồi full Vitest độc lập; không dùng số PASS baseline làm kết quả mới.
+- [ ] Typecheck/lint/build/selectors; Electron harness theo đúng ABI và quyền launch.
+- [ ] Happy path do_action/claim/op_id/order/pacing giữ nguyên; R08 text đọc/copy đúng.
+- [ ] Không migration mới: migration009 đã có giữ nguyên; R06 SQL change không sửa checksum.
+- [ ] Reviewer xác minh R01–R09 theo spec; R04 upstream stock fixture thiếu thì ghi chưa verified phần đó, không claim done.
+- [ ] Handoff theo [runbook](2026-09-10-tool-bugfix-runbook.md); không live/purchase/push/deploy ngoài quyền.

@@ -88,4 +88,143 @@ describe('Packaged smoke harness safety guards (QA-01)', () => {
       try { fs.unlinkSync(exe); } catch { /* ignore */ }
     }
   });
+
+  it('R09 temp cleanup failure cannot return success', async () => {
+    const { _electron } = await import('playwright-core');
+    const exe = path.join(os.tmpdir(), 'smoke-cleanup-fixture.exe');
+    const dir = path.join(os.tmpdir(), 'smoke-cleanup-fixture-dir');
+    fs.writeFileSync(exe, 'fixture');
+    let evaluations = 0;
+    const page = {
+      waitForFunction: vi.fn().mockResolvedValue(undefined),
+      evaluate: vi.fn(async (_fn: unknown, arg?: unknown) => {
+        if (arg !== undefined) return;
+        evaluations++;
+        if (evaluations === 1) return { settings: true, logs: 0, accounts: 0 };
+        if (evaluations === 2) return { noRequire: true, noProcess: true };
+        return { rows: 0, loi: [] };
+      })
+    };
+    const app = {
+      evaluate: vi.fn().mockResolvedValue({
+        name: 'CapCut Automation',
+        isPackaged: true,
+        userData: dir
+      }),
+      firstWindow: vi.fn().mockResolvedValue(page),
+      close: vi.fn().mockResolvedValue(undefined)
+    };
+    const launch = vi.spyOn(_electron, 'launch').mockResolvedValue(app as never);
+    const make = vi.spyOn(fs, 'mkdtempSync').mockReturnValue(dir);
+    const exists = vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    const remove = vi.spyOn(fs, 'rmSync').mockImplementation(() => {
+      throw new Error('fixture locked');
+    });
+    vi.useFakeTimers();
+    try {
+      const run = runPackagedSmoke({ exePath: exe });
+      const result = run.then(
+        (value) => value,
+        (error) => error
+      );
+      await vi.runAllTimersAsync();
+      const outcome = await result;
+      expect(outcome instanceof Error || outcome.success === false).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      launch.mockRestore();
+      make.mockRestore();
+      exists.mockRestore();
+      remove.mockRestore();
+      try { fs.unlinkSync(exe); } catch { /* ignore */ }
+    }
+  });
+
+  it('R09 returns success true and removes temp directory on clean run', async () => {
+    const { _electron } = await import('playwright-core');
+    const exe = path.join(os.tmpdir(), 'smoke-clean-fixture.exe');
+    const dir = path.join(os.tmpdir(), 'smoke-clean-fixture-dir');
+    fs.writeFileSync(exe, 'fixture');
+    let evaluations = 0;
+    const page = {
+      waitForFunction: vi.fn().mockResolvedValue(undefined),
+      evaluate: vi.fn(async (_fn: unknown, arg?: unknown) => {
+        if (arg !== undefined) return;
+        evaluations++;
+        if (evaluations === 1) return { settings: true, logs: 0, accounts: 0 };
+        if (evaluations === 2) return { noRequire: true, noProcess: true };
+        return { rows: 0, loi: [] };
+      })
+    };
+    const app = {
+      evaluate: vi.fn().mockResolvedValue({
+        name: 'CapCut Automation',
+        isPackaged: true,
+        userData: dir
+      }),
+      firstWindow: vi.fn().mockResolvedValue(page),
+      close: vi.fn().mockResolvedValue(undefined)
+    };
+    const launch = vi.spyOn(_electron, 'launch').mockResolvedValue(app as never);
+    const make = vi.spyOn(fs, 'mkdtempSync').mockReturnValue(dir);
+    const exists = vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    const remove = vi.spyOn(fs, 'rmSync').mockReturnValue(undefined);
+    vi.useFakeTimers();
+    try {
+      const run = runPackagedSmoke({ exePath: exe });
+      await vi.runAllTimersAsync();
+      const outcome = await run;
+      expect(outcome).toEqual({ success: true, failCount: 0 });
+      expect(remove).toHaveBeenCalledWith(dir, { recursive: true, force: true });
+    } finally {
+      vi.useRealTimers();
+      launch.mockRestore();
+      make.mockRestore();
+      exists.mockRestore();
+      remove.mockRestore();
+      try { fs.unlinkSync(exe); } catch { /* ignore */ }
+    }
+  });
+
+  it('R09 preserves caller-supplied userDataDir on exit', async () => {
+    const { _electron } = await import('playwright-core');
+    const exe = path.join(os.tmpdir(), 'smoke-caller-fixture.exe');
+    const callerDir = path.join(os.tmpdir(), 'smoke-caller-user-data');
+    fs.writeFileSync(exe, 'fixture');
+    let evaluations = 0;
+    const page = {
+      waitForFunction: vi.fn().mockResolvedValue(undefined),
+      evaluate: vi.fn(async (_fn: unknown, arg?: unknown) => {
+        if (arg !== undefined) return;
+        evaluations++;
+        if (evaluations === 1) return { settings: true, logs: 0, accounts: 0 };
+        if (evaluations === 2) return { noRequire: true, noProcess: true };
+        return { rows: 0, loi: [] };
+      })
+    };
+    const app = {
+      evaluate: vi.fn().mockResolvedValue({
+        name: 'CapCut Automation',
+        isPackaged: true,
+        userData: callerDir
+      }),
+      firstWindow: vi.fn().mockResolvedValue(page),
+      close: vi.fn().mockResolvedValue(undefined)
+    };
+    const launch = vi.spyOn(_electron, 'launch').mockResolvedValue(app as never);
+    const remove = vi.spyOn(fs, 'rmSync');
+    vi.useFakeTimers();
+    try {
+      const run = runPackagedSmoke({ exePath: exe, userDataDir: callerDir });
+      await vi.runAllTimersAsync();
+      const outcome = await run;
+      expect(outcome).toEqual({ success: true, failCount: 0 });
+      expect(remove).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      launch.mockRestore();
+      remove.mockRestore();
+      try { fs.unlinkSync(exe); } catch { /* ignore */ }
+    }
+  });
 });

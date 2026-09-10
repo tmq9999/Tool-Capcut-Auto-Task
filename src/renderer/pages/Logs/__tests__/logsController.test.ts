@@ -320,4 +320,102 @@ describe('LogsController', () => {
     expect(c.getState().error).toBe('failed to clear');
     expect(c.getState().logs).toEqual(initialLogs);
   });
+
+  it('R07 still applies clear cutoff when load is requested during clear', async () => {
+    let finishClear!: (v: Awaited<ReturnType<ILogsBridge['logs']['clear']>>) => void;
+    bridge.rows = [];
+    bridge.logs.clear = () => new Promise((resolve) => { finishClear = resolve; });
+    const c = new LogsController(bridge);
+    c.attach();
+    const clearing = c.clear();
+    const loading = c.load({ level: 'ALL' });
+    bridge.push(log('pre', { streamSequence: 5 }));
+    bridge.push(log('post', { streamSequence: 6 }));
+    finishClear({ success: true, data: { success: true, clearedThrough: 5 } });
+    expect(await clearing).toBe(true);
+    await loading;
+    bridge.push(log('late-pre', { streamSequence: 4 }));
+    expect(c.getState().logs.map((x) => x.id)).toEqual(['post']);
+    expect(c.getState().isLoading).toBe(false);
+  });
+
+  it('R07 failed clear preserves old and intervening live rows', async () => {
+    let finish!: (v: Awaited<ReturnType<ILogsBridge['logs']['clear']>>) => void;
+    const c = new LogsController(bridge);
+    c.attach();
+    await c.load();
+    bridge.logs.clear = () => new Promise((resolve) => { finish = resolve; });
+    const clearing = c.clear();
+    bridge.push(log('during', { streamSequence: 2 }));
+    finish({ success: false, error: { code: 'ERR_PERSISTENCE_FAILED', message: 'disk' } });
+    expect(await clearing).toBe(false);
+    expect(c.getState().logs.map((x) => x.id)).toEqual(['during', 'log-1']);
+    expect(c.getState().isLoading).toBe(false);
+  });
+
+  it('R07 duplicate clear shares single IPC call', async () => {
+    let finishClear!: (v: Awaited<ReturnType<ILogsBridge['logs']['clear']>>) => void;
+    bridge.logs.clear = () => {
+      bridge.cleared += 1;
+      return new Promise((resolve) => { finishClear = resolve; });
+    };
+    const c = new LogsController(bridge);
+    const clear1 = c.clear();
+    const clear2 = c.clear();
+    expect(bridge.cleared).toBe(1);
+    finishClear({ success: true, data: { success: true } });
+    expect(await clear1).toBe(true);
+    expect(await clear2).toBe(true);
+  });
+
+  it('R07 filter changes during clear applies to clear survivors and latest load', async () => {
+    let finishClear!: (v: Awaited<ReturnType<ILogsBridge['logs']['clear']>>) => void;
+    bridge.rows = [log('db-err', { status: 'ERROR' }), log('db-info', { status: 'INFO' })];
+    bridge.logs.list = async (filter: unknown) => {
+      bridge.lastFilter = filter;
+      const query = filter as { level?: string } | undefined;
+      const items = bridge.rows.filter((r) => !query?.level || r.status === query.level);
+      return { success: true, data: { items, total: items.length } };
+    };
+    bridge.logs.clear = () => new Promise((resolve) => { finishClear = resolve; });
+    const c = new LogsController(bridge);
+    c.attach();
+    const clearing = c.clear();
+    const load1 = c.load({ level: 'INFO' });
+    const load2 = c.load({ level: 'ERROR' });
+    bridge.push(log('push-info', { status: 'INFO', streamSequence: 10 }));
+    bridge.push(log('push-err', { status: 'ERROR', streamSequence: 11 }));
+    finishClear({ success: true, data: { success: true, clearedThrough: 5 } });
+    expect(await clearing).toBe(true);
+    await load1;
+    await load2;
+    // Survivor was push-err (level ERROR matches latest filter).
+    // db-err from list also matches ERROR.
+    expect(c.getState().logs.map((x) => x.id)).toEqual(['push-err', 'db-err']);
+  });
+
+  it('R07 clear rejection restores logs and intervening pushes', async () => {
+    const c = new LogsController(bridge);
+    c.attach();
+    await c.load();
+    bridge.logs.clear = () => Promise.reject(new Error('IPC crash'));
+    const clearing = c.clear();
+    bridge.push(log('push-crash', { streamSequence: 2 }));
+    expect(await clearing).toBe(false);
+    expect(c.getState().logs.map((x) => x.id)).toEqual(['push-crash', 'log-1']);
+    expect(c.getState().error).toBe('IPC crash');
+  });
+
+  it('R07 live entries pushed while paused during clear are discarded', async () => {
+    let finishClear!: (v: Awaited<ReturnType<ILogsBridge['logs']['clear']>>) => void;
+    bridge.logs.clear = () => new Promise((resolve) => { finishClear = resolve; });
+    const c = new LogsController(bridge);
+    c.attach();
+    const clearing = c.clear();
+    c.setPaused(true);
+    bridge.push(log('paused-push', { streamSequence: 10 }));
+    finishClear({ success: true, data: { success: true, clearedThrough: 5 } });
+    await clearing;
+    expect(c.getState().logs).toEqual([]);
+  });
 });

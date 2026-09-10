@@ -26,6 +26,7 @@ import type { RunTasksResult, TaskSnapshotSummary, SnapshotTaskSummary } from '.
 import { paceGapMs } from './runTasks';
 import { abortableDelay, withinDeadline, boundedDomRead, isDomReadTimeout } from './cancellation';
 import { foregroundPage } from './human';
+import { TaskEvidenceError } from './TaskEvidenceError';
 
 export const LEAF_TASKS = [
   'capcut_web_pwa_install',
@@ -202,6 +203,19 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
   const attemptedKeys = new Set<string>();
   let latestSettledAt = invocationStartedAt;
 
+  async function preserveTaskEvidence<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error: unknown) {
+      signal.throwIfAborted();
+      if (error instanceof TaskEvidenceError || proofMemory.size === 0) throw error;
+      throw new TaskEvidenceError(
+        error instanceof Error ? error.message : String(error),
+        [...proofMemory].map(([key, proof]) => ({ key, proof }))
+      );
+    }
+  }
+
   // Bước 2: Bắn do_action cho 9 nhiệm vụ lá
   for (const actionKey of LEAF_TASKS) {
     signal.throwIfAborted();
@@ -210,40 +224,42 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
     log(`   ⚡ Gửi do_action: ${actionKey}...`);
 
     signal.throwIfAborted();
-    const result = await withinDeadline(
-      page.evaluate(
-        async ({ actionKey, opId }) => {
-          try {
-            const r = await fetch(
-              'https://edit-api-sg.capcut.com/luckycat/i18n/capcut/task/v1/do_action?aid=348188&device_platform=web',
-              {
-                method: 'POST',
-                credentials: 'include',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ action_key: actionKey, op_id: opId })
-              }
-            );
-            const d: unknown = await r.json();
-            const body = d && typeof d === 'object' ? (d as Record<string, unknown>) : {};
-            const numeric = typeof body.err_no === 'number' && Number.isInteger(body.err_no);
-            return {
-              errNo: r.ok && numeric ? (body.err_no as number) : -1,
-              errMsg:
-                typeof body.err_tips === 'string'
-                  ? body.err_tips
-                  : r.ok && numeric
-                    ? ''
-                    : 'RESPONSE_INVALID',
-              httpStatus: r.status
-            };
-          } catch (e: unknown) {
-            return { errNo: -1, errMsg: (e as Error)?.message || String(e), httpStatus: 0 };
-          }
-        },
-        { actionKey, opId }
-      ),
-      30000,
-      signal
+    const result = await preserveTaskEvidence(() =>
+      withinDeadline(
+        page.evaluate(
+          async ({ actionKey, opId }) => {
+            try {
+              const r = await fetch(
+                'https://edit-api-sg.capcut.com/luckycat/i18n/capcut/task/v1/do_action?aid=348188&device_platform=web',
+                {
+                  method: 'POST',
+                  credentials: 'include',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ action_key: actionKey, op_id: opId })
+                }
+              );
+              const d: unknown = await r.json();
+              const body = d && typeof d === 'object' ? (d as Record<string, unknown>) : {};
+              const numeric = typeof body.err_no === 'number' && Number.isInteger(body.err_no);
+              return {
+                errNo: r.ok && numeric ? (body.err_no as number) : -1,
+                errMsg:
+                  typeof body.err_tips === 'string'
+                    ? body.err_tips
+                    : r.ok && numeric
+                      ? ''
+                      : 'RESPONSE_INVALID',
+                httpStatus: r.status
+              };
+            } catch (e: unknown) {
+              return { errNo: -1, errMsg: (e as Error)?.message || String(e), httpStatus: 0 };
+            }
+          },
+          { actionKey, opId }
+        ),
+        30000,
+        signal
+      )
     );
     signal.throwIfAborted();
 
@@ -285,48 +301,50 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
 
   const fetchTaskList = async (): Promise<FetchTaskResult> => {
     signal.throwIfAborted();
-    const evaluated = await withinDeadline(
-      page.evaluate(async () => {
-        try {
-          const r = await fetch('https://edit-api-sg.capcut.com/luckycat/i18n/capcut/task/v1/task_list', {
-            method: 'POST',
-            credentials: 'include',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ scene: 'capcut_web_task' })
-          });
-          const d: unknown = await r.json();
-          const body = d && typeof d === 'object' ? (d as Record<string, unknown>) : {};
-          const dataObj = body.data && typeof body.data === 'object' ? (body.data as Record<string, unknown>) : {};
-          const hasTaskList = Array.isArray(dataObj.task_list);
-          const rawList = hasTaskList ? dataObj.task_list : [];
-          const numeric = typeof body.err_no === 'number' && Number.isInteger(body.err_no);
-          const valid = r.ok && numeric && body.err_no === 0 && hasTaskList;
-          return {
-            valid,
-            tasks: rawList,
-            errNo: numeric ? (body.err_no as number) : -1,
-            errMsg:
-              typeof body.err_tips === 'string'
-                ? body.err_tips
-                : typeof body.message === 'string'
-                  ? body.message
-                  : '',
-            httpStatus: r.status,
-            observedAt: Date.now()
-          };
-        } catch (e: unknown) {
-          return {
-            valid: false,
-            tasks: [],
-            errNo: -1,
-            error: (e as Error)?.message || String(e),
-            httpStatus: 0,
-            observedAt: Date.now()
-          };
-        }
-      }),
-      30000,
-      signal
+    const evaluated = await preserveTaskEvidence(() =>
+      withinDeadline(
+        page.evaluate(async () => {
+          try {
+            const r = await fetch('https://edit-api-sg.capcut.com/luckycat/i18n/capcut/task/v1/task_list', {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ scene: 'capcut_web_task' })
+            });
+            const d: unknown = await r.json();
+            const body = d && typeof d === 'object' ? (d as Record<string, unknown>) : {};
+            const dataObj = body.data && typeof body.data === 'object' ? (body.data as Record<string, unknown>) : {};
+            const hasTaskList = Array.isArray(dataObj.task_list);
+            const rawList = hasTaskList ? dataObj.task_list : [];
+            const numeric = typeof body.err_no === 'number' && Number.isInteger(body.err_no);
+            const valid = r.ok && numeric && body.err_no === 0 && hasTaskList;
+            return {
+              valid,
+              tasks: rawList,
+              errNo: numeric ? (body.err_no as number) : -1,
+              errMsg:
+                typeof body.err_tips === 'string'
+                  ? body.err_tips
+                  : typeof body.message === 'string'
+                    ? body.message
+                    : '',
+              httpStatus: r.status,
+              observedAt: Date.now()
+            };
+          } catch (e: unknown) {
+            return {
+              valid: false,
+              tasks: [],
+              errNo: -1,
+              error: (e as Error)?.message || String(e),
+              httpStatus: 0,
+              observedAt: Date.now()
+            };
+          }
+        }),
+        30000,
+        signal
+      )
     );
     signal.throwIfAborted();
 
@@ -389,16 +407,18 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
       for (const closeSel of ['button[aria-label="Close"]', 'button:has-text("Skip")', 'button:has-text("Got it")']) {
         signal.throwIfAborted();
         const btn = page.locator(closeSel).first();
-        const visible = await boundedDomRead(
-          () => btn.isVisible(),
-          'http-task-popup:visible',
-          1000,
-          signal
-        ).catch((error) => {
-          signal.throwIfAborted();
-          if (isDomReadTimeout(error)) throw error;
-          return false;
-        });
+        const visible = await preserveTaskEvidence(() =>
+          boundedDomRead(
+            () => btn.isVisible(),
+            'http-task-popup:visible',
+            1000,
+            signal
+          ).catch((error) => {
+            signal.throwIfAborted();
+            if (isDomReadTimeout(error)) throw error;
+            return false;
+          })
+        );
         if (visible) {
           signal.throwIfAborted();
           if (input.ui) {
@@ -412,16 +432,18 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
       // Click icon task drawer nếu có
       signal.throwIfAborted();
       const taskEntry = page.locator('[data-id="TitleBarTaskList"], [class*="Lv_Task-wrapper"], button.entry-').first();
-      const entryVisible = await boundedDomRead(
-        () => taskEntry.isVisible(),
-        'http-task-drawer:visible',
-        1000,
-        signal
-      ).catch((error) => {
-        signal.throwIfAborted();
-        if (isDomReadTimeout(error)) throw error;
-        return false;
-      });
+      const entryVisible = await preserveTaskEvidence(() =>
+        boundedDomRead(
+          () => taskEntry.isVisible(),
+          'http-task-drawer:visible',
+          1000,
+          signal
+        ).catch((error) => {
+          signal.throwIfAborted();
+          if (isDomReadTimeout(error)) throw error;
+          return false;
+        })
+      );
       if (entryVisible) {
         signal.throwIfAborted();
         if (input.ui) {
@@ -460,34 +482,36 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
     log(`   🎁 Phát hiện ${claimable.length} nhiệm vụ đang chờ nhận thưởng (vòng ${claimPass}) — kích hoạt claim...`);
     for (const t of claimable) {
       signal.throwIfAborted();
-      const grantRes = await withinDeadline(
-        page.evaluate(async (taskKey) => {
-          try {
-            const r = await fetch('https://edit-api-sg.capcut.com/luckycat/i18n/capcut/task/v1/grant_reward', {
-              method: 'POST',
-              credentials: 'include',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ task_key: taskKey, scene: 'capcut_web_task' })
-            });
-            const d: unknown = await r.json();
-            const body = d && typeof d === 'object' ? (d as Record<string, unknown>) : {};
-            const numeric = typeof body.err_no === 'number' && Number.isInteger(body.err_no);
-            return {
-              errNo: r.ok && numeric ? (body.err_no as number) : -1,
-              errMsg:
-                typeof body.err_tips === 'string'
-                  ? body.err_tips
-                  : r.ok && numeric
-                    ? ''
-                    : 'RESPONSE_INVALID',
-              httpStatus: r.status
-            };
-          } catch (e: unknown) {
-            return { errNo: -1, errMsg: (e as Error)?.message || String(e), httpStatus: 0 };
-          }
-        }, t.task_key),
-        30000,
-        signal
+      const grantRes = await preserveTaskEvidence(() =>
+        withinDeadline(
+          page.evaluate(async (taskKey) => {
+            try {
+              const r = await fetch('https://edit-api-sg.capcut.com/luckycat/i18n/capcut/task/v1/grant_reward', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ task_key: taskKey, scene: 'capcut_web_task' })
+              });
+              const d: unknown = await r.json();
+              const body = d && typeof d === 'object' ? (d as Record<string, unknown>) : {};
+              const numeric = typeof body.err_no === 'number' && Number.isInteger(body.err_no);
+              return {
+                errNo: r.ok && numeric ? (body.err_no as number) : -1,
+                errMsg:
+                  typeof body.err_tips === 'string'
+                    ? body.err_tips
+                    : r.ok && numeric
+                      ? ''
+                      : 'RESPONSE_INVALID',
+                httpStatus: r.status
+              };
+            } catch (e: unknown) {
+              return { errNo: -1, errMsg: (e as Error)?.message || String(e), httpStatus: 0 };
+            }
+          }, t.task_key),
+          30000,
+          signal
+        )
       );
       signal.throwIfAborted();
 
@@ -508,30 +532,34 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
     if (typeof page.locator === 'function') {
       signal.throwIfAborted();
       const claimButtons = page.locator('button').filter({ hasText: /^Claim$/i });
-      const claimCount = await boundedDomRead(
-        () => claimButtons.count(),
-        'http-task-claim:count',
-        1000,
-        signal
-      ).catch((error) => {
-        signal.throwIfAborted();
-        if (isDomReadTimeout(error)) throw error;
-        return 0;
-      });
+      const claimCount = await preserveTaskEvidence(() =>
+        boundedDomRead(
+          () => claimButtons.count(),
+          'http-task-claim:count',
+          1000,
+          signal
+        ).catch((error) => {
+          signal.throwIfAborted();
+          if (isDomReadTimeout(error)) throw error;
+          return 0;
+        })
+      );
       if (claimCount > 0) {
         for (let i = 0; i < claimCount; i++) {
           signal.throwIfAborted();
           const btn = claimButtons.nth(i);
-          const btnVisible = await boundedDomRead(
-            () => btn.isVisible(),
-            'http-task-claim:visible',
-            1000,
-            signal
-          ).catch((error) => {
-            signal.throwIfAborted();
-            if (isDomReadTimeout(error)) throw error;
-            return false;
-          });
+          const btnVisible = await preserveTaskEvidence(() =>
+            boundedDomRead(
+              () => btn.isVisible(),
+              'http-task-claim:visible',
+              1000,
+              signal
+            ).catch((error) => {
+              signal.throwIfAborted();
+              if (isDomReadTimeout(error)) throw error;
+              return false;
+            })
+          );
           if (btnVisible) {
             signal.throwIfAborted();
             if (input.ui) {

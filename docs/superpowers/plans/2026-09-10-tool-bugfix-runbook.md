@@ -1,24 +1,19 @@
-# Runbook Antigravity — sửa bug ToolCapCut
+# Runbook Antigravity — hoàn tất các lỗi còn lại
 
-## 1. Yêu cầu cố định
-
-Tool cá nhân. API key/password/proxy cần hiển thị rõ trên Dashboard để xem, copy, sửa. Đây không phải bug; không thêm mask/reveal, không tự ẩn/xóa cấu hình và không làm lại hệ thống credential storage.
-
-Giữ flow:
-browser session → user ID →9do_action →task_list →claim →đối soát.
-Không product_mission, không media-artifact gate, không blanket refusal.
-
-Đọc:
+## 1. Đọc và giữ đúng phạm vi
 
 - [Spec](../specs/2026-09-10-tool-bugfix-spec.md)
 - [Plan](2026-09-10-tool-bugfix-plan.md)
-- AGENTS.md, rồi dùng Superpowers using-superpowers / systematic-debugging / test-driven-development / verification-before-completion.
+- AGENTS.md và Superpowers using-superpowers.
 
-Chỉ có ba tài liệu trong bộ bàn giao này. Các task tập trung sửa bug được review, không thêm project phụ.
+Chỉ ba tài liệu này là bộ bàn giao hiện tại. Dùng systematic-debugging, TDD và verification-before-completion khi triển khai. Không thêm report đính chính nhiều tầng.
 
-## 2. Baseline
+Flow cố định: browser → user ID →9do_action →task_list →claim →đối soát.
+API key/password/proxy cần hiện text rõ để xem/copy/sửa. Không product_mission/media gate, blanket refusal, mask/reveal, auto-hide, auto-clear hoặc credential-storage redesign.
 
-Review gần nhất: HEAD5007596 +45files dirty; test 1.972/1.972 với4workers, typecheck/lint/build,89selectors,Electron harness PASS. Đó là số đo trước patch mới, không dùng làm nghiệm thu sau triển khai.
+## 2. Baseline và quyền
+
+Mốc lúc viết: ebf8b0a5dd0522f862d187f897b4d288e41316bc. Lần review đã có2.002tests/162files, typecheck/lint/build,89selectors,Electron harness PASS; phải chạy lại sau patch.
 
 ~~~powershell
 git status --short
@@ -26,88 +21,96 @@ git rev-parse HEAD
 git diff --stat
 ~~~
 
-Ghi HEAD và hashes các file sẽ sửa. Giữ toàn bộ edits có sẵn; không reset/stash/checkout để làm sạch. Worktree chỉ ở HEAD sẽ thiếu dirty patch Antigravity: cần chuyển đúng baseline được owner giao trước khi làm. Không stage git add toàn repo.
+Ghi hashes file task. Nếu source khác spec thì đọc diff và tái hiện lại, không patch theo số dòng cũ. Giữ hunks của người dùng; không reset/stash/checkout để ép về baseline. Khi cần worktree, mang đúng source snapshot được giao chứ không bỏ dirty changes.
 
-Source đổi đồng thời → đọc lại diff/rebaseline, không patch theo số dòng cũ. Findings không còn tái hiện thì ghi already-fixed + test và đi tiếp.
+Lượt viết tài liệu không triển khai source. Khi được giao thực thi, sửa theo plan; live calls, mua mail, trial activation, commit/push/merge/deploy là quyền riêng. Tests chỉ fixture. Không dùng API key/password thật làm test payload hoặc gửi chúng sang dịch vụ ngoài.
 
-## 3. Thứ tự và phân công
+## 3. Hàng đợi
 
-| Wave | Task | Lỗi | Files có thể tranh chấp |
+| Thứ tự | Plan | ID | Kết quả |
 |---|---|---|---|
-| 0 | T0 | D00 hiển thị rõ | Dashboard/shared DTO nếu còn masked |
-| 1 | T1 | B01 mua lặp | DongVanProvider/EmailPurchaseService tests |
-| 2 | T2/T3 | B02/B03/B04 ownership | AutomationRunService, ProxyLeaseManager, LazyProxyLeaseSource |
-| 3 | T4 | B05/B06 mailbox recovery | EmailPurchaseService và ledger read types |
-| 4 | T5/T6 | B08/B09/B10/B11 | httpTasks.ts, chạy tuần tự cùng một owner |
-| 5 | T7 | B07 không mất pending proof | engine/run service/progress repo/migration |
-| 6 | T8/T9/T10 | B12/B13/B14 UI data races | Accounts, Logs, Settings controllers |
-| 7 | T11 | B15/B16 tooling | packaged smoke/live script SQL |
-| Cuối | gate | Toàn bộ | integration reviewer |
+| 1 | T1 | R01, R02, R03 | Paid row bền trước observer; CAS/settlement fail không giao/leak reservation |
+| 2 | T2 | R04 | Fenced stock retry đúng proof/attempt/approval; normal restock không đổi |
+| 3A | T3 | R05 | Thrown await mang accepted proofs, không thêm replay |
+| 3B | T4 | R06 | SQL upsert chỉ thay bằng proof mới hơn |
+| 4A | T5 | R07 | Clear độc lập load, cutoff không mất, live rows không rơi |
+| 4B | T6 | R08 | Dashboard có actual value; Save fail còn input |
+| 5 | T7 | R09 | Smoke verdict gồm cleanup, không báo success sớm |
+| Cuối | Gate | Tất cả | Test/review/không đổi happy path |
 
-T2 và T7 cùng AutomationRunService không sửa đồng thời. T1/T4 không sửa EmailPurchaseService chồng nhau. Có thể chạy runtime và UI song song khi file tách biệt. Mỗi bug một commit khi được phép, không gom sửa ngoài phạm vi.
+T1/T2 cùng EmailPurchaseService phải tuần tự. T3/T4 khác files có thể song song. T5/T6 khác controller có thể song song; shared contract file phải một owner. Một task là một patch review được, không gom tất cả thành một diff không truy vết.
 
-## 4. Mỗi task làm đúng một vòng
+## 4. Chu trình từng task
 
-1. Đọc phần spec tương ứng, xác nhận repro trên baseline hiện tại.
-2. Viết test hồi quy có tên Bxx; chạy để thấy RED đúng lỗi.
-3. Sửa tối thiểu như plan, giữ happy behavior.
-4. Chạy GREEN focused + tests lân cận; typecheck khi đổi type/IPC.
-5. Reviewer kiểm code và AC, không chỉ lời báo “test pass”.
-6. Ghi checkpoint; commit scoped nếu execution request cho phép.
+1. Xác nhận bug còn bằng fixture trên source hiện tại.
+2. Thêm test Rxx và chạy RED. ABI mismatch hoặc missing tool không tính RED logic.
+3. Sửa nhỏ đúng boundary; không rewrite flow để test pass.
+4. Run GREEN focused + tests lân cận.
+5. Reviewer kiểm spec AC, source diff và request/resource trace.
+6. Commit scoped chỉ khi được phép; rồi task kế tiếp.
 
 Mẫu checkpoint:
 
 ~~~text
-ID:
-Files/hunks:
-Baseline:
-Repro actual / expected:
-Root cause:
+ID / task:
+HEAD + changed files:
+Repro / root cause:
 RED command + assertion:
-GREEN command + counts:
-Happy flow / Dashboard plaintext still correct:
-Review:
-Remaining:
+GREEN command + result:
+Happy path unchanged:
+API key/password visible as requested:
+Reviewer / issues remaining:
+Next gate:
 ~~~
 
-Không thêm gate “phải mã hóa/hide credential” hay “phải tạo product mission” vào checkpoint.
+## 5. Gate nghiệp vụ quan trọng
 
-## 5. Điểm phải kiểm kỹ
+### R01–R03
 
-### Mua mail
+Có paid response thì count đúng và persist trước callback có thể lỗi. Settlement/observer/OAuth/CAS/abort/delivery phải cùng cleanup boundary. Observer lỗi dừng session nhưng row còn. Không delete mailbox, reset binding, refund hoặc tự mua lại. CAS false không thể trả reservation usable.
 
-Malformed success không có order_code vẫn phải ambiguous, không mua lặp. Explicit stock được polling đúng cấu hình. Không xóa/reset UNKNOWN hay refund approval để làm test xanh.
+Kiểm cả Gmail và DongVan. Test chỉ reuse thành công không đủ chứng minh fresh-purchase error path.
 
-Mailbox đã bind account A: báo đúng account A trước tạo B. Không tự resume/signup lại; không đổi immutable binding hoặc mua mailbox khác. Lookup/decrypt/API config/OAuth/CAS fail trả reservation, row đã mua còn.
+### R04
 
-### Proxy/account owner
+Fenced diagnostic mode có approval units riêng với local purchase stats. Chỉ stock có chứng cứ no-effect được settle; retry mới có identity mới và còn unit. Không đánh đồng mọi HTTP400/429/status:false với stock.
 
-Test deferred release, stale release sau successor, manager configure đang giữ lease, stop khi proxy cleanup pending. Kết thúc browser chưa đồng nghĩa account hết owned; token tới completion. Không tự Stop khi Delete.
+Nếu chưa có raw provider fixture xác thực stock marker, ghi upstream-classification gate chưa verified. Unit với ConfirmedOutOfStockError chỉ chứng minh coordinator logic, không chứng minh provider production nhận đúng shape. Không đoán vendor codes và không chạy billable call để lấy fixture khi chưa có quyền. Normal restock behavior vẫn giữ nguyên.
 
-### HTTP task
+### R05–R06
 
-Strict response container/freshness/current proof; server status4 hợp lệ không buộc current proof hoặc product mission. Không thêm request/pacing để làm timestamp đẹp. Invalid snapshot có pending proof phải lưu pending-only, không tạo fake receipt. DOM reads phụ trợ cũng phải bị Stop cắt chờ.
+Accepted proofs sống qua non-abort errors bằng TaskEvidenceError đang có. Wrapper không chạm checkpoint persistence error và không bịa proof cho request timed-out. Stop vẫn stopped; không thêm continue/recycle/request.
 
-### UI
+R06 giữ newer record trên older/equal timestamp, không thêm schema. Migration009 đã được triển khai, không sửa checksum hoặc làm thêm migration để chữa upsert một dòng.
 
-Page/filter request token; export All dùng global total, Filtered dùng filtered total. Clear invalidates preclear loads, giữ đúng live events theo cutoff nếu cần. Settings save revision không làm mất edits mới; API key/password đang nhập và hiển thị không được auto-wipe.
+### R07
 
-### Tooling
+Test sequence: clear đang chờ → filter/load mới → backend cutoff → postclear unflushed push → late preclear push. Cutoff phải áp dù list token đã đổi. Failure giữ previous+new rows, không auto retry delete. Repeated Clear chỉ1IPC.
 
-Packaged default là CapCut Automation.exe theo manifest. Identity mismatch trước IPC phải dừng; close/cleanup error không success. SQL live harness phải khớp schema, kiểm bằng DB fixture, không chạy script mua mail để test câu SQL.
+Không thêm framework; tận dụng streamSequence/clearedThrough đã có. Buffers bounded, source-of-truth history không phải mọi row từng có trên UI.
 
-## 6. Kiểm tra và môi trường
+### R08
 
-Một owner điều phối native ABI. Khi bắt đầu ghi nhận Node/Electron versions; đừng coi require package là native SQLite đã load:
+Fixture KEY-DEMO/PASS-DEMO/proxy-demo phải đọc/copy được trên Dashboard sau save/load. Chỉ presence flags/dấu sao là chưa đạt. Sửa mapping/DTO nhỏ qua service/main hiện có; không renderer SQLite, không storage migration.
+
+Save failure không xóa draft và new edits trong lúc chờ không bị refresh đè. Success có thể đặt operation keep nhưng Dashboard vẫn lấy value thực từ backend. Không dùng lý do bảo mật để che giá trị người dùng yêu cầu.
+
+### R09
+
+Kết luận smoke sau app close/temp cleanup. Fake cleanup error phải failure, không result object cũ success. Giữ primary error và cleanup error; không kill process khác. Count0 hợp lệ. Không chạy old fixed-port scanner.
+
+## 6. Kiểm chứng tuần tự
+
+Một owner điều phối native ABI; Node tests và Electron harness không rebuild cùng lúc.
 
 ~~~powershell
 node --version
 node -e "const D=require('better-sqlite3');const d=new D(':memory:');console.log(process.versions.modules);d.close();"
 ~~~
 
-ABI mismatch là lỗi môi trường, không tính RED chức năng. Rebuild theo script được phép, không sửa npm global policy. Không chạy DB tests Node đồng thời với rebuild/harness Electron. Trả addon về runtime ban đầu/thống nhất sau cùng.
+Node/Electron ABI khác nhau. Dùng project rebuild sau khi có quyền; không đổi npm global policy. Sau cùng khôi phục ABI runtime đã thống nhất như lúc bắt đầu.
 
-Sau các focused tests:
+Sau focused tests:
 
 ~~~powershell
 node node_modules/vitest/vitest.mjs run --maxWorkers=4
@@ -118,51 +121,48 @@ npm run selectors
 git diff --check
 ~~~
 
-Dùng4workers để giữ tải hợp lý như lượt review; không tăng timeout/heap tùy tiện để giấu loop. Không skip mới. Nếu test mặc định vẫn timeout, ghi riêng và truy nguyên tải/import, không báo gate đó ổn định.
+Không full build/test song song nếu máy tải cao. Không skip để báo xanh, không tăng heap/timeout nhằm che loop. Test count chỉ là phạm vi, không thay AC.
 
-Sau đúng ABI và quyền launch:
+Sau đúng ABI/quyền launch:
 
 ~~~powershell
 npm run test:electron
 ~~~
 
-UI interaction cases như page change/filter/Clear/save pending phải dùng fixture dữ liệu giả trên component thực khi cần, không chỉ test helper. Dashboard assertion: KEY-DEMO/PASS-DEMO hiển thị/copy chính xác, không dấu sao hoặc tự xóa sau refresh.
+Dashboard và Logs cần fixture UI/component thật khi kiểm copy/value và interaction races. Không chỉ test helper. Fixtures dùng userData tạm và không provider thật.
 
-Packaged smoke chạy sau khi T11 fake ownership tests đã GREEN và được phép build/launch:
+Package smoke sau T7 GREEN và có quyền build/launch:
 
 ~~~powershell
 npm run dist:dir
 node scripts/check-packaged-app.mjs
 ~~~
 
-Không chạy default script nếu vẫn trỏ executable cũ hoặc identity lỗi vẫn đi vào IPC. Temp profile riêng, count0 hợp lệ, hidden process khi không cần người dùng thao tác.
+Đúng owned executable/profile, không cần account thật, no network purchase. Nếu fuse/tool không hỗ trợ launch thì báo verification blocked, không làm yếu app để test pass.
 
-## 7. Migration duy nhất trong kế hoạch này
+## 7. Khi dừng
 
-B07 có thể cần migration9 cho pending proofs không phụ thuộc receipt, vì hiện FK bắt buộc có receipt. Không liên quan API key/password; không migration mã hóa/ẩn dữ liệu.
+- Source được chỉnh cùng lúc: rebaseline, không overwrite.
+- Cần thêm flow/transport tự động hoặc đổi scope: hỏi chủ dự án.
+- UNKNOWN/billable outcome chưa rõ: giữ evidence, không tự mua thay.
+- R04 thiếu fixture/no-effect contract: không claim production retry fixed.
+- Permission chưa có cho live/purchase/deploy: dừng ở offline.
+- Cleanup không chắc: giữ owner/temp và báo lỗi, không xóa rộng.
 
-Migration phải giữ rows/PK, có test8→9, repeat migration, pending without receipt và cleanup explicit. Không sửa checksum migration007. Không fake receipt để né thay đổi schema cần thiết. Nếu baseline đã có migration9 khác, lấy version kế tiếp, không overwrite.
+## 8. Bàn giao cuối
 
-## 8. Phạm vi quyền
+Báo cáo R01–R09 fixed/open/already-fixed/unverified, exact commands/exit, AC matrix và reviewer. Ghi rõ R08 actual values, do_action trace không đổi, ABI cuối. Không tạo thêm nghĩa vụ mask/mã hóa hoặc product mission.
 
-Lượt viết tài liệu không sửa source. Khi Antigravity được giao triển khai, làm source/test theo plan. Live calls, mua mailbox, activate trial, push/merge/release vẫn cần quyền riêng; yêu cầu hiển thị rõ credential không tự cấp quyền thực hiện các thao tác đó.
+Các bản sửa cũ đã đạt không cần làm lại; chỉ thêm regression khi patch mới tác động đến chúng.
 
-Tests dùng fixture để không tác động tài khoản thật. Không bắt người dùng nhập lại key chỉ vì policy tự thêm; giữ UX plain text họ đã chọn.
-
-## 9. Bàn giao hoàn tất
-
-Báo cáo B01–B16 fixed/open/already-fixed/unverified; kèm exact test commands, source diff, migration kết quả, Dashboard D00, và happy-path request trace.
-
-Không báo “xong hết” từ test count cũ hoặc bỏ functionality. Không thêm file đính chính nhiều tầng; cập nhật đúng ba tài liệu này khi scope được chủ dự án thay đổi.
-
-Prompt copy:
+Prompt giao Antigravity:
 
 ~~~text
 Đọc AGENTS.md và docs/superpowers/plans/2026-09-10-tool-bugfix-runbook.md,
-sau đó spec/plan liên kết. Sửa B01–B16 theo source hiện tại bằng TDD từng task.
-Giữ flow do_action, endpoint/op_id/order/pacing, không product mission hay blanket refusal.
-Tool cá nhân: API key/password/proxy hiển thị rõ trên Dashboard để xem/copy/sửa;
-không thêm masking, auto-hide, auto-clear hoặc redesign storage.
-Giữ dirty edits người dùng, kiểm ownership/pending proof/race thật, review scoped diff.
-Chưa được phép thì không live/purchase/push/deploy. Báo RED/GREEN và giới hạn kiểm chứng.
+rồi spec/plan liên kết. Triển khai T1–T7 để sửa R01–R09 của review gần nhất.
+Giữ flow do_action, endpoints/op_id/order/pacing và normal restock.
+API key/password/proxy phải hiển thị rõ trên Dashboard để xem/copy/sửa;
+không masking, auto-hide/clear hoặc redesign credential storage.
+TDD từng task, giữ paid data/owner/pending proof, review scoped diff và chạy đủ gates.
+Chưa có quyền thì không live/purchase/commit/push/deploy. Báo bằng chứng, không chỉ test count.
 ~~~

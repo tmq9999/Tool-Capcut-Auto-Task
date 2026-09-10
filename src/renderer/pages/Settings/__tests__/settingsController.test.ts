@@ -221,8 +221,8 @@ describe('Pure SettingsController Unit Tests (Task 2.1.4 RED)', () => {
     expect(state.drafts.kiotproxy).toEqual({ action: 'keep' });
   });
 
-  it('failed save preserves non-secret edits but wipes secret drafts and exposes only normalized error data', async () => {
-    const sensitiveDraftSecret = 'LEAK_SENSITIVE_SECRET_XYZ';
+  it('failed save preserves non-secret edits and retains secret drafts for retry with normalized error data', async () => {
+    const sensitiveDraftSecret = 'KEY-DRAFT-XYZ';
     const failedSaveResult: IpcEnvelope<{ success: boolean }> = {
       success: false,
       error: {
@@ -245,11 +245,23 @@ describe('Pure SettingsController Unit Tests (Task 2.1.4 RED)', () => {
     expect(success).toBe(false);
     const state = controller.getState();
     expect(state.settings.general.language).toBe('en');
-    expect(state.drafts.gmail94).toEqual({ action: 'keep' });
+    expect(state.drafts.gmail94).toEqual({ action: 'replace', value: sensitiveDraftSecret });
     expect(state.error?.code).toBe('ERR_PERSISTENCE_FAILED');
+  });
 
-    const serializedState = JSON.stringify(state);
-    expect(serializedState).not.toContain(sensitiveDraftSecret);
+  it('R08 failed save retains the API key input', async () => {
+    const { bridge, saveSpy } = createMockBridge();
+    let finish!: (v: IpcEnvelope<{ success: boolean }>) => void;
+    saveSpy.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const c = new SettingsController(bridge);
+    await c.load();
+    const draft = { action: 'replace' as const, value: 'KEY-DEMO' };
+    c.setSimpleDraft('gmail94', draft);
+    const saving = c.save();
+    expect(c.getState().drafts.gmail94).toEqual(draft);
+    finish({ success: false, error: { code: 'ERR_PERSISTENCE_FAILED', message: 'disk' } });
+    expect(await saving).toBe(false);
+    expect(c.getState().drafts.gmail94).toEqual(draft);
   });
 
   it('double submit while a first save is pending results in exactly one IPC call', async () => {

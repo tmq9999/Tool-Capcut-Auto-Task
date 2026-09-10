@@ -332,7 +332,7 @@ describe('Strict Runtime Zod Schemas (Task 2 RED)', () => {
       expect(res.success).toBe(true);
     });
 
-    it('ensures AccountListItemDTO exposes only boolean configured indicators and zero secret fields', () => {
+    it('ensures AccountListItemDTO validates optional passwordCapcut for personal tool dashboard display', () => {
       const listItem = {
         id: 'acc-1',
         email: 'user@example.com',
@@ -354,12 +354,12 @@ describe('Strict Runtime Zod Schemas (Task 2 RED)', () => {
       const parsed = AccountListItemSchema.safeParse(listItem);
       expect(parsed.success).toBe(true);
 
-      // Verify strict rejection if plaintext password is leaked into AccountListItemDTO
-      const leakedPasswordItem = {
+      // R08 allows plaintext password for personal Dashboard viewing
+      const withPasswordItem = {
         ...listItem,
         passwordCapcut: 'plaintext-secret'
       };
-      expect(AccountListItemSchema.safeParse(leakedPasswordItem).success).toBe(false);
+      expect(AccountListItemSchema.safeParse(withPasswordItem).success).toBe(true);
     });
 
     it('enforces bounds on AccountFilterSchema', () => {

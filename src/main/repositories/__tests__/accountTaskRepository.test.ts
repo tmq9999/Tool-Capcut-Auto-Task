@@ -431,4 +431,17 @@ describe('AccountTaskRepository.recordCheckpoint', () => {
     expect(repo.getLatestReceipt('acc-no-receipt')).toBeNull();
     expect(repo.listByAccount('acc-no-receipt')).toHaveLength(0);
   });
+
+  it('R06 keeps newer evidence and allows a genuinely newer replacement', () => {
+    const repo = new AccountTaskRepository(db), key = 'capcut_web_pwa_install';
+    const proof = (opId: string, at: number) => [{ key, proof: { actionKey: key, opId, errNo: 0 as const, at } }];
+    repo.recordUnsettledProofs('a', 'r', proof('new', 2000));
+    repo.recordUnsettledProofs('a', 'r', proof('old', 1000));
+    repo.recordUnsettledProofs('a', 'r', proof('equal', 2000));
+    expect(repo.listUnsettledProofs('a', 'r')[0]).toMatchObject({ opId: 'new', provedAt: new Date(2000).toISOString() });
+    repo.recordUnsettledProofs('a', 'r', proof('newest', 3000));
+    expect(repo.listUnsettledProofs('a', 'r')[0].opId).toBe('newest');
+    expect(repo.getLatestReceipt('a')).toBeNull();
+    expect(repo.listByAccount('a')).toEqual([]);
+  });
 });

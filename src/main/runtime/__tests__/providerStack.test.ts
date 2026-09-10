@@ -68,8 +68,8 @@ describe('createProviderStack', () => {
     const stack = createProviderStack(createProviderStackRepositories(db), new PlainVault(), new RecordingHttp());
 
     expect(stack.emailPurchaseService.getProviderConfigs()).toEqual([
-      { provider: 'gmail94', isConfigured: false, maskedHint: '••••••••' },
-      { provider: 'dongvanfb', isConfigured: false, maskedHint: '••••••••' }
+      { provider: 'gmail94', isConfigured: false, maskedHint: '••••••••', apiKey: null },
+      { provider: 'dongvanfb', isConfigured: false, maskedHint: '••••••••', apiKey: null }
     ]);
   });
 

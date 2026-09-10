@@ -70,7 +70,30 @@ export class AccountService {
   }
 
   list(filter: AccountFilterDTO): { items: AccountListItemDTO[]; total: number } {
-    return this.repo.listAccounts(filter);
+    const result = this.repo.listAccounts(filter);
+    if (result.items.length === 0) {
+      return result;
+    }
+    const records = new Map(
+      this.repo
+        .queryAccountsForExport({
+          ids: result.items.map((item) => item.id)
+        })
+        .map((row) => [row.id, row])
+    );
+    return {
+      total: result.total,
+      items: result.items.map((item) => {
+        const record = records.get(item.id);
+        const passwordCapcut = record?.passwordCapcutEncrypted
+          ? this.vault.decrypt(record.passwordCapcutEncrypted)
+          : null;
+        return {
+          ...item,
+          passwordCapcut
+        };
+      })
+    };
   }
 
   update(id: string, data: AccountUpdateInputDTO): { success: boolean } {

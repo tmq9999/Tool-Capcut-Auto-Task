@@ -62,6 +62,7 @@ export type ProxyKeySummaryDTO = z.infer<typeof ProxyKeySummaryDTOSchema>;
 export const EmailProviderConfigDTOSchema = z.object({
   provider: EmailApiProviderEnum,
   isConfigured: z.boolean(),
-  maskedHint: z.string()
+  maskedHint: z.string(),
+  apiKey: z.string().nullable().optional()
 }).strict();
 export type EmailProviderConfigDTO = z.infer<typeof EmailProviderConfigDTOSchema>;

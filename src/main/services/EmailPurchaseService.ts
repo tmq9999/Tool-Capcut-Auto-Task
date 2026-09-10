@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type { CredentialRepository } from '../repositories/CredentialRepository';
 import type { PurchasedEmailRepository } from '../repositories/PurchasedEmailRepository';
 import type { ICredentialVault } from '../security/CredentialVault';
-import { ProviderError } from '../providers/ProviderError';
+import { ProviderError, ConfirmedOutOfStockError } from '../providers/ProviderError';
 import { SecretReader } from './SecretReader';
 import type { Gmail94Profile, Gmail94Service } from '../providers/Gmail94Provider';
 import { AutomationTerminalError } from './AutomationTerminalError';
@@ -387,14 +387,6 @@ export class EmailPurchaseService {
         stats.attempted -= 1;
       }
     };
-    const confirmPurchase = (): void => {
-      stats.confirmed += 1;
-      try {
-        emitPurchaseEvent('confirmed');
-      } catch {
-        throw poisonPurchaseAccounting();
-      }
-    };
     const ambiguousPurchase = (): AutomationTerminalError => {
       stats.ambiguous += 1;
       try {
@@ -430,8 +422,10 @@ export class EmailPurchaseService {
               'Thiếu identity bền vững cho fence mua email.'
             ); })())
           : undefined;
+        const isFenced = Boolean(mutationIdentity && this.mutationContext);
+        let currentAttemptId = mutationIdentity?.stepAttemptId;
         const recordPurchaseIntent = (): void => {
-          if (!mutationIdentity || !this.mutationContext) return;
+          if (!mutationIdentity || !this.mutationContext || !currentAttemptId) return;
           this.mutationContext.repository.recordIntent({
             authorityRef: this.mutationContext.authorityRef,
             budgetOwnerRef: this.mutationContext.budgetOwnerRef,
@@ -439,22 +433,22 @@ export class EmailPurchaseService {
             accountId: null,
             runId: mutationIdentity.runId,
             sessionAlias: null,
-            stepAttemptId: mutationIdentity.stepAttemptId,
+            stepAttemptId: currentAttemptId,
             stepId: 'email-purchase',
             taskKey: null,
             operation: 'purchase',
-            operationKey: `purchase:${mutationIdentity.ownerRef}:${mutationIdentity.stepAttemptId}`,
+            operationKey: `purchase:${mutationIdentity.ownerRef}:${currentAttemptId}`,
             intentAt: new Date().toISOString(),
             state: 'outcome-unknown',
             evidenceRef: null
           }, 1);
         };
         const settlePurchase = (purchasedEmailId: string): void => {
-          if (!mutationIdentity || !this.mutationContext) return;
+          if (!mutationIdentity || !this.mutationContext || !currentAttemptId) return;
           this.mutationContext.repository.bindMailbox(mutationIdentity.ownerRef, purchasedEmailId);
           this.mutationContext.repository.settleIntent(
             mutationIdentity.ownerRef,
-            mutationIdentity.stepAttemptId,
+            currentAttemptId,
             'effect-confirmed',
             `purchase:${purchasedEmailId}`
           );
@@ -579,6 +573,18 @@ export class EmailPurchaseService {
               }
 
               if (err instanceof ProviderError && err.code === 'OUT_OF_STOCK') {
+                if (isFenced) {
+                  if (!(err instanceof ConfirmedOutOfStockError)) {
+                    throw ambiguousPurchase();
+                  }
+                  this.mutationContext!.repository.settleIntent(
+                    mutationIdentity!.ownerRef,
+                    currentAttemptId!,
+                    'no-effect-confirmed',
+                    'stock-exhausted'
+                  );
+                  currentAttemptId = this.nextId();
+                }
                 rollbackAttempt();
                 retryCount += 1;
                 const retrySeconds = Math.round(retryIntervalMs / 1000);
@@ -600,7 +606,7 @@ export class EmailPurchaseService {
           }
 
           remainingAffordablePurchases -= 1;
-          confirmPurchase();
+          stats.confirmed += 1;
           const purchasedEmail = this.purchasedRepo.insertReserved({
             id: this.nextId(),
             provider: 'gmail94',
@@ -608,8 +614,27 @@ export class EmailPurchaseService {
             orderId: order.orderId,
             service: gmailServiceSlug
           }, reservationId);
-          settlePurchase(purchasedEmail.id);
-          return { purchasedEmail, reservationId, ...(mutationIdentity ? { ownerRef: mutationIdentity.ownerRef } : {}) };
+          try {
+            settlePurchase(purchasedEmail.id);
+            try {
+              emitPurchaseEvent('confirmed');
+            } catch (error) {
+              poisonPurchaseAccounting();
+              throw error;
+            }
+            workerSignal.throwIfAborted();
+            return { purchasedEmail, reservationId, ...(mutationIdentity ? { ownerRef: mutationIdentity.ownerRef } : {}) };
+          } catch (error) {
+            try {
+              this.purchasedRepo.releaseReservation(purchasedEmail.id, reservationId);
+            } catch (cleanupError) {
+              throw new AggregateError(
+                [error, cleanupError],
+                'Paid mailbox delivery and reservation cleanup both failed.'
+              );
+            }
+            throw error;
+          }
         }
 
         if (provider === 'dongvanfb') {
@@ -723,6 +748,18 @@ export class EmailPurchaseService {
               }
 
               if (err instanceof ProviderError && err.code === 'OUT_OF_STOCK') {
+                if (isFenced) {
+                  if (!(err instanceof ConfirmedOutOfStockError)) {
+                    throw ambiguousPurchase();
+                  }
+                  this.mutationContext!.repository.settleIntent(
+                    mutationIdentity!.ownerRef,
+                    currentAttemptId!,
+                    'no-effect-confirmed',
+                    'stock-exhausted'
+                  );
+                  currentAttemptId = this.nextId();
+                }
                 rollbackAttempt();
                 retryCount += 1;
                 const retrySeconds = Math.round(retryIntervalMs / 1000);
@@ -745,8 +782,8 @@ export class EmailPurchaseService {
           if (!mail || typeof mail.email !== 'string' || mail.email.length === 0) {
             throw ambiguousPurchase();
           }
-          confirmPurchase();
 
+          stats.confirmed += 1;
           const id = this.nextId();
           let purchasedEmail = this.purchasedRepo.insertReserved({
             id,
@@ -759,10 +796,16 @@ export class EmailPurchaseService {
               [mail.email, mail.password ?? '', mail.refreshToken ?? '', mail.clientId ?? ''].join('|')
             )
           }, reservationId);
-          settlePurchase(purchasedEmail.id);
-
-          if ((!mail.refreshToken || !mail.clientId) && mail.password) {
+          try {
+            settlePurchase(purchasedEmail.id);
             try {
+              emitPurchaseEvent('confirmed');
+            } catch (error) {
+              poisonPurchaseAccounting();
+              throw error;
+            }
+
+            if ((!mail.refreshToken || !mail.clientId) && mail.password) {
               workerSignal.throwIfAborted();
               const pair = await this.observe(
                 { provider: 'dongvanfb', operation: 'oauth-exchange' },
@@ -775,16 +818,29 @@ export class EmailPurchaseService {
                 this.vault.encrypt(pair.refreshToken),
                 pair.clientId
               );
-              if (updated) {
-                purchasedEmail = this.purchasedRepo.getDtoById(id) ?? { ...purchasedEmail, hasOauth: true };
+              if (!updated) {
+                throw new AutomationTerminalError(
+                  'failed',
+                  { code: 'INTERNAL_ERROR' },
+                  'Quyền sở hữu mailbox đã thay đổi; chưa cấp mailbox cho worker.'
+                );
               }
-            } catch (err) {
-              this.purchasedRepo.releaseReservation(id, reservationId);
-              throw err;
+              purchasedEmail = this.purchasedRepo.getDtoById(id) ?? { ...purchasedEmail, hasOauth: true };
             }
-          }
 
-          return { purchasedEmail, reservationId, ...(mutationIdentity ? { ownerRef: mutationIdentity.ownerRef } : {}) };
+            workerSignal.throwIfAborted();
+            return { purchasedEmail, reservationId, ...(mutationIdentity ? { ownerRef: mutationIdentity.ownerRef } : {}) };
+          } catch (error) {
+            try {
+              this.purchasedRepo.releaseReservation(purchasedEmail.id, reservationId);
+            } catch (cleanupError) {
+              throw new AggregateError(
+                [error, cleanupError],
+                'Paid mailbox delivery and reservation cleanup both failed.'
+              );
+            }
+            throw error;
+          }
         }
 
 
@@ -862,10 +918,20 @@ export class EmailPurchaseService {
   getProviderConfigs(): EmailProviderConfigDTO[] {
     return EmailApiProviderEnum.options.map((provider) => {
       const record = this.credRepo.getCredential(provider);
+      const isConfigured = record !== null;
+      let apiKey: string | null = null;
+      if (isConfigured) {
+        try {
+          apiKey = this.readApiKey(provider);
+        } catch {
+          apiKey = null;
+        }
+      }
       return {
         provider,
-        isConfigured: record !== null,
-        maskedHint: record?.metadata.maskedHint ?? '••••••••'
+        isConfigured,
+        maskedHint: record?.metadata.maskedHint ?? '••••••••',
+        apiKey
       };
     });
   }

@@ -2,6 +2,7 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import type { Page } from 'playwright-core';
 import type { AccountUiInteraction } from '../types';
 import { executeHttpTasks, resolveNumericUserId, LEAF_TASKS } from '../httpTasks';
+import { TaskEvidenceError } from '../TaskEvidenceError';
 
 describe('executeHttpTasks', () => {
   afterEach(() => {
@@ -337,6 +338,53 @@ describe('executeHttpTasks', () => {
       clearTimeout(timer);
       release();
       await run.catch(() => {});
+    }
+  });
+
+  it.each(['list', 'claim-count'] as const)('R05 carries accepted proof on %s timeout', async failure => {
+    vi.useFakeTimers();
+    let release!: () => void, entered!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const { page, fetchMock } = callbackPage({ err_no: 0 }, { err_no: 0, data: { task_list: taskRows(2) } });
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/account/info/')) return new Response(JSON.stringify({ data: { user_id_str: '123456789' } }));
+      if (url.includes('/do_action') || url.includes('/grant_reward')) return new Response('{"err_no":0}');
+      if (url.includes('/task_list')) {
+        if (failure === 'list') {
+          entered();
+          return new Promise<Response>(resolve => {
+            release = () => resolve(new Response(JSON.stringify({ err_no: 0, data: { task_list: taskRows() } })));
+          });
+        }
+        return new Response(JSON.stringify({ err_no: 0, data: { task_list: taskRows(2) } }));
+      }
+      throw new Error('Unexpected fixture URL');
+    });
+    if (failure === 'claim-count') Object.assign(page, { locator: () => ({
+      first: () => ({ isVisible: async () => false }),
+      filter: () => ({ count: () => { entered(); return new Promise<number>(resolve => { release = () => resolve(0); }); } })
+    }) });
+    const checkpoint = vi.fn(async () => {});
+    const run = executeHttpTasks({
+      page,
+      signal: new AbortController().signal,
+      log: () => {},
+      actionDelayMs: 0,
+      onCheckpoint: checkpoint
+    });
+    const settled = run.then(() => null, error => error);
+    try {
+      await reached;
+      await vi.advanceTimersByTimeAsync(failure === 'list' ? 30001 : 1001);
+      const error = await settled;
+      expect(error).toBeInstanceOf(TaskEvidenceError);
+      expect(error.unsettledProofs.map((x: { key: string }) => x.key)).toEqual([...LEAF_TASKS]);
+      expect(fetchMock.mock.calls.filter(([url]) => url.includes('/do_action'))).toHaveLength(9);
+      expect(checkpoint).not.toHaveBeenCalled();
+    } finally {
+      release?.();
+      await settled;
+      vi.useRealTimers();
     }
   });
 });

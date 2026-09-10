@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 
 import { Badge } from '../../../components/ui/Badge';
 import { DashboardActionBar } from '../DashboardActionBar';
-import { accountStatusBadgeVariant } from '../columns';
+import { accountStatusBadgeVariant, createDashboardColumns } from '../columns';
+import { AutomationConfigGrid } from '../AutomationConfigGrid';
+import { DEFAULT_AUTOMATION_CONFIG } from '../automationConfig';
 
 describe('Dashboard continuous-run rendering', () => {
   it('maps a stopped account to the neutral stopped badge', () => {
@@ -74,5 +76,51 @@ describe('Dashboard continuous-run rendering', () => {
     expect(html).toContain('giá 1000');
     expect(html).toContain('mua được 1');
     expect(html).toContain('2026-09-05T00:00:00.000Z');
+  });
+
+  it('R08 renders plaintext password for Dashboard table column', () => {
+    const columns = createDashboardColumns({
+      isThreadRunning: () => false,
+      onStopThread: () => {}
+    });
+    const passwordCol = columns.find(
+      (c) => 'accessorKey' in c && c.accessorKey === 'passwordCapcut'
+    );
+    expect(passwordCol).toBeDefined();
+    if (!passwordCol || typeof passwordCol.cell !== 'function') {
+      throw new Error('password column cell function expected');
+    }
+    const cellFn = passwordCol.cell as (props: {
+      row: { original: { passwordCapcut?: string | null } };
+    }) => React.ReactElement;
+    const html = renderToStaticMarkup(
+      cellFn({ row: { original: { passwordCapcut: 'PASS-DEMO' } } })
+    );
+    expect(html).toContain('PASS-DEMO');
+    expect(html).not.toContain('••••••••');
+  });
+
+  it('R08 renders plaintext API key in AutomationConfigGrid panel', () => {
+    const html = renderToStaticMarkup(
+      <AutomationConfigGrid
+        config={{
+          ...DEFAULT_AUTOMATION_CONFIG,
+          emailSourceMode: 'api',
+          emailApiProvider: 'gmail94'
+        }}
+        onChange={() => {}}
+        emailProviders={[
+          { provider: 'gmail94', isConfigured: true, maskedHint: '••••••••', apiKey: 'KEY-DEMO' }
+        ]}
+        customEmail={{
+          domain: 'custom.test',
+          apiBaseUrl: 'http://custom.test',
+          senderFilter: ''
+        }}
+      />
+    );
+
+    expect(html).toContain('KEY-DEMO');
+    expect(html).not.toContain('••••••••');
   });
 });

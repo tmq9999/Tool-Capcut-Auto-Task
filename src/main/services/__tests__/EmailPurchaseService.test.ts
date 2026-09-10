@@ -19,8 +19,9 @@ import {
 import type { ICredentialVault } from '../../security/CredentialVault';
 import type { DongVanPurchasedMail, DongVanCodeResult } from '../../providers/DongVanFBProvider';
 import type { ICustomDomainMailApi } from '../EmailPurchaseService';
-import { ProviderError } from '../../providers/ProviderError';
+import { ProviderError, ConfirmedOutOfStockError } from '../../providers/ProviderError';
 import { DongVanFBProvider } from '../../providers/DongVanFBProvider';
+import { CAPCUT_OTP_SERVICE } from '../../../shared/schemas/provider.schema';
 import type { HttpClient, HttpResponse } from '../../providers/HttpClient';
 import { AutomationTerminalError } from '../AutomationTerminalError';
 import type { Gmail94Profile, Gmail94Service } from '../../providers/Gmail94Provider';
@@ -661,9 +662,14 @@ describe('EmailPurchaseService.getProviderConfigs', () => {
     const service = createService();
 
     expect(service.getProviderConfigs()).toEqual([
-      { provider: 'gmail94', isConfigured: true, maskedHint: '••••••••' },
-      { provider: 'dongvanfb', isConfigured: false, maskedHint: '••••••••' }
+      { provider: 'gmail94', isConfigured: true, maskedHint: '••••••••', apiKey: 'GM-KEY' },
+      { provider: 'dongvanfb', isConfigured: false, maskedHint: '••••••••', apiKey: null }
     ]);
+  });
+
+  it('R08 provides the configured email API key value', () => {
+    storeKey('gmail94', 'KEY-DEMO');
+    expect(createService().getProviderConfigs().find((x) => x.provider === 'gmail94')?.apiKey).toBe('KEY-DEMO');
   });
 });
 
@@ -1888,6 +1894,228 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
       expect(dongvan.buyCalls).toBe(1);
       expect(ledger.getBinding('owner-A')?.accountId).toBe('account-A');
       expect(purchasedRepo.countAvailable('dongvanfb')).toBe(1);
+    });
+
+    it.each(['observer', 'settlement'] as const)(
+      'R01/R03 keeps paid row and releases undelivered reservation on %s failure',
+      async point => {
+        storeKey('dongvanfb', 'DV-DEMO');
+        const ledger = new AccountMutationRepository(db);
+        ledger.registerApproval({
+          authorityRef: 'auth-paid',
+          budgetOwnerRef: 'budget-paid',
+          provider: 'dongvanfb',
+          approvedUnits: 2
+        });
+        const failure = new Error('fixture-' + point);
+        const settle = vi.spyOn(ledger, 'settleIntent');
+        if (point === 'settlement') settle.mockImplementationOnce(() => { throw failure; });
+        dongvan.rows = [[{
+          email: 'paid@example.test',
+          password: 'PASS-DEMO',
+          refreshToken: null,
+          clientId: null,
+          raw: 'fixture'
+        }]];
+        const service = new EmailPurchaseService(
+          credRepo,
+          purchasedRepo,
+          vault,
+          { gmail94: gmail, dongvanfb: dongvan, customdomain: customDomain },
+          {
+            nextId: () => 'pe-' + ++idCounter,
+            mutationContext: { repository: ledger, authorityRef: 'auth-paid', budgetOwnerRef: 'budget-paid' }
+          }
+        );
+        const signal = new AbortController().signal;
+        const session = await service.openAcquisitionSession('dongvanfb', 1, {
+          maxBillablePurchases: 2,
+          onPurchaseEvent: event => {
+            if (point === 'observer' && event.outcome === 'confirmed') throw failure;
+          }
+        }, signal);
+        try {
+          await expect(session.acquireOne('w1', signal, {
+            ownerRef: 'owner-paid',
+            runId: 'run-paid',
+            stepAttemptId: 'attempt-paid'
+          })).rejects.toBe(failure);
+          expect(purchasedRepo.listRecent(10)).toHaveLength(1);
+          expect(purchasedRepo.countAvailable('dongvanfb')).toBe(1);
+          expect(dongvan.buyCalls).toBe(1);
+          expect(dongvan.oauthCalls).toEqual([]);
+          expect(session.purchaseStats()).toMatchObject({ attempted: 1, confirmed: 1 });
+          expect(ledger.getIntent('auth-paid', 'purchase:owner-paid:attempt-paid')?.state)
+            .toBe(point === 'settlement' ? 'outcome-unknown' : 'effect-confirmed');
+        } finally {
+          settle.mockRestore();
+        }
+      }
+    );
+
+    it('R02 never delivers a fresh mailbox after OAuth CAS loses ownership', async () => {
+      storeKey('dongvanfb', 'DV-DEMO');
+      dongvan.rows = [[{
+        email: 'cas@example.test',
+        password: 'PASS-DEMO',
+        refreshToken: null,
+        clientId: null,
+        raw: 'fixture'
+      }]];
+      let other: ReturnType<PurchasedEmailRepository['reserveOldestAvailable']> = null;
+      const oauth = vi.spyOn(dongvan, 'getOauth2').mockImplementationOnce(async () => {
+        purchasedRepo.clearStaleReservations(); // isolated test DB only
+        other = purchasedRepo.reserveOldestAvailable('dongvanfb', 'other-owner');
+        return { refreshToken: 'REFRESH-DEMO', clientId: 'CLIENT-DEMO' };
+      });
+      const signal = new AbortController().signal;
+      const session = await createService().openAcquisitionSession('dongvanfb', 1,
+        { maxBillablePurchases: 1 }, signal);
+      try {
+        await expect(session.acquireOne('original', signal)).rejects.toMatchObject({
+          state: 'failed',
+          reason: { code: 'INTERNAL_ERROR' }
+        });
+        expect(other).not.toBeNull();
+        expect(purchasedRepo.countAvailable('dongvanfb')).toBe(0);
+        expect(purchasedRepo.consumeReserved(other!.id, 'other-owner', null)).toBe(true);
+        expect(dongvan.buyCalls).toBe(1);
+      } finally {
+        oauth.mockRestore();
+      }
+    });
+
+    it('R01 wraps in AggregateError when both delivery and reservation cleanup fail', async () => {
+      storeKey('dongvanfb', 'DV-DEMO');
+      const failure = new Error('fixture-observer');
+      const cleanupError = new Error('fixture-cleanup-fail');
+      const releaseSpy = vi.spyOn(purchasedRepo, 'releaseReservation').mockImplementationOnce(() => {
+        throw cleanupError;
+      });
+      dongvan.rows = [[{
+        email: 'cleanup-fail@example.test',
+        password: 'PASS-DEMO',
+        refreshToken: null,
+        clientId: null,
+        raw: 'fixture'
+      }]];
+      const service = createService();
+      const signal = new AbortController().signal;
+      const session = await service.openAcquisitionSession('dongvanfb', 1, {
+        maxBillablePurchases: 1,
+        onPurchaseEvent: event => {
+          if (event.outcome === 'confirmed') throw failure;
+        }
+      }, signal);
+      try {
+        const thrown = await session.acquireOne('w1', signal).catch(err => err);
+        expect(thrown).toBeInstanceOf(AggregateError);
+        expect((thrown as AggregateError).errors).toEqual([failure, cleanupError]);
+        expect(purchasedRepo.listRecent(10)).toHaveLength(1);
+      } finally {
+        releaseSpy.mockRestore();
+      }
+    });
+
+    it('R01 keeps paid row and releases undelivered reservation on Gmail94 observer failure', async () => {
+      storeKey('gmail94', 'GM-DEMO');
+      const failure = new Error('fixture-gmail-observer');
+      gmail.profile = { name: null, email: null, balance: 10000 };
+      gmail.services = [{ id: 29, slug: CAPCUT_OTP_SERVICE, name: 'CapCut', price: 1000 }];
+      const service = createService();
+      const signal = new AbortController().signal;
+      const session = await service.openAcquisitionSession('gmail94', 1, {
+        maxBillablePurchases: 1,
+        onPurchaseEvent: event => {
+          if (event.outcome === 'confirmed') throw failure;
+        }
+      }, signal);
+      await expect(session.acquireOne('w1', signal)).rejects.toBe(failure);
+      expect(purchasedRepo.listRecent(10)).toHaveLength(1);
+      expect(purchasedRepo.countAvailable('gmail94', CAPCUT_OTP_SERVICE)).toBe(1);
+      expect(gmail.createCalls).toHaveLength(1);
+      expect(session.purchaseStats()).toMatchObject({ attempted: 1, confirmed: 1 });
+    });
+
+    it('R04 uses a distinct approved intent for confirmed-stock retry', async () => {
+      storeKey('gmail94', 'GM-DEMO');
+      const service = createFencedService();
+      const ledger = new AccountMutationRepository(db);
+      const recorded = vi.spyOn(AccountMutationRepository.prototype, 'recordIntent');
+      gmail.orderFailures = [new ConfirmedOutOfStockError('gmail94')];
+      const signal = new AbortController().signal;
+      const session = await service.openAcquisitionSession('gmail94', 1,
+        { maxBillablePurchases: 1, emailRetryIntervalMs: 0 }, signal);
+      try {
+        const result = await session.acquireOne('w1', signal, {
+          ownerRef: 'stock-owner', runId: 'stock-run', stepAttemptId: 'stock-attempt'
+        });
+        const [first, second] = recorded.mock.calls.map(call => call[0]);
+        expect(gmail.createCalls).toHaveLength(2);
+        expect(first.stepAttemptId).toBe('stock-attempt');
+        expect(second.stepAttemptId).not.toBe(first.stepAttemptId);
+        expect(second.operationKey).not.toBe(first.operationKey);
+        expect(second.ownerRef).toBe(first.ownerRef);
+        expect(ledger.getIntent('auth-test', first.operationKey)?.state).toBe('no-effect-confirmed');
+        expect(ledger.getIntent('auth-test', second.operationKey)?.state).toBe('effect-confirmed');
+        expect(ledger.getApproval('auth-test')?.consumedUnits).toBe(2);
+        expect(session.purchaseStats()).toEqual({ budget: 1, attempted: 1, confirmed: 1, ambiguous: 0 });
+        session.release(result);
+      } finally {
+        recorded.mockRestore();
+      }
+    });
+
+    it('R04 halts when approval is exhausted after confirmed-stock attempt', async () => {
+      storeKey('gmail94', 'GM-DEMO');
+      const mutationRepo = new AccountMutationRepository(db);
+      mutationRepo.registerApproval({
+        authorityRef: 'auth-1unit',
+        budgetOwnerRef: 'budget-1unit',
+        provider: 'gmail94',
+        approvedUnits: 1
+      });
+      const service = new EmailPurchaseService(
+        credRepo,
+        purchasedRepo,
+        vault,
+        { gmail94: gmail, dongvanfb: dongvan, customdomain: customDomain },
+        {
+          nextId: () => 'pe-' + ++idCounter,
+          mutationContext: {
+            repository: mutationRepo,
+            authorityRef: 'auth-1unit',
+            budgetOwnerRef: 'budget-1unit'
+          }
+        }
+      );
+      gmail.orderFailures = [new ConfirmedOutOfStockError('gmail94')];
+      const signal = new AbortController().signal;
+      const session = await service.openAcquisitionSession('gmail94', 1,
+        { maxBillablePurchases: 2, emailRetryIntervalMs: 0 }, signal);
+      await expect(session.acquireOne('w1', signal, {
+        ownerRef: 'stock-owner', runId: 'stock-run', stepAttemptId: 'stock-attempt'
+      })).rejects.toThrow('Diagnostic approval has no remaining units.');
+      expect(gmail.createCalls).toHaveLength(1);
+      expect(mutationRepo.getIntent('auth-1unit', 'purchase:stock-owner:stock-attempt')?.state).toBe('no-effect-confirmed');
+    });
+
+    it('R04 treats generic OUT_OF_STOCK without confirmed marker as ambiguous in fenced session', async () => {
+      storeKey('gmail94', 'GM-DEMO');
+      const service = createFencedService();
+      const ledger = new AccountMutationRepository(db);
+      gmail.orderFailures = [new ProviderError('OUT_OF_STOCK', 'generic out of stock', 'gmail94')];
+      const signal = new AbortController().signal;
+      const session = await service.openAcquisitionSession('gmail94', 1,
+        { maxBillablePurchases: 2, emailRetryIntervalMs: 0 }, signal);
+      await expect(session.acquireOne('w1', signal, {
+        ownerRef: 'stock-owner', runId: 'stock-run', stepAttemptId: 'stock-attempt'
+      })).rejects.toMatchObject({
+        state: 'blocked',
+        reason: { code: 'PURCHASE_OUTCOME_UNKNOWN' }
+      });
+      expect(gmail.createCalls).toHaveLength(1);
+      expect(ledger.getIntent('auth-test', 'purchase:stock-owner:stock-attempt')?.state).toBe('outcome-unknown');
     });
 
   });

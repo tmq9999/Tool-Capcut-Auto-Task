@@ -357,6 +357,7 @@ export class AccountTaskRepository {
       ON CONFLICT(account_id, run_id, task_key) DO UPDATE SET
         op_id = excluded.op_id,
         proved_at = excluded.proved_at
+      WHERE excluded.proved_at > account_unsettled_proofs.proved_at
     `);
 
     const transaction = this.db.transaction(() => {

@@ -278,12 +278,10 @@ export class SettingsController {
     try {
       SettingsSaveRequestSchema.parse(savePayload);
     } catch {
-      const hasNewEdits = this.editRevision !== savedRevision;
       this.state = {
         ...this.state,
         isSaving: false,
         isSaved: false,
-        ...(hasNewEdits ? {} : { drafts: createInitialDrafts() }),
         error: {
           code: 'ERR_VALIDATION_FAILED',
           message: 'Invalid settings save payload.',
@@ -293,23 +291,14 @@ export class SettingsController {
       return false;
     }
 
-    // Wipe in-memory secret drafts before awaiting IPC response (security boundary)
-    this.state = {
-      ...this.state,
-      drafts: createInitialDrafts(),
-    };
-    this.notify();
-
     try {
       const response = await this.bridge.settings.save(savePayload);
 
       if (!response.success) {
-        const hasNewEdits = this.editRevision !== savedRevision;
         this.state = {
           ...this.state,
           isSaving: false,
           isSaved: false,
-          ...(hasNewEdits ? {} : { drafts: createInitialDrafts() }),
           error: {
             code: response.error.code || 'ERR_PERSISTENCE_FAILED',
             message: 'Failed to persist application settings or credentials.',
@@ -341,22 +330,20 @@ export class SettingsController {
 
       this.state = {
         ...this.state,
-        settings: hasNewEdits ? this.state.settings : nextSettings,
-        credentialStatuses: nextStatuses,
         isSaving: false,
         isSaved: !hasNewEdits,
+        settings: hasNewEdits ? this.state.settings : nextSettings,
+        credentialStatuses: nextStatuses,
         drafts: hasNewEdits ? this.state.drafts : createInitialDrafts(),
         error: null,
       };
       this.notify();
       return true;
     } catch {
-      const hasNewEdits = this.editRevision !== savedRevision;
       this.state = {
         ...this.state,
         isSaving: false,
         isSaved: false,
-        ...(hasNewEdits ? {} : { drafts: createInitialDrafts() }),
         error: {
           code: 'ERR_PERSISTENCE_FAILED',
           message: 'Failed to persist application settings or credentials.',

@@ -370,8 +370,8 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
                     <div className="rounded border border-panel-border bg-surface-container-low p-2 flex flex-col gap-1">
                       <div className="flex items-center justify-between gap-1">
                         <span className="text-[11px] text-on-surface-variant">API Key:</span>
-                        <span className="font-code text-xs text-primary tracking-wider font-semibold">
-                          {selectedEmailProvider.maskedHint}
+                        <span className="font-code text-xs text-primary font-semibold select-all break-all">
+                          {selectedEmailProvider.apiKey || selectedEmailProvider.maskedHint}
                         </span>
                       </div>
                       <span className="text-[10px] text-on-surface-variant leading-relaxed">

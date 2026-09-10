@@ -69,12 +69,12 @@ export function createDashboardColumns(
     cell: (info) => <span className="font-medium text-on-surface">{info.getValue<string>()}</span>,
   },
   {
-    accessorKey: 'hasPasswordCapcut',
+    accessorKey: 'passwordCapcut',
     header: 'Password',
-    size: 100,
-    cell: (info) => (
-      <span className="font-code text-on-surface-variant tracking-wider">
-        {info.getValue<boolean>() ? '••••••••' : '-'}
+    size: 110,
+    cell: ({ row }) => (
+      <span className="font-code text-on-surface select-all tracking-normal">
+        {row.original.passwordCapcut || '-'}
       </span>
     ),
   },

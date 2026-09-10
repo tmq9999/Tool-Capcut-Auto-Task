@@ -185,10 +185,22 @@ describe('AccountService.getAutomationCredential', () => {
       capcutPassword: 'superSecretCapcutPass123'
     });
 
-    // Public list still exposes only hasPasswordCapcut, never the decrypted password
+    // Personal Dashboard displays the plaintext password for copy/view
     const list = service.list({ page: 1, pageSize: 50 });
     expect(list.items[0].hasPasswordCapcut).toBe(true);
-    expect(JSON.stringify(list.items)).not.toContain('superSecretCapcutPass123');
+    expect(list.items[0].passwordCapcut).toBe('superSecretCapcutPass123');
+  });
+
+  it('R08 returns the saved account password for the personal Dashboard', () => {
+    const service = createService();
+    service.create({
+      email: 'a@example.test',
+      emailProvider: 'manual',
+      passwordCapcut: 'PASS-DEMO',
+      credit: 0,
+      status: 'active'
+    });
+    expect(service.list({ page: 1, pageSize: 50 }).items[0].passwordCapcut).toBe('PASS-DEMO');
   });
 });
 
