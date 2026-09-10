@@ -262,4 +262,56 @@ describe('MultiloginAuthService.getAccessToken', () => {
     const service = createService();
     await expect(service.getAccessToken()).rejects.toMatchObject({ code: 'CONFIG_ERROR' });
   });
+
+  it.each(['replace', 'delete'] as const)('T06 ignores stale sign-in after %s', async change => {
+    storeAuth({ mode: 'credentials', email: 'old@example.test', password: 'old-demo' });
+    let resolve!: (value: MultiloginTokens) => void;
+    api.signIn = () => new Promise(done => { resolve = done; });
+    const service = createService();
+    const pending = service.getAccessToken();
+    let pendingError: unknown;
+    const pendingPromise = pending.catch(err => { pendingError = err; });
+    if (change === 'replace') {
+      storeAuth({ mode: 'token', automationToken: 'new-demo' });
+      await expect(service.getAccessToken()).resolves.toBe('new-demo');
+    } else {
+      credRepo.delete('multilogin');
+    }
+    resolve({ token: 'old-jwt', refreshToken: 'old-refresh' });
+    await pendingPromise;
+    expect(pendingError).toMatchObject({ code: 'CONFIG_ERROR' });
+    const current = credRepo.getCredential('multilogin');
+    if (change === 'delete') {
+      expect(current).toBeNull();
+    } else {
+      expect(JSON.parse(vault.decrypt(current!.encryptedCredentials))).toEqual({
+        mode: 'token', automationToken: 'new-demo'
+      });
+    }
+  });
+
+  it.each(['replace', 'delete'] as const)('T06 rejects deferred refresh and skips fallback signIn after %s', async change => {
+    storeAuth({
+      mode: 'credentials',
+      email: 'old@example.test',
+      password: 'old-password',
+      session: { jwtToken: 'old-jwt', refreshToken: 'old-refresh', issuedAt: 0 }
+    });
+    let rejectRefresh!: (err: Error) => void;
+    api.refreshTokens = () => new Promise((_, reject) => { rejectRefresh = reject; });
+    const service = createService();
+    const pending = service.getAccessToken();
+    let pendingError: unknown;
+    const pendingPromise = pending.catch(err => { pendingError = err; });
+    if (change === 'replace') {
+      storeAuth({ mode: 'token', automationToken: 'new-demo' });
+      await expect(service.getAccessToken()).resolves.toBe('new-demo');
+    } else {
+      credRepo.delete('multilogin');
+    }
+    rejectRefresh(new ProviderError('NETWORK_ERROR', 'mạng lỗi', 'multilogin'));
+    await pendingPromise;
+    expect(pendingError).toMatchObject({ code: 'CONFIG_ERROR' });
+    expect(api.signInCalls).toHaveLength(0);
+  });
 });

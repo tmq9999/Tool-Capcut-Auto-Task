@@ -3,6 +3,7 @@ import { Search, X } from 'lucide-react';
 import { Input } from '@renderer/components/ui/Input';
 import { Select } from '@renderer/components/ui/Select';
 import { AccountFilterState } from '@shared/types/account';
+import { EMAIL_SOURCE_OPTIONS } from './emailSourceOptions';
 
 export interface AccountsToolbarProps {
   filters: AccountFilterState;
@@ -78,17 +79,12 @@ export const AccountsToolbar: React.FC<AccountsToolbarProps> = ({
             value={filters.providerFilter}
             onChange={(e) => onFilterChange({ ...filters, providerFilter: e.target.value })}
           >
-            <option value="all">Provider: Tất cả</option>
-            {/*
-              Giá trị phải khớp `emailProvider` mà automation GHI RA
-              (`AutomationRunService`): gmail94 / dongvanfb / customdomain / manual.
-              Bản cũ để Gmail/Outlook/Yahoo/Proton và so `===` nên KHÔNG BAO GIỜ
-              khớp account do bot tạo — lọc luôn ra 0 dòng (audit 04/09/2026).
-            */}
-            <option value="gmail94">Gmail94</option>
-            <option value="dongvanfb">DongVanFB</option>
-            <option value="customdomain">Domain riêng</option>
-            <option value="manual">Nhập tay</option>
+            <option value="all">Nguồn email: Tất cả</option>
+            {EMAIL_SOURCE_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
           </Select>
         </div>
 

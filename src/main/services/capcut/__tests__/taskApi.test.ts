@@ -132,6 +132,18 @@ describe('parseDoAction', () => {
     expect(p!.errNo).toBe(8001003);
     expect(p!.errTips).toBe('blocked');
   });
+
+  it('parseDoAction rejects string "0", boolean false, and null as numeric 0', () => {
+    const invalidValues = ['"0"', 'false', 'null', '""'];
+    for (const val of invalidValues) {
+      const p = parseDoAction(
+        '{"action_key":"x","op_id":"x_1_2026-09-01"}',
+        `{"err_no":${val},"err_tips":"test"}`
+      );
+      expect(p).not.toBeNull();
+      expect(p!.errNo).toBe(-1);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -542,5 +554,73 @@ describe('TaskStore', () => {
     expect(rejection).toBe('stop requested');
     expect(vi.getTimerCount()).toBe(0);
     vi.useRealTimers();
+  });
+
+  it('D01: rejects do_action response with HTTP 503 even if body contains err_no: 0', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100);
+    const context = new FakeContext();
+    const store = new TaskStore();
+    attachTaskMonitor(context as unknown as BrowserContext, store, MONITOR_IDENTITY);
+    const rewardAttempt = attempt('attempt-503-action');
+    store.beginAttempt(rewardAttempt);
+    store.registerActionContract({
+      taskKey: rewardAttempt.taskKey,
+      requestActionKey: rewardAttempt.taskKey,
+    });
+    const actionRequest = request(
+      'https://edit-api-sg.capcut.com/luckycat/i18n/capcut/task/v1/do_action',
+      '{"action_key":"capcut_web_pwa_install","op_id":"current-job"}'
+    );
+    context.emit('request', actionRequest);
+    vi.setSystemTime(110);
+    context.emit('response', response(actionRequest, '{"err_no":0,"err_tips":""}', 503));
+    await settleMonitor();
+    vi.setSystemTime(120);
+    const freshSnapshotRequest = request(
+      'https://edit-api-sg.capcut.com/luckycat/i18n/capcut/task/v1/task_list'
+    );
+    context.emit('request', freshSnapshotRequest);
+    vi.setSystemTime(130);
+    context.emit('response', response(freshSnapshotRequest, RAW, 200));
+    await settleMonitor();
+
+    const verified = await store.verifyRewardStep(rewardAttempt, Date.now());
+    expect(verified.verdict).toBe('unknown');
+    expect(verified.reasonCode).toBe('REWARD_PROOF_MISSING');
+  });
+
+  it('D01: rejects task_list response with HTTP 503 even if action was 200', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100);
+    const context = new FakeContext();
+    const store = new TaskStore();
+    attachTaskMonitor(context as unknown as BrowserContext, store, MONITOR_IDENTITY);
+    const rewardAttempt = attempt('attempt-503-snapshot');
+    store.beginAttempt(rewardAttempt);
+    store.registerActionContract({
+      taskKey: rewardAttempt.taskKey,
+      requestActionKey: rewardAttempt.taskKey,
+    });
+    const actionRequest = request(
+      'https://edit-api-sg.capcut.com/luckycat/i18n/capcut/task/v1/do_action',
+      '{"action_key":"capcut_web_pwa_install","op_id":"current-job"}'
+    );
+    context.emit('request', actionRequest);
+    vi.setSystemTime(110);
+    context.emit('response', response(actionRequest, '{"err_no":0,"err_tips":""}', 200));
+    await settleMonitor();
+    vi.setSystemTime(120);
+    const freshSnapshotRequest = request(
+      'https://edit-api-sg.capcut.com/luckycat/i18n/capcut/task/v1/task_list'
+    );
+    context.emit('request', freshSnapshotRequest);
+    vi.setSystemTime(130);
+    context.emit('response', response(freshSnapshotRequest, RAW, 503));
+    await settleMonitor();
+
+    const verified = await store.verifyRewardStep(rewardAttempt, Date.now());
+    expect(verified.verdict).toBe('unknown');
+    expect(verified.reasonCode).toBe('REWARD_SNAPSHOT_MISSING');
   });
 });

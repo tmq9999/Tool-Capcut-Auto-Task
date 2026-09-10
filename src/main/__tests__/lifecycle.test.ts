@@ -86,7 +86,7 @@ describe('Shutdown Lifecycle Manager', () => {
     expect(order).toEqual(['stop_automation', 'flush_logs', 'close_db', 'quit']);
   });
 
-  it('prevents re-entry: second before-quit while shutting down does not repeat preventDefault, close, or quit', async () => {
+  it('prevents re-entry: second before-quit while shutting down still calls preventDefault but does not repeat close or quit', async () => {
     const mockDb = new FakeDatabase();
     const mockApp = new FakeApp();
     const logger = new FakeLogger();
@@ -112,7 +112,7 @@ describe('Shutdown Lifecycle Manager', () => {
     const secondCall = manager.handleBeforeQuit(event2);
 
     expect(event1.preventDefaultCalls).toBe(1);
-    expect(event2.preventDefaultCalls).toBe(0);
+    expect(event2.preventDefaultCalls).toBe(1);
 
     // Resolve first flush
     resolveFlush();
@@ -120,6 +120,39 @@ describe('Shutdown Lifecycle Manager', () => {
 
     expect(mockDb.closeCalls).toBe(1);
     expect(mockApp.quitCalls).toBe(1);
+  });
+
+  it('handles 10 duplicate before-quit events while shutdown is in flight: all preventDefault but only one shutdown execution', async () => {
+    const mockDb = new FakeDatabase();
+    const mockApp = new FakeApp();
+    let resolveStop: () => void = () => {};
+    const pendingStop = new Promise<void>((resolve) => {
+      resolveStop = resolve;
+    });
+
+    const manager = createShutdownManager({
+      db: mockDb,
+      automation: { stop: () => pendingStop },
+      app: mockApp
+    });
+
+    const events = Array.from({ length: 10 }, () => new FakeEvent());
+    const promises = events.map((e) => manager.handleBeforeQuit(e));
+
+    for (const e of events) {
+      expect(e.preventDefaultCalls).toBe(1);
+    }
+
+    resolveStop();
+    await Promise.all(promises);
+
+    expect(mockDb.closeCalls).toBe(1);
+    expect(mockApp.quitCalls).toBe(1);
+
+    // After shutdown finished, subsequent before-quit does NOT preventDefault
+    const finalEvent = new FakeEvent();
+    await manager.handleBeforeQuit(finalEvent);
+    expect(finalEvent.preventDefaultCalls).toBe(0);
   });
 
   it('reports an automation timeout separately and still flushes, closes, and quits', async () => {

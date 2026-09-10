@@ -93,9 +93,13 @@ export function parseDoAction(reqBody: string, resBody: string, at = Date.now())
   let errNo = -1;
   let errTips = '';
   try {
-    const res = JSON.parse(resBody) as { err_no?: number; err_tips?: string };
-    errNo = Number(res.err_no ?? -1);
-    errTips = String(res.err_tips ?? '');
+    const res = JSON.parse(resBody) as { err_no?: unknown; err_tips?: unknown };
+    if (typeof res.err_no === 'number' && Number.isFinite(res.err_no)) {
+      errNo = res.err_no;
+    }
+    if (typeof res.err_tips === 'string') {
+      errTips = res.err_tips;
+    }
   } catch {
     // Response không parse được -> errNo giữ -1, coi như CHƯA chứng minh được.
   }
@@ -739,6 +743,10 @@ export function attachTaskMonitor(
     if (stopped) return;
     const monitored = requests.get(response.request());
     if (!monitored) return;
+    const status = response.status();
+    if (typeof status !== 'number' || !Number.isInteger(status) || status < 200 || status >= 300) {
+      return;
+    }
     const responseHeadersAt = Date.now();
     void response.text().then((body) => {
       if (stopped) return;

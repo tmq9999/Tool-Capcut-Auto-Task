@@ -5,6 +5,7 @@ import { Input } from '@renderer/components/ui/Input';
 import { Select } from '@renderer/components/ui/Select';
 import { Textarea } from '@renderer/components/ui/Textarea';
 import { Account, AccountStatus } from '@shared/types/account';
+import { getEmailSourceOptions } from './emailSourceOptions';
 
 export interface EditAccountDrawerProps {
   isOpen: boolean;
@@ -22,7 +23,7 @@ export const EditAccountDrawer: React.FC<EditAccountDrawerProps> = ({
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [emailPassword, setEmailPassword] = useState('');
-  const [provider, setProvider] = useState('Gmail');
+  const [provider, setProvider] = useState('manual');
   const [proxy, setProxy] = useState('');
   const [browserProfile, setBrowserProfile] = useState('');
   const [status, setStatus] = useState<AccountStatus>('active');
@@ -35,7 +36,7 @@ export const EditAccountDrawer: React.FC<EditAccountDrawerProps> = ({
       setEmail(account.email || '');
       setPassword(account.password || '');
       setEmailPassword(account.emailPassword || '');
-      setProvider(account.provider || 'Gmail');
+      setProvider(account.provider || 'manual');
       setProxy(account.proxy || '');
       setBrowserProfile(account.browserProfile || '');
       setStatus(account.status || 'active');
@@ -152,12 +153,13 @@ export const EditAccountDrawer: React.FC<EditAccountDrawerProps> = ({
           </div>
 
           <div className="space-y-1">
-            <label className="font-label-xs text-label-xs text-on-surface-variant">Provider</label>
+            <label className="font-label-xs text-label-xs text-on-surface-variant">Nguồn email</label>
             <Select value={provider} onChange={(e) => setProvider(e.target.value)}>
-              <option value="Gmail">Gmail</option>
-              <option value="Outlook">Outlook</option>
-              <option value="Yahoo">Yahoo</option>
-              <option value="Proton">Proton</option>
+              {getEmailSourceOptions(account?.provider).map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
             </Select>
           </div>
         </div>

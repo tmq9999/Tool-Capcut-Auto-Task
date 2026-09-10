@@ -3,6 +3,7 @@ import type { IpcRendererEvent } from 'electron';
 import { IPC_CHANNELS, IPC_EVENTS } from '../shared/contracts/ipc-channels';
 import type { ElectronBridge } from '../shared/contracts/api';
 import type { SettingsSaveRequestDTO } from '../shared/schemas/settings-save.schema';
+import type { AutomationConfigSettingsDTO } from '../shared/schemas/settings.schema';
 import type {
   AccountCreateInputDTO,
   AccountFilterDTO,
@@ -10,7 +11,7 @@ import type {
 } from '../shared/schemas/account.schema';
 import type { AccountExportRequestDTO } from '../shared/schemas/account-export.schema';
 import type { AccountTasksRequestDTO } from '../shared/schemas/account-task.schema';
-import type { LogFilterDTO, CanonicalRuntimeLog } from '../shared/schemas/log.schema';
+import type { LogFilterDTO, CanonicalRuntimeLog, LogsResetPayload } from '../shared/schemas/log.schema';
 import type {
   AutomationRunConfigDTO,
   AutomationRunProgressDTO
@@ -40,7 +41,9 @@ const bridge: ElectronBridge = {
   ping: () => ipcRenderer.invoke(IPC_CHANNELS.PING),
   settings: {
     get: () => ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET),
-    save: (req: SettingsSaveRequestDTO) => ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_SAVE, req)
+    save: (req: SettingsSaveRequestDTO) => ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_SAVE, req),
+    saveAutomation: (req: AutomationConfigSettingsDTO) =>
+      ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_SAVE_AUTOMATION, req)
   },
   credentials: {
     test: (request: string | { serviceName: string; draftSecret?: string; multiloginDraft?: unknown }) => {
@@ -63,7 +66,9 @@ const bridge: ElectronBridge = {
     list: (filter: LogFilterDTO) => ipcRenderer.invoke(IPC_CHANNELS.LOGS_LIST, filter),
     clear: () => ipcRenderer.invoke(IPC_CHANNELS.LOGS_CLEAR),
     onEntry: (listener: (log: CanonicalRuntimeLog) => void) =>
-      subscribe<CanonicalRuntimeLog>(IPC_EVENTS.LOG_ENTRY, listener)
+      subscribe<CanonicalRuntimeLog>(IPC_EVENTS.LOG_ENTRY, listener),
+    onReset: (listener: (payload: LogsResetPayload) => void) =>
+      subscribe<LogsResetPayload>(IPC_EVENTS.LOGS_RESET, listener)
   },
   run: {
     start: (config: AutomationRunConfigDTO) => ipcRenderer.invoke(IPC_CHANNELS.RUN_START, config),

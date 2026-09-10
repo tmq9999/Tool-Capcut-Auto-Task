@@ -14,6 +14,7 @@ const { KiotProxyProvider } = require('../src/main/providers/KiotProxyProvider.t
 const { FetchHttpClient } = require('../src/main/providers/HttpClient.ts');
 const { loginCapcut, isLoggedIn } = require('../src/main/services/capcut/login.ts');
 const { createDirectUiInteraction } = require('../src/main/services/capcut/uiInteractionScheduler.ts');
+const { performDiagnosticCleanup } = require('./legacy-diagnostic-helpers.cjs');
 
 const TARGET_EMAIL = 'renilakatos3730@gmail.com';
 const TARGET_PASSWORD = 'Capcut_0a3ac7de!2026';
@@ -353,16 +354,9 @@ app.whenReady().then(async () => {
     console.log('============================================================\n');
 
   } catch (error) {
+    if (!process.exitCode) process.exitCode = 1;
     console.error('Fatal Error:', error);
   } finally {
-    if (profile && launcher) {
-      console.log('Stopping Multilogin browser profile...');
-      await launcher.stop(profile.profileId).catch(console.error);
-    }
-    if (leaseId && db) {
-      db.prepare("UPDATE proxy_leases SET released_at = datetime('now') WHERE id = ?").run(leaseId);
-      console.log('Proxy lease released cleanly.');
-    }
-    process.exit(0);
+    await performDiagnosticCleanup({ launcher, profile, db, leaseId, proc: process });
   }
 });

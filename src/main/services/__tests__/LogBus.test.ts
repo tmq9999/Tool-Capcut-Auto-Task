@@ -218,4 +218,103 @@ describe('LogBus resilience and shutdown', () => {
     expect(bus.pendingCount()).toBe(0);
     expect(logRepo.queryLogs({ page: 1, pageSize: 50 }).items).toHaveLength(2);
   });
+
+  describe('T07 StartLogResetPort', () => {
+    it('capture and commit resets existing DB and queue logs while preserving newer logs', () => {
+      const bus = createBus();
+      let resetPayload: { clearedThrough: number } | null = null;
+      bus.onReset((p) => { resetPayload = p; });
+
+      // 1 log in DB, 1 log in queue
+      bus.emit({ email: 'old@example.test', step: 'old1', status: 'INFO', message: 'old in DB' });
+      bus.flush();
+      bus.emit({ email: 'old@example.test', step: 'old2', status: 'INFO', message: 'old in queue' });
+
+      expect(logRepo.queryLogs({ page: 1, pageSize: 50 }).total).toBe(1);
+      expect(bus.pendingCount()).toBe(1);
+
+      const ticket = bus.capture('run-1');
+      expect(ticket.ids.length).toBe(2);
+
+      // A newer preflight log arrives AFTER capture
+      bus.emit({ email: 'system', step: 'Preflight', status: 'INFO', message: 'new preflight' });
+      expect(bus.pendingCount()).toBe(2);
+
+      const result = bus.commit(ticket);
+      expect(result.clearedThrough).toBe(ticket.throughSequence);
+      expect(resetPayload).toEqual({ clearedThrough: ticket.throughSequence });
+
+      // After commit, old logs in DB and queue are gone, new preflight remains
+      expect(logRepo.queryLogs({ page: 1, pageSize: 50 }).total).toBe(0);
+      expect(bus.pendingCount()).toBe(1);
+
+      bus.flush();
+      const logsInDb = logRepo.queryLogs({ page: 1, pageSize: 50 }).items;
+      expect(logsInDb).toHaveLength(1);
+      expect(logsInDb[0].message).toBe('new preflight');
+    });
+
+    it('commit throws if ticket is committed twice', () => {
+      const bus = createBus();
+      const ticket = bus.capture('run-2');
+      bus.commit(ticket);
+      expect(() => bus.commit(ticket)).toThrow(/already been committed/);
+    });
+
+    it('listener throwing does not fail commit', () => {
+      const bus = createBus();
+      bus.onReset(() => { throw new Error('listener crash'); });
+      const ticket = bus.capture('run-3');
+      expect(() => bus.commit(ticket)).not.toThrow();
+    });
+  });
+
+  describe('T11 retry schedule, FIFO recovery, and shutdown', () => {
+    it('T11 failed writes wait for retry schedule and recover FIFO', () => {
+      let failing = true;
+      const attempts: number[] = [];
+      const saved: string[] = [];
+      const bus = createBus({
+        insertBatch: (rows) => {
+          attempts.push(rows.length);
+          if (failing) throw new Error('fixture disk full');
+          saved.push(...rows.map((row) => row.id));
+        }
+      }, 50);
+      bus.start();
+      const emitted: string[] = [];
+      for (let i = 0; i < 1000; i += 1) {
+        emitted.push(bus.emit({ email: 'system', step: 'fixture', status: 'INFO', message: String(i) }).id);
+      }
+      expect(attempts).toEqual([50]);
+      scheduler.tick();
+      expect(attempts).toHaveLength(1);
+      now += 500;
+      scheduler.tick();
+      expect(attempts).toEqual([50, 50]);
+      failing = false;
+      for (let i = 0; i < 20; i += 1) {
+        now += 500;
+        scheduler.tick();
+      }
+      expect(saved).toEqual(emitted);
+      expect(bus.pendingCount()).toBe(0);
+      bus.dispose();
+    });
+
+    it('T11 dispose throws LOG_FLUSH_INCOMPLETE when pending entries remain after final forced attempt', () => {
+      const failingSink: ILogSink = {
+        insertBatch: () => {
+          throw new Error('failing disk');
+        }
+      };
+      const bus = createBus(failingSink, 50);
+      bus.emit({ email: 'system', step: 'fixture', status: 'INFO', message: 'pending log' });
+      expect(bus.pendingCount()).toBe(1);
+
+      expect(() => bus.dispose()).toThrow('LOG_FLUSH_INCOMPLETE');
+      expect(bus.pendingCount()).toBe(1);
+    });
+  });
 });
+

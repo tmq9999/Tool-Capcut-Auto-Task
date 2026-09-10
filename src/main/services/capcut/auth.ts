@@ -109,7 +109,7 @@ export async function ensureInApp(
   opts.signal.throwIfAborted();
   const log = opts.log;
 
-  if (await isLoggedIn(page)) {
+  if (await isLoggedIn(page, opts.signal)) {
     log('✅ Profile đã đăng nhập sẵn — không cần xác thực lại');
     return { mode: 'already', created: false };
   }
@@ -125,13 +125,13 @@ export async function ensureInApp(
 
   if (trySignup) {
     const r = await signupCapcut(page, context, account, { log, getOtp: opts.getOtp, ui: opts.ui, signal: opts.signal });
-    if (r.alreadyExists && !(await isLoggedIn(page))) {
+    if (r.alreadyExists && !(await isLoggedIn(page, opts.signal))) {
       log('Email đã tồn tại → chuyển sang đăng nhập');
       await loginCapcut(page, context, account, log, { ui: opts.ui, signal: opts.signal });
-      await assertInApp(page, account);
+      await assertInApp(page, account, opts.signal);
       return { mode: 'signup-then-login', created: false };
     }
-    await assertInApp(page, account);
+    await assertInApp(page, account, opts.signal);
     return { mode: 'signup', created: r.created };
   }
 
@@ -140,7 +140,7 @@ export async function ensureInApp(
     if (isDomReadTimeout(e)) throw e;
     log(`Đăng nhập thất bại: ${(e as Error).message}`);
   });
-  if (await isLoggedIn(page)) return { mode: 'login', created: false };
+  if (await isLoggedIn(page, opts.signal)) return { mode: 'login', created: false };
 
   if (opts.allowSignupFallback === false) {
     throw new RecoveryLoginError(`Recovery login failed for ${account.email} (URL: ${page.url()})`);
@@ -149,11 +149,11 @@ export async function ensureInApp(
   // Không vào được: có thể email chưa từng được tạo trên CapCut.
   log('Đăng nhập không vào được app → thử đăng ký');
   const r = await signupCapcut(page, context, account, { log, getOtp: opts.getOtp, ui: opts.ui, signal: opts.signal });
-  await assertInApp(page, account);
+  await assertInApp(page, account, opts.signal);
   return { mode: 'login-then-signup', created: r.created };
 }
 
-async function assertInApp(page: Page, account: AuthAccount): Promise<void> {
-  if (await isLoggedIn(page)) return;
+async function assertInApp(page: Page, account: AuthAccount, signal?: AbortSignal): Promise<void> {
+  if (await isLoggedIn(page, signal)) return;
   throw new Error(`Chưa vào được app với ${account.email} (URL: ${page.url()})`);
 }

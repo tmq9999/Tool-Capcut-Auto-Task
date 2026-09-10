@@ -1,10 +1,29 @@
-import type { Page } from 'playwright-core';
+import type { Page, Request } from 'playwright-core';
 
 export interface SignedRequestDraft {
   path: string;
   method: 'GET' | 'POST';
   body?: string;
   headers: Record<string, string>;
+}
+
+function materializeSignedDraft(request: Request): SignedRequestDraft {
+  let url: URL;
+  try {
+    url = new URL(request.url());
+  } catch {
+    throw new Error('CAPCUT_SIGNED_REQUEST_INVALID');
+  }
+  const method = request.method();
+  if (method !== 'GET' && method !== 'POST') {
+    throw new Error('CAPCUT_SIGNED_REQUEST_INVALID');
+  }
+  return {
+    path: url.pathname + url.search,
+    method,
+    body: request.postData() ?? undefined,
+    headers: { ...request.headers() }
+  };
 }
 
 /**
@@ -21,13 +40,17 @@ export async function captureNextSignedRequest(
   const deadline = Date.now() + timeoutMs;
   const pending = page.waitForRequest(request => {
     if (Date.now() > deadline) return false;
-    let url: URL;
-    try { url = new URL(request.url()); } catch { return false; }
-    const draft: SignedRequestDraft = { path: url.pathname + url.search, method: request.method() as SignedRequestDraft['method'], body: request.postData() ?? undefined, headers: request.headers() };
-    return predicate(draft);
+    try {
+      const draft = materializeSignedDraft(request);
+      return predicate(draft);
+    } catch {
+      return false;
+    }
   }, { timeout: timeoutMs });
+  pending.catch(() => {});
   await trigger();
-  return await pending as unknown as SignedRequestDraft;
+  const request = await pending;
+  return materializeSignedDraft(request);
 }
 
 export function assertSignedRequest(draft: SignedRequestDraft): void {

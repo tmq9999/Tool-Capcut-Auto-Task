@@ -47,11 +47,11 @@ export const logsColumns: ColumnDef<RuntimeLog, unknown>[] = [
     cell: (info) => {
       const status = info.getValue<RuntimeLog['status']>();
       const badgeVariant =
-        status === 'SUCCESS' || status === 'OK'
+        status === 'SUCCESS'
           ? 'done'
           : status === 'ERROR'
           ? 'error'
-          : status === 'WAITING' || status === 'WARN'
+          : status === 'WAITING' || status === 'WARNING'
           ? 'waiting'
           : status === 'DEBUG'
           ? 'debug'

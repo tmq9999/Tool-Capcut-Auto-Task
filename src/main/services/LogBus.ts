@@ -12,9 +12,21 @@ export interface LogEntryInput {
   message: string;
 }
 
-/** The slice of LogRepository the bus writes through. */
 export interface ILogSink {
   insertBatch(logs: CanonicalRuntimeLog[]): void;
+  listIds?(): string[];
+  deleteIds?(ids: readonly string[]): void;
+}
+
+export interface StartLogResetTicket {
+  readonly runId: string;
+  readonly throughSequence: number;
+  readonly ids: readonly string[];
+}
+
+export interface StartLogResetPort {
+  capture(runId: string): StartLogResetTicket;
+  commit(ticket: StartLogResetTicket): { clearedThrough: number };
 }
 
 export interface LogBusScheduler {
@@ -47,11 +59,14 @@ const nodeScheduler: LogBusScheduler = {
  * transaction, so a burst of worker logs never blocks the main process
  * (AGENTS.md §17). A failed flush keeps the batch queued for the next attempt.
  */
-export class LogBus {
+export class LogBus implements StartLogResetPort {
   private queue: CanonicalRuntimeLog[] = [];
   private readonly listeners = new Set<(log: CanonicalRuntimeLog) => void>();
+  private readonly resetListeners = new Set<(payload: { clearedThrough: number }) => void>();
+  private readonly committedTickets = new WeakSet<StartLogResetTicket>();
   private timerHandle: number | null = null;
   private sequence = 0;
+  private retryNotBefore = 0;
 
   private readonly now: () => number;
   private readonly nextId: () => string;
@@ -94,7 +109,7 @@ export class LogBus {
       listener(entry);
     }
 
-    if (this.queue.length >= this.maxBatchSize) {
+    if (this.queue.length >= this.maxBatchSize && this.now() >= this.retryNotBefore) {
       this.flush();
     }
 
@@ -108,21 +123,85 @@ export class LogBus {
     };
   }
 
-  flush(): void {
+  onReset(listener: (payload: { clearedThrough: number }) => void): () => void {
+    this.resetListeners.add(listener);
+    return () => {
+      this.resetListeners.delete(listener);
+    };
+  }
+
+  capture(runId: string): StartLogResetTicket {
+    const persistedIds = this.sink.listIds ? this.sink.listIds() : [];
+    const queueIds = this.queue.map((entry) => entry.id);
+    const ids = Array.from(new Set([...persistedIds, ...queueIds]));
+    return {
+      runId,
+      throughSequence: this.sequence,
+      ids
+    };
+  }
+
+  commit(ticket: StartLogResetTicket): { clearedThrough: number } {
+    if (this.committedTickets.has(ticket)) {
+      throw new Error('Ticket has already been committed');
+    }
+    this.committedTickets.add(ticket);
+
+    if (this.sink.deleteIds && ticket.ids.length > 0) {
+      this.sink.deleteIds(ticket.ids);
+    }
+
+    const ticketIdSet = new Set(ticket.ids);
+    this.queue = this.queue.filter(
+      (entry) => (entry.streamSequence ?? 0) > ticket.throughSequence && !ticketIdSet.has(entry.id)
+    );
+    if (this.queue.length === 0) {
+      this.retryNotBefore = 0;
+    }
+
+    const payload = { clearedThrough: ticket.throughSequence };
+    for (const listener of this.resetListeners) {
+      try {
+        listener(payload);
+      } catch {
+        // listener failure should not fail commit
+      }
+    }
+
+    return payload;
+  }
+
+  flush(force = false): void {
     if (this.queue.length === 0) return;
-    const batch = this.queue;
+    const now = this.now();
+    if (!force && now < this.retryNotBefore) return;
+
+    const batch = this.queue.slice(0, this.maxBatchSize);
     try {
       this.sink.insertBatch(batch);
-      this.queue = [];
+      this.queue.splice(0, batch.length);
+      if (this.queue.length === 0) {
+        this.retryNotBefore = 0;
+      }
     } catch {
-      // Keep the batch queued; the next flush retries it.
+      this.retryNotBefore = now + this.flushIntervalMs;
     }
   }
 
   clear(clearPersisted: () => void): number {
     clearPersisted();
     this.queue = [];
-    return this.sequence;
+    this.retryNotBefore = 0;
+    const clearedThrough = this.sequence;
+    const payload = { clearedThrough };
+    for (const listener of this.resetListeners) {
+      try {
+        listener(payload);
+      } catch {
+        // ignore
+      }
+    }
+    return clearedThrough;
   }
 
   start(): void {
@@ -139,7 +218,20 @@ export class LogBus {
       this.scheduler.clearInterval(this.timerHandle);
       this.timerHandle = null;
     }
-    this.flush();
+    while (this.queue.length > 0) {
+      const batch = this.queue.slice(0, this.maxBatchSize);
+      try {
+        this.sink.insertBatch(batch);
+        this.queue.splice(0, batch.length);
+      } catch {
+        break;
+      }
+    }
     this.listeners.clear();
+    this.resetListeners.clear();
+    if (this.queue.length > 0) {
+      throw new Error('LOG_FLUSH_INCOMPLETE');
+    }
   }
 }
+

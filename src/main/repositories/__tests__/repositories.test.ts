@@ -216,6 +216,45 @@ describe('Repository Layer Behavior Suite (Task 6 RED)', () => {
       expect(thrownError).toBeInstanceOf(DataCorruptionError);
       expect(thrownError?.message).not.toContain('CORRUPT_NOT_JSON');
     });
+
+    it('T06 replaceEncryptedIfUnchanged updates only if encrypted blob matches', () => {
+      if (!db) throw new Error('DB is not initialized');
+      const repo = new CredentialRepository(db);
+      const original = Buffer.from('enc:original');
+      const replacement = Buffer.from('enc:replacement');
+      const wrong = Buffer.from('enc:wrong');
+
+      repo.saveCredential('multilogin', original);
+
+      expect(repo.replaceEncryptedIfUnchanged('multilogin', wrong, replacement)).toBe(false);
+      expect(repo.getCredential('multilogin')?.encryptedCredentials.equals(original)).toBe(true);
+
+      expect(repo.replaceEncryptedIfUnchanged('multilogin', original, replacement)).toBe(true);
+      expect(repo.getCredential('multilogin')?.encryptedCredentials.equals(replacement)).toBe(true);
+
+      expect(repo.replaceEncryptedIfUnchanged('multilogin', original, Buffer.from('enc:third'))).toBe(false);
+    });
+
+    it('T06 updateMetadataIfUnchanged updates metadata only if encrypted blob matches', () => {
+      if (!db) throw new Error('DB is not initialized');
+      const repo = new CredentialRepository(db);
+      const blob = Buffer.from('enc:blob');
+      const otherBlob = Buffer.from('enc:other');
+
+      repo.saveCredential('gmail94', blob, { maskedHint: 'old', status: 'unknown' });
+
+      const newMeta: CredentialDiagnosticMetadata = {
+        maskedHint: 'new',
+        status: 'connected',
+        lastTestedAt: '2026-09-01T12:00:00.000Z'
+      };
+
+      expect(repo.updateMetadataIfUnchanged('gmail94', otherBlob, newMeta)).toBe(false);
+      expect(repo.getCredential('gmail94')?.metadata.status).toBe('unknown');
+
+      expect(repo.updateMetadataIfUnchanged('gmail94', blob, newMeta)).toBe(true);
+      expect(repo.getCredential('gmail94')?.metadata.status).toBe('connected');
+    });
   });
 
   describe('AccountRepository', () => {
@@ -423,6 +462,79 @@ describe('Repository Layer Behavior Suite (Task 6 RED)', () => {
       expect(deleted).toBe(2);
       expect(repo.getAccountById('acc-del-1')).toBeNull();
     });
+
+    it('T15 (C03): deleteAccounts xóa sạch task tables liên quan trong cùng transaction', () => {
+      if (!db) throw new Error('DB is not initialized');
+      const repo = new AccountRepository(db);
+
+      repo.createAccount({ id: 'acc-t15', email: 't15@test.com', emailProvider: 'gmail94' });
+
+      // Insert associated task tables
+      db.prepare(`
+        INSERT INTO account_tasks (account_id, task_key, title, reward, status, op_id, proved_at, updated_at)
+        VALUES ('acc-t15', 'task_1', 'Task 1', 20, 4, 'op-1', '2026-09-10T00:00:00.000Z', datetime('now'))
+      `).run();
+
+      db.prepare(`
+        INSERT INTO account_task_receipts (account_id, run_id, session_alias, observed_at, required_after, server_total, server_done, is_fresh, is_final, updated_at)
+        VALUES ('acc-t15', 'run-1', 'alias-1', '2026-09-10T00:00:00.000Z', '2026-09-10T00:00:00.000Z', 1, 1, 1, 1, datetime('now'))
+      `).run();
+
+      db.prepare(`
+        INSERT INTO account_task_receipt_items (account_id, task_key, status, ordinal)
+        VALUES ('acc-t15', 'task_1', 4, 1)
+      `).run();
+
+      db.prepare(`
+        INSERT INTO account_unsettled_proofs (account_id, run_id, task_key, op_id, proved_at)
+        VALUES ('acc-t15', 'run-1', 'task_1', 'op-1', '2026-09-10T00:00:00.000Z')
+      `).run();
+
+      const deletedCount = repo.deleteAccounts(['acc-t15', 'acc-t15']); // test duplicate ID handling as well
+      expect(deletedCount).toBe(1);
+
+      // Verify account deleted
+      expect(repo.getAccountById('acc-t15')).toBeNull();
+
+      // Verify all 4 task tables are cleared for acc-t15
+      const remainingTasks = db.prepare('SELECT COUNT(*) as count FROM account_tasks WHERE account_id = ?').get('acc-t15') as { count: number };
+      const remainingReceipts = db.prepare('SELECT COUNT(*) as count FROM account_task_receipts WHERE account_id = ?').get('acc-t15') as { count: number };
+      const remainingItems = db.prepare('SELECT COUNT(*) as count FROM account_task_receipt_items WHERE account_id = ?').get('acc-t15') as { count: number };
+      const remainingProofs = db.prepare('SELECT COUNT(*) as count FROM account_unsettled_proofs WHERE account_id = ?').get('acc-t15') as { count: number };
+
+      expect(remainingTasks.count).toBe(0);
+      expect(remainingReceipts.count).toBe(0);
+      expect(remainingItems.count).toBe(0);
+      expect(remainingProofs.count).toBe(0);
+    });
+
+    it('T15 (C03): trigger error on account deletion rolls back task deletions', () => {
+      if (!db) throw new Error('DB is not initialized');
+      const repo = new AccountRepository(db);
+
+      repo.createAccount({ id: 'acc-rollback', email: 'rb@test.com', emailProvider: 'gmail94' });
+      db.prepare(`
+        INSERT INTO account_tasks (account_id, task_key, title, reward, status, updated_at)
+        VALUES ('acc-rollback', 'task_rb', 'Task RB', 10, 4, datetime('now'))
+      `).run();
+
+      // Create a trigger that raises abort
+      db.exec(`
+        CREATE TRIGGER test_abort_delete
+        BEFORE DELETE ON accounts
+        WHEN OLD.id = 'acc-rollback'
+        BEGIN
+          SELECT RAISE(ABORT, 'TEST_TRIGGER_ABORT');
+        END;
+      `);
+
+      expect(() => repo.deleteAccounts(['acc-rollback'])).toThrow('TEST_TRIGGER_ABORT');
+
+      // Assert rollback: task row should STILL exist
+      const taskCount = db.prepare('SELECT COUNT(*) as count FROM account_tasks WHERE account_id = ?').get('acc-rollback') as { count: number };
+      expect(taskCount.count).toBe(1);
+      expect(repo.getAccountById('acc-rollback')).not.toBeNull();
+    });
   });
 
   describe('LogRepository', () => {
@@ -530,6 +642,23 @@ describe('Repository Layer Behavior Suite (Task 6 RED)', () => {
 
       repo.clearAllLogs();
       expect(repo.queryLogs({ page: 1, pageSize: 50 }).total).toBe(0);
+    });
+
+    it('T07 listIds returns all log IDs in insertion order', () => {
+      if (!db) throw new Error('DB is not initialized');
+      const repo = new LogRepository(db);
+      repo.insertBatch([createSampleLog('id-1'), createSampleLog('id-2'), createSampleLog('id-3')]);
+      expect(repo.listIds()).toEqual(['id-1', 'id-2', 'id-3']);
+    });
+
+    it('T07 deleteIds deletes specific IDs in transaction chunks', () => {
+      if (!db) throw new Error('DB is not initialized');
+      const repo = new LogRepository(db);
+      repo.insertBatch([createSampleLog('id-1'), createSampleLog('id-2'), createSampleLog('id-3'), createSampleLog('id-4')]);
+      repo.deleteIds(['id-1', 'id-3']);
+      expect(repo.listIds()).toEqual(['id-2', 'id-4']);
+      repo.deleteIds([]);
+      expect(repo.listIds()).toEqual(['id-2', 'id-4']);
     });
   });
 });

@@ -72,11 +72,21 @@ export function createDashboardColumns(
     accessorKey: 'passwordCapcut',
     header: 'Password',
     size: 110,
-    cell: ({ row }) => (
-      <span className="font-code text-on-surface select-all tracking-normal">
-        {row.original.passwordCapcut || '-'}
-      </span>
-    ),
+    cell: ({ row }) => {
+      const { passwordCapcut, hasPasswordCapcut } = row.original;
+      if (passwordCapcut == null && hasPasswordCapcut) {
+        return (
+          <span className="text-on-surface-variant">
+            Không đọc được mật khẩu
+          </span>
+        );
+      }
+      return (
+        <span className="font-code text-on-surface select-all tracking-normal">
+          {passwordCapcut ?? '-'}
+        </span>
+      );
+    },
   },
   {
     accessorKey: 'hasEmailData',

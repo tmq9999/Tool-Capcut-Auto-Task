@@ -65,10 +65,22 @@ function fixture(kind: AuthKind, clearError?: unknown) {
 async function run(kind: AuthKind, f: ReturnType<typeof fixture>): Promise<unknown> {
   const context = {} as BrowserContext;
   const creds = { email: 'mail@example.com', password: 'Password1!' };
-  if (kind === 'login') {
-    return loginCapcut(f.page, context, creds, vi.fn(), { ui: f.ui, signal: f.signal });
+  vi.useFakeTimers();
+  try {
+    const running = kind === 'login'
+      ? loginCapcut(f.page, context, creds, vi.fn(), { ui: f.ui, signal: f.signal })
+      : signupCapcut(f.page, context, creds, { log: vi.fn(), ui: f.ui, signal: f.signal });
+    const promise = running.then(
+      val => ({ ok: true as const, val }),
+      err => ({ ok: false as const, err })
+    );
+    await vi.advanceTimersByTimeAsync(5000);
+    const result = await promise;
+    if (!result.ok) throw result.err;
+    return result.val;
+  } finally {
+    vi.useRealTimers();
   }
-  return signupCapcut(f.page, context, creds, { log: vi.fn(), ui: f.ui, signal: f.signal });
 }
 
 describe.each(['login', 'signup'] as const)('%s verified typing', (kind) => {

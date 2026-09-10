@@ -207,4 +207,34 @@ describe('ServiceConnectionManager.testConnection error normalization', () => {
 
     expect(credRepo.getCredential('gmail94')).toBeNull();
   });
+
+  it.each(['replace', 'delete'] as const)('M07 does not overwrite metadata if credential is %s during testConnection', async change => {
+    storeKey('gmail94', 'OLD-KEY');
+    let resolveProbe!: (result: SanitizedDiagnosticResult) => void;
+    const registry = new ProviderRegistry(new Map([['gmail94', () => ({
+      testConnection: () => new Promise(resolve => { resolveProbe = resolve; })
+    })]]));
+    const manager = createManager(registry);
+
+    const pending = manager.testConnection('gmail94');
+
+    if (change === 'replace') {
+      storeKey('gmail94', 'NEW-KEY');
+      credRepo.updateMetadata('gmail94', { maskedHint: 'new', status: 'unknown' });
+    } else {
+      credRepo.delete('gmail94');
+    }
+
+    resolveProbe({ code: 'OK', message: 'ok', timestamp: new Date(FIXED_NOW).toISOString() });
+    const result = await pending;
+    expect(result.code).toBe('OK');
+
+    const current = credRepo.getCredential('gmail94');
+    if (change === 'delete') {
+      expect(current).toBeNull();
+    } else {
+      // Must keep new key and its metadata, NOT overwrite with OK/connected from OLD-KEY
+      expect(current?.metadata.status).toBe('unknown');
+    }
+  });
 });

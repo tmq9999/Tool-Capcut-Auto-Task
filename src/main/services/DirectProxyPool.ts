@@ -7,6 +7,15 @@ interface WaitingWorker {
   onAbort?: () => void;
 }
 
+export function getDirectProxyRouteKey(proxy: BrowserProxySettings): string {
+  const scheme = (proxy.type ?? 'http').toLowerCase();
+  const host = proxy.host.toLowerCase();
+  const port = Number(proxy.port);
+  const username = proxy.username ?? '';
+  const password = proxy.password ?? '';
+  return JSON.stringify([scheme, host, port, username, password]);
+}
+
 /**
  * DirectProxyPool quản lý danh sách proxy tĩnh (Direct IP) đa luồng an toàn:
  * - Đảm bảo mỗi luồng đang chạy được cấp một proxy riêng biệt, không luồng nào dùng chung proxy tại cùng một thời điểm.
@@ -20,6 +29,14 @@ export class DirectProxyPool {
   private readonly waiters: WaitingWorker[] = [];
 
   constructor(proxies: BrowserProxySettings[]) {
+    const seen = new Set<string>();
+    for (const proxy of proxies) {
+      const key = getDirectProxyRouteKey(proxy);
+      if (seen.has(key)) {
+        throw new Error(`DirectProxyPool: Duplicate proxy route detected for ${proxy.host}:${proxy.port}`);
+      }
+      seen.add(key);
+    }
     this.allProxies = [...proxies];
     this.available = [...proxies];
   }

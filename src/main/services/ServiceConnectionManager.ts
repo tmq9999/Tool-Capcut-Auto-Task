@@ -117,6 +117,8 @@ export class ServiceConnectionManager {
     }
 
     const isDraft = typeof draftSecret === 'string' || multiloginDraft !== undefined;
+    const initialCredential = !isDraft ? this.credRepo.getCredential(serviceName) : null;
+    const expectedBlob = initialCredential ? Buffer.from(initialCredential.encryptedCredentials) : null;
 
     let result: SanitizedDiagnosticResult;
     try {
@@ -131,23 +133,27 @@ export class ServiceConnectionManager {
           };
     }
 
-    const existing = this.credRepo.getCredential(serviceName);
-    if (existing && !isDraft) {
-      const metadata: CredentialDiagnosticMetadata = {
-        ...existing.metadata,
-        status: ServiceConnectionManager.toDiagnosticStatus(result.code),
-        lastTestedAt: timestamp,
-        lastTestResult: result,
-      };
+    if (expectedBlob && !isDraft) {
+      const current = this.credRepo.getCredential(serviceName);
+      if (current && current.encryptedCredentials.equals(expectedBlob)) {
+        const metadata: CredentialDiagnosticMetadata = {
+          ...current.metadata,
+          status: ServiceConnectionManager.toDiagnosticStatus(result.code),
+          lastTestedAt: timestamp,
+          lastTestResult: result,
+        };
 
-      const balance = result.details?.balance;
-      if (typeof balance === 'number') {
-        metadata.balance = balance;
-        metadata.balanceFetchedAt = timestamp;
+        const balance = result.details?.balance;
+        if (typeof balance === 'number') {
+          metadata.balance = balance;
+          metadata.balanceFetchedAt = timestamp;
+        }
+
+        const updated = this.credRepo.updateMetadataIfUnchanged(serviceName, expectedBlob, metadata);
+        if (updated) {
+          this.getDiagnosticStatuses();
+        }
       }
-
-      this.credRepo.updateMetadata(serviceName, metadata);
-      this.getDiagnosticStatuses();
     }
 
     return result;

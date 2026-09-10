@@ -9,7 +9,8 @@ export class AutomationTerminalError extends Error {
   constructor(
     public readonly state: TerminalState,
     public readonly reason: AutomationTerminalReasonDTO,
-    message: string
+    message: string,
+    public readonly cause?: Error
   ) {
     super(message);
     this.name = 'AutomationTerminalError';

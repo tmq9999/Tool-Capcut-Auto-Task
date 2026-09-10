@@ -66,6 +66,34 @@ export function registerSettingsIpc(
   );
 
   registrar.handle(
+    IPC_CHANNELS.SETTINGS_SAVE_AUTOMATION,
+    async (_event: unknown, request?: unknown): Promise<IpcEnvelope<{ success: boolean }>> => {
+      const validation = IpcContractRegistry.settings.saveAutomation.request.safeParse(request);
+      if (!validation.success) {
+        return validationError(validation.error);
+      }
+
+      try {
+        settingsService.saveAutomationSettings(validation.data);
+        return {
+          success: true,
+          data: {
+            success: true
+          }
+        };
+      } catch {
+        return {
+          success: false,
+          error: {
+            code: 'ERR_PERSISTENCE_FAILED',
+            message: 'Failed to persist automation settings.'
+          }
+        };
+      }
+    }
+  );
+
+  registrar.handle(
     IPC_CHANNELS.CREDENTIALS_TEST,
     async (_event: unknown, request?: unknown): Promise<IpcEnvelope<SanitizedDiagnosticResult>> => {
       const validation = IpcContractRegistry.credentials.test.request.safeParse(request);
@@ -101,6 +129,7 @@ export function registerSettingsIpc(
     cleanedUp = true;
     registrar.removeHandler(IPC_CHANNELS.SETTINGS_GET);
     registrar.removeHandler(IPC_CHANNELS.SETTINGS_SAVE);
+    registrar.removeHandler(IPC_CHANNELS.SETTINGS_SAVE_AUTOMATION);
     registrar.removeHandler(IPC_CHANNELS.CREDENTIALS_TEST);
   };
 }

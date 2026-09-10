@@ -18,6 +18,7 @@ import { LogBus, type ILogSink } from '../LogBus';
 import { ProviderError } from '../../providers/ProviderError';
 import { AutomationRunConfigSchema, type AutomationRunConfigDTO, type AutomationRunProgressDTO } from '../../../shared/schemas/automation.schema';
 import type { AcquiredProxyLease } from '../ProxyLeaseManager';
+import type { DirectProxyPool } from '../DirectProxyPool';
 import type { PurchasedEmailDTO, EmailSourceProvider } from '../../../shared/schemas/provider.schema';
 import { AutomationTerminalError } from '../AutomationTerminalError';
 import type {
@@ -228,7 +229,8 @@ function createService(
   launcher?: BrowserLauncher,
   httpOnlyRunner?: HttpOnlyAccountRunner,
   capcut?: CapcutTaskRunner,
-  observation?: ObservationScope
+  observation?: ObservationScope,
+  emailOtpSource?: { readOtp: (id: string) => Promise<string | null> }
 ): AutomationRunService {
   let configuredHoldMs = 0;
   const workSources: AutomationWorkSourceFactory = {
@@ -370,7 +372,7 @@ function createService(
   const service = new AutomationRunService(
     {
       workSources,
-      emailOtp: { readOtp: async () => '123456' },
+      emailOtp: emailOtpSource ?? { readOtp: async () => '123456' },
       proxies: proxySource,
       browser,
       accounts,
@@ -971,6 +973,25 @@ describe('AutomationRunService HTTP-only mission transport', () => {
       missionTransport: 'http-only',
       proxy: { mode: 'direct', entries: [] }
     }))).rejects.toMatchObject({ reason: { code: 'PROVIDER_CONFIG_ERROR' } });
+
+    expect(workSourceCreateCalls).toBe(0);
+    expect(emailSource.purchaseCalls).toHaveLength(0);
+    expect(browser.startCalls).toHaveLength(0);
+  });
+
+  it('rejects direct proxy configuration with duplicate routes before acquiring resources', async () => {
+    const service = createService();
+
+    await expect(service.start(baseConfig({
+      threadCount: 2,
+      proxy: {
+        mode: 'direct',
+        entries: [
+          'http://1.2.3.4:8080:u:p',
+          'HTTP://1.2.3.4:8080:u:p'
+        ]
+      }
+    }))).rejects.toThrow(/dòng 2 \(trùng với dòng 1\)/);
 
     expect(workSourceCreateCalls).toBe(0);
     expect(emailSource.purchaseCalls).toHaveLength(0);
@@ -4442,6 +4463,402 @@ describe('session-scoped browser ownership', () => {
       expect(input.authAttempt).toBe('existing-only');
       expect(input.isNewAccount).toBe(false);
       expect(input.getOtp).toBeUndefined();
+    });
+  });
+
+  describe('S05: Bounded Stop cho OTP Reader', () => {
+    it('S05-A: readOtp deferred -> Stop -> waiter rejects with abort error; late code does not log SUCCESS', async () => {
+      let resolveReadOtp!: (val: string | null) => void;
+      const deferredRead = new Promise<string | null>((resolve) => {
+        resolveReadOtp = resolve;
+      });
+
+      emailSource.available = 1;
+      let readerCalled = false;
+      let readerError: unknown = null;
+
+      const customCapcut: CapcutTaskRunner = {
+        runAccount: async (input) => {
+          if (input.getOtp) {
+            readerCalled = true;
+            try {
+              await input.getOtp();
+            } catch (err) {
+              readerError = err;
+              throw err;
+            }
+          }
+          return {
+            authenticated: false,
+            done: 0,
+            total: 1,
+            credits: 0,
+            creditsTotal: 0,
+            missing: [],
+            tasks: [],
+            unsettledProofs: [],
+            verification: {
+              runId: input.runId ?? 'run-1',
+              sessionAlias: input.sessionAlias ?? 's1',
+              observedAt: new Date().toISOString(),
+              requiredAfter: new Date().toISOString(),
+              fresh: true,
+              final: true,
+              serverTotal: 1,
+              serverDone: 0,
+              complete: false
+            }
+          };
+        }
+      };
+
+      const service = createService(
+        undefined,
+        undefined,
+        customCapcut,
+        undefined,
+        { readOtp: async () => deferredRead }
+      );
+
+      await service.start(baseConfig({ threadCount: 1, emailSource: { mode: 'api', provider: 'gmail94', service: 'facebook' } }));
+
+      // Wait until getOtp has been called
+      for (let i = 0; i < 50; i++) {
+        if (readerCalled) break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(readerCalled).toBe(true);
+
+      // Trigger Stop while readOtp is still pending
+      await service.stop();
+      await service.waitForCompletion();
+
+      // Reader rejected due to cancellation
+      expect(readerError).toBeDefined();
+
+      // Clear sink logs before resolving late code
+      sink.rows = [];
+
+      // Now resolve late code
+      resolveReadOtp('654321');
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Assert no SUCCESS log was emitted for late code
+      const successLogs = (sink.rows as Array<{ status: string; step: string }>).filter((r) => r.status === 'SUCCESS' && r.step === 'OTP');
+      expect(successLogs).toHaveLength(0);
+    });
+
+    it('S05-B: deadline passes during read -> existing timeout error thrown, late code not accepted, no further polls', async () => {
+      emailSource.available = 1;
+      let readerError: unknown = null;
+      let readAttempts = 0;
+      let resolveSlowRead: ((val: string | null) => void) | null = null;
+
+      const customCapcut: CapcutTaskRunner = {
+        runAccount: async (input) => {
+          if (input.getOtp) {
+            try {
+              await input.getOtp();
+            } catch (err) {
+              readerError = err;
+              throw err;
+            }
+          }
+          return {
+            authenticated: false,
+            done: 0,
+            total: 1,
+            credits: 0,
+            creditsTotal: 0,
+            missing: [],
+            tasks: [],
+            unsettledProofs: [],
+            verification: {
+              runId: input.runId ?? 'run-1',
+              sessionAlias: input.sessionAlias ?? 's1',
+              observedAt: new Date().toISOString(),
+              requiredAfter: new Date().toISOString(),
+              fresh: true,
+              final: true,
+              serverTotal: 1,
+              serverDone: 0,
+              complete: false
+            }
+          };
+        }
+      };
+
+      // Mock Date.now to advance past deadline
+      const origNow = Date.now;
+      let nowOffset = 0;
+      Date.now = vi.fn(() => origNow() + nowOffset);
+
+      try {
+        const service = createService(
+          undefined,
+          undefined,
+          customCapcut,
+          undefined,
+          {
+            readOtp: async () => {
+              readAttempts += 1;
+              nowOffset += 89_950;
+              return new Promise<string | null>((resolve) => {
+                resolveSlowRead = resolve;
+              });
+            }
+          }
+        );
+
+        await service.start(baseConfig({ threadCount: 1, emailSource: { mode: 'api', provider: 'gmail94', service: 'facebook' } }));
+
+        await service.waitForCompletion();
+
+        expect(readerError).toBeDefined();
+        expect((readerError as Error).message).toMatch(/Không lấy được OTP cho/);
+        // Only 1 attempt made because deadline expired during read
+        expect(readAttempts).toBe(1);
+
+        // Late resolution should be discarded
+        if (resolveSlowRead) {
+          (resolveSlowRead as (val: string | null) => void)('123456');
+        }
+        await new Promise((r) => setTimeout(r, 20));
+
+        const successLogs = (sink.rows as Array<{ status: string; step: string }>).filter((r) => r.status === 'SUCCESS' && r.step === 'OTP');
+        expect(successLogs).toHaveLength(0);
+      } finally {
+        Date.now = origNow;
+      }
+    });
+  });
+
+  describe('S07 — route retention on unconfirmed profile stop', () => {
+    interface ServiceCleanupAccessor {
+      activeThreads: Map<string, { session?: unknown }>;
+      activeProxyCount: number;
+      activeDirectProxyPool: DirectProxyPool | null;
+      cleanupIteration: (...args: unknown[]) => Promise<void>;
+    }
+
+    it('S07-A & S07-B: keeps proxy lease, retains thread, and skips releaseAll when profile stop fails', async () => {
+      browser.failStopFor.add('profile-1');
+
+      const service = createService();
+      await service.start(baseConfig({
+        threadCount: 1,
+        emailSource: { mode: 'manual', entries: ['user1@example.com|pass1'] }
+      }));
+
+      await service.waitForCompletion();
+
+      // Profile was never successfully stopped
+      expect(browser.stopped).not.toContain('profile-1');
+
+      // Thread remains retained in activeThreads
+      const activeThreads = (service as unknown as ServiceCleanupAccessor).activeThreads;
+      expect(activeThreads.size).toBe(1);
+      const thread = activeThreads.get('acc-1');
+      expect(thread).toBeDefined();
+      expect(thread?.session).toBeDefined();
+
+      // Route was NOT released to proxySource
+      expect(proxySource.released).not.toContain('10.0.0.1');
+      // releaseAll was NOT called on finalization
+      expect(proxySource.releaseAllCalls).toBe(0);
+      // activeProxyCount remains 1, not forced to 0
+      expect((service as unknown as ServiceCleanupAccessor).activeProxyCount).toBe(1);
+
+      // Terminal reason indicates resource cleanup failure
+      expect(service.getProgress().state).toBe('failed');
+      expect(service.getProgress().terminalReason?.code).toBe('RESOURCE_CLEANUP_FAILED');
+    });
+
+    it('S07-C: with two workers, releases only the stopped worker route while retaining the failed-stop route', async () => {
+      browser.failStopFor.add('profile-1'); // Worker 1's profile fails to stop; profile-2 will succeed
+
+      const service = createService();
+      await service.start(baseConfig({
+        threadCount: 2,
+        emailSource: { mode: 'manual', entries: ['user1@example.com|pass1', 'user2@example.com|pass2'] }
+      }));
+
+      await service.waitForCompletion();
+
+      // Profile 2 stopped, profile 1 failed
+      expect(browser.stopped).toContain('profile-2');
+      expect(browser.stopped).not.toContain('profile-1');
+
+      // Only Worker 2's proxy was released
+      expect(proxySource.released).toContain('10.0.0.2');
+      expect(proxySource.released).not.toContain('10.0.0.1');
+
+      // releaseAll was NOT called because a session was retained
+      expect(proxySource.releaseAllCalls).toBe(0);
+
+      // Retained proxy count is 1
+      expect((service as unknown as ServiceCleanupAccessor).activeProxyCount).toBe(1);
+      expect((service as unknown as ServiceCleanupAccessor).activeThreads.size).toBe(1);
+    });
+
+    it('S07-D: keeps direct proxy inUse in pool when profile stop fails and prevents reacquisition', async () => {
+      browser.failStopFor.add('profile-1');
+
+      const service = createService();
+      await service.start(baseConfig({
+        threadCount: 1,
+        proxy: {
+          mode: 'direct',
+          entries: ['127.0.0.1:8080']
+        },
+        emailSource: { mode: 'manual', entries: ['user1@example.com|pass1'] }
+      }));
+
+      await service.waitForCompletion();
+
+      const pool = (service as unknown as ServiceCleanupAccessor).activeDirectProxyPool;
+      expect(pool).toBeDefined();
+      expect(pool!.activeCount).toBe(1);
+      expect(pool!.availableCount).toBe(0);
+      expect((service as unknown as ServiceCleanupAccessor).activeProxyCount).toBe(1);
+    });
+
+    it('S07-E: releases route exactly once on duplicate cleanup calls after successful stop', async () => {
+      const service = createService();
+      await service.start(baseConfig({
+        threadCount: 1,
+        emailSource: { mode: 'manual', entries: ['user1@example.com|pass1'] }
+      }));
+
+      await service.waitForCompletion();
+
+      expect(browser.stopped).toContain('profile-1');
+      expect(proxySource.released).toEqual(['10.0.0.1']);
+
+      // Simulate a duplicate cleanupIteration call on the same thread with routeReleased flag
+      const duplicateLease: AcquiredProxyLease = {
+        leaseId: 'l1',
+        keyValue: 'k1',
+        ip: '10.0.0.1',
+        host: '10.0.0.1',
+        port: 8080,
+        protocol: 'http',
+        username: null,
+        password: null,
+        nextChangeSeconds: 60
+      };
+      const fakeThread = { runId: 'run-1', workerAlias: 'w1', accountAlias: 'a1', accountId: 'acc-1', routeReleased: true };
+      await (service as unknown as ServiceCleanupAccessor).cleanupIteration(
+        { release: vi.fn() },
+        undefined,
+        true,
+        fakeThread,
+        duplicateLease
+      );
+
+      // Route release count is still 1
+      expect(proxySource.released).toEqual(['10.0.0.1']);
+    });
+
+    it('S07-G: refuses to start a new run while a profile remains unstopped from a previous run', async () => {
+      browser.failStopFor.add('profile-1');
+
+      const service = createService();
+      await service.start(baseConfig({
+        threadCount: 1,
+        emailSource: { mode: 'manual', entries: ['user1@example.com|pass1'] }
+      }));
+
+      await service.waitForCompletion();
+
+      // Attempt to start a new run
+      await expect(
+        service.start(baseConfig({
+          threadCount: 1,
+          emailSource: { mode: 'manual', entries: ['user2@example.com|pass2'] }
+        }))
+      ).rejects.toThrow('Đang có phiên hoặc profile chưa dừng');
+    });
+
+    it('T04: classifyUiResult prioritizes fatalError over skipped and marks account as error, not done', async () => {
+      const mockCapcut: CapcutTaskRunner = {
+        runAccount: vi.fn(async (input) => ({
+          authenticated: false,
+          skipped: true,
+          fatalError: 'Critical onboarding failure',
+          subscription: 'trial',
+          tasks: [],
+          missing: [],
+          unsettledProofs: [],
+          verification: {
+            runId: input.runId ?? 'run-1',
+            sessionAlias: input.sessionAlias ?? 's1',
+            observedAt: new Date().toISOString(),
+            requiredAfter: new Date().toISOString(),
+            fresh: true,
+            final: true,
+            complete: false,
+            serverTotal: 0,
+            serverDone: 0
+          },
+          done: 0,
+          total: 0,
+          credits: 0,
+          creditsTotal: 0
+        }))
+      };
+
+
+      const service = createService(undefined, undefined, mockCapcut);
+      await service.start(baseConfig({
+        threadCount: 1,
+        emailSource: { mode: 'manual', entries: ['demo@example.test|demo'] }
+      }));
+
+      await service.waitForCompletion();
+
+      const finalProgress = progressEvents[progressEvents.length - 1];
+      expect(finalProgress?.accountsFailed).toBe(1);
+      expect(finalProgress?.accountsCompleted).toBe(0);
+
+      const statusUpdates = accounts.updates.filter(u => u.data.status !== undefined);
+      const lastStatusUpdate = statusUpdates[statusUpdates.length - 1];
+      expect(lastStatusUpdate?.data.status).toBe('error');
+      expect(lastStatusUpdate?.data.status).not.toBe('done');
+    });
+
+    it.each(['throw', 'false'] as const)('T05 terminal update %s fails run', async mode => {
+      const original = accounts.update.bind(accounts);
+      let terminalAttempts = 0;
+      accounts.update = (id, data) => {
+        if (['done', 'error', 'stopped'].includes(String(data.status))) {
+          terminalAttempts += 1;
+          if (mode === 'throw') throw new Error('fixture terminal write failure');
+          return { success: false };
+        }
+        return original(id, data);
+      };
+      const service = createService();
+      await service.start(baseConfig({
+        threadCount: 1,
+        emailSource: { mode: 'manual', entries: ['demo@example.test|demo'] }
+      }));
+      const result = await service.waitForCompletion();
+      expect(result).toMatchObject({
+        state: 'failed',
+        accountsAccepted: 1,
+        accountsCompleted: 0,
+        accountsFailed: 1,
+        accountsStopped: 0,
+        workersActive: 0,
+        terminalReason: {
+          code: 'INTERNAL_ERROR',
+          details: { failure: 'ACCOUNT_TERMINAL_PERSISTENCE_FAILED', persisted: false }
+        }
+      });
+      expect(terminalAttempts).toBe(1);
+      expect(browser.stopped).toEqual(['profile-1']);
+      expect(proxySource.released).toEqual(proxySource.acquired);
     });
   });
 });

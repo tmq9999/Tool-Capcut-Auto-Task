@@ -1,5 +1,10 @@
 import type Database from 'better-sqlite3';
-import { AppSettingsSchema, type AppSettingsDTO } from '../../shared/schemas/settings.schema';
+import {
+  AppSettingsSchema,
+  AutomationConfigSettingsSchema,
+  type AppSettingsDTO,
+  type AutomationConfigSettingsDTO
+} from '../../shared/schemas/settings.schema';
 import { DEFAULT_APP_SETTINGS } from '../../shared/settings/default-settings';
 import { DataCorruptionError } from './CredentialRepository';
 
@@ -58,5 +63,15 @@ export class SettingsRepository {
         value = excluded.value,
         updated_at = datetime('now')
     `).run(SettingsRepository.SETTINGS_KEY, jsonStr);
+  }
+
+  saveAutomationSettings(automation: AutomationConfigSettingsDTO): void {
+    const validatedAutomation = AutomationConfigSettingsSchema.parse(automation);
+    const current = this.getAppSettings() ?? DEFAULT_APP_SETTINGS;
+    const updated: AppSettingsDTO = {
+      ...current,
+      automation: validatedAutomation
+    };
+    this.saveAppSettings(updated);
   }
 }

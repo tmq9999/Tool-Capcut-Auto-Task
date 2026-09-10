@@ -353,12 +353,18 @@ export class AccountsController {
    * vào state — hộp thoại tự hiện, không được để một lần đọc hỏng làm vỡ trang.
    */
   async loadTasks(accountId: string): Promise<AccountTasksResponseDTO | null> {
-    const response = await this.bridge.accounts.tasks({ accountId });
-    if (!response.success) {
-      this.setState({ error: response.error.message });
+    try {
+      const response = await this.bridge.accounts.tasks({ accountId });
+      if (!response.success) {
+        this.setState({ error: response.error.message });
+        return null;
+      }
+      return response.data;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Không tải được tiến độ nhiệm vụ.';
+      this.setState({ error: message });
       return null;
     }
-    return response.data;
   }
 
   /**
@@ -368,17 +374,24 @@ export class AccountsController {
    * chung "Thao tác thất bại" thì không giúp gì.
    */
   async exportAccounts(request: AccountExportRequestDTO): Promise<ExportOutcome> {
-    const response = await this.bridge.accounts.export(request);
-    if (!response.success) {
-      return { kind: 'error', message: response.error.message };
+    try {
+      const response = await this.bridge.accounts.export(request);
+      if (!response.success) {
+        return { kind: 'error', message: response.error.message };
+      }
+      if (response.data.canceled || !response.data.filePath) {
+        return { kind: 'canceled' };
+      }
+      return {
+        kind: 'done',
+        filePath: response.data.filePath,
+        exportedCount: response.data.exportedCount
+      };
+    } catch (err: unknown) {
+      return {
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'Xuất dữ liệu thất bại.'
+      };
     }
-    if (response.data.canceled || !response.data.filePath) {
-      return { kind: 'canceled' };
-    }
-    return {
-      kind: 'done',
-      filePath: response.data.filePath,
-      exportedCount: response.data.exportedCount
-    };
   }
 }

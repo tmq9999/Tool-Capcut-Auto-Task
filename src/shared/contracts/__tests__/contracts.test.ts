@@ -28,6 +28,7 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
       'PING',
       'SETTINGS_GET',
       'SETTINGS_SAVE',
+      'SETTINGS_SAVE_AUTOMATION',
       'CREDENTIALS_TEST',
       'ACCOUNTS_LIST',
       'ACCOUNTS_CREATE',
@@ -52,6 +53,7 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
   it('keeps main-to-renderer push channels separate from invokable channels', () => {
     expect(IPC_EVENTS).toEqual({
       LOG_ENTRY: 'logs:on-entry',
+      LOGS_RESET: 'logs:on-reset',
       RUN_PROGRESS: 'run:on-progress',
       SERVICE_STATUS: 'services:on-status-changed'
     });
@@ -188,8 +190,13 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
         save: async () => ({
           success: true,
           data: { success: true }
+        }),
+        saveAutomation: async () => ({
+          success: true,
+          data: { success: true }
         })
       },
+
       credentials: {
         test: async () => ({
           success: true,
@@ -228,8 +235,10 @@ describe('Typed IPC Contracts & Preload Boundary (Task 3 RED)', () => {
       logs: {
         list: async () => ({ success: true, data: { items: [], total: 0 } }),
         clear: async () => ({ success: true, data: { success: true } }),
-        onEntry: () => () => {}
+        onEntry: () => () => {},
+        onReset: () => () => {}
       },
+
       run: {
         start: async () => ({ success: true, data: { runId: 'run-1' } }),
         health: async () => ({ success: true, data: { runId: 'run-health', artifactBasename: 'run-health.jsonl', attempted: 3, healthy: 3, stopped: 3, cleanupFailures: 0 } }),

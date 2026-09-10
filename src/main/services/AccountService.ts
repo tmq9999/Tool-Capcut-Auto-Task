@@ -84,10 +84,15 @@ export class AccountService {
     return {
       total: result.total,
       items: result.items.map((item) => {
-        const record = records.get(item.id);
-        const passwordCapcut = record?.passwordCapcutEncrypted
-          ? this.vault.decrypt(record.passwordCapcutEncrypted)
-          : null;
+        const value = records.get(item.id)?.passwordCapcutEncrypted;
+        let passwordCapcut: string | null = null;
+        if (value) {
+          try {
+            passwordCapcut = this.vault.decrypt(value);
+          } catch {
+            // Preserve the row; the existing presence flag distinguishes read failure.
+          }
+        }
         return {
           ...item,
           passwordCapcut

@@ -33,7 +33,14 @@ import type { BrowserContext, Page } from 'playwright-core';
 
 import { dump } from './diag';
 import { foregroundPage, rand } from './human';
-import { isDomReadTimeout } from './cancellation';
+import {
+  abortableDelay,
+  boundedDomRead,
+  isDomReadTimeout,
+  withinDeadline,
+  OperationDeadlineError,
+} from './cancellation';
+import { skipOnboardingSurvey } from './overlays';
 import type { AccountUiInteraction } from './types';
 
 export interface TrialInfo {
@@ -101,14 +108,60 @@ const READ_TRIAL = `(() => {
   };
 })()`;
 
-/** Mở modal nâng cấp. Trả về false nếu không bấm được lối vào nào. */
-async function openUpgradeModal(
+/**
+ * Xử lý onboarding survey che khuất Upgrade modal.
+ * Nhận diện modal khảo sát cụ thể có nút Skip; đóng xong xác nhận lại xem đã biến mất chưa.
+ */
+async function clearTrialSurvey(
+  page: Page,
+  log: (message: string) => void,
+  ui: AccountUiInteraction,
+  signal: AbortSignal
+): Promise<boolean> {
+  const survey = page
+    .locator('.lv-modal-wrapper:visible')
+    .filter({ has: page.locator('.skip-mrkR37, [class*="skip-"]') })
+    .first();
+  const present = await boundedDomRead(
+    () => survey.isVisible(),
+    'trial:survey-visible',
+    1000,
+    signal
+  );
+  if (!present) return true;
+  await skipOnboardingSurvey(page, log, ui, signal);
+  signal.throwIfAborted();
+  return !(await boundedDomRead(
+    () => survey.isVisible(),
+    'trial:survey-after-skip',
+    1000,
+    signal
+  ));
+}
+
+/**
+ * Mở modal bảng giá Upgrade từ header CapCut.
+ *
+ * Thử lần lượt các vị trí nút Upgrade đã biết cho đến khi thấy thẻ gói Pro
+ * xuất hiện trong modal. Trả `true` nếu mở thành công, `false` nếu đã thử hết
+ * mà modal không hiện ra.
+ */
+export async function openUpgradeModal(
   page: Page,
   log: (m: string) => void,
   ui: AccountUiInteraction,
   signal: AbortSignal
 ): Promise<boolean> {
   signal.throwIfAborted();
+
+  const pricingCard = page.locator('[class*="subscriptionProduct"]').first();
+  const alreadyOpen = await boundedDomRead(
+    () => pricingCard.isVisible(),
+    'trial:pricing-already-open',
+    1000,
+    signal
+  ).catch(() => false);
+  if (alreadyOpen) return true;
 
   // Các popup che header phải dẹp trước: banner xin email, và onboarding "Got it".
   for (const sel of [
@@ -127,7 +180,7 @@ async function openUpgradeModal(
         signal.throwIfAborted();
         if (isDomReadTimeout(error)) throw error;
       });
-      await page.waitForTimeout(800);
+      await abortableDelay(800, signal);
     }
   }
 
@@ -153,22 +206,31 @@ async function openUpgradeModal(
 
     // `[data-id=...]` là div rỗng bọc ngoài; click vào chính nó vẫn nổi bọt
     // xuống component React bên trong, nên dùng force thay vì đòi visible.
+    let clickSucceeded = false;
     await foregroundPage(
       page,
       { signal, stage: 'trial:open-upgrade', ui },
       () => el.click({ timeout: 5000, force: true })
-    ).catch((error: unknown) => {
+    ).then(() => {
+      clickSucceeded = true;
+    }).catch((error: unknown) => {
       signal.throwIfAborted();
       if (isDomReadTimeout(error)) throw error;
+      log(`bấm ${label} thất bại: ${error instanceof Error ? error.message : String(error)}`);
     });
-    log(`đã bấm ${label}`);
-    await page.waitForTimeout(rand(6000, 8000));
 
-    const opened = await page
-      .locator('[class*="subscriptionProduct"]')
-      .first()
-      .isVisible({ timeout: 6000 })
-      .catch(() => false);
+    if (clickSucceeded) {
+      log(`đã bấm ${label}`);
+    }
+
+    await abortableDelay(rand(6000, 8000), signal);
+
+    const opened = await boundedDomRead(
+      () => page.locator('[class*="subscriptionProduct"]').first().isVisible(),
+      'trial:pricing-opened',
+      6000,
+      signal
+    ).catch(() => false);
     if (opened) return true;
   }
   return false;
@@ -177,8 +239,8 @@ async function openUpgradeModal(
 /**
  * Kiểm tra ưu đãi dùng thử Pro của account đang đăng nhập.
  *
- * Không đọc được thì trả `unknown`; caller phải chặn task execution thay vì
- * biến lỗi đọc DOM thành một ưu đãi chưa từng được quan sát.
+ * Chỉ ĐỌC thông tin và trả về kết quả — KHÔNG bấm "Claim" / "Start free trial".
+ * Việc kích hoạt (nếu có) do người gọi quyết định.
  */
 export async function checkProTrial(
   page: Page,
@@ -201,13 +263,34 @@ export async function checkProTrial(
     dumpName,
   });
 
-  await page
-    .goto('https://www.capcut.com/my-edit?start_tab=video', {
-      waitUntil: 'domcontentloaded',
-      timeout: 60000,
-    })
-    .catch(() => {});
-  await page.waitForTimeout(rand(6000, 9000));
+  try {
+    await withinDeadline(
+      page.goto('https://www.capcut.com/my-edit?start_tab=video', {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000,
+      }),
+      60000,
+      signal
+    );
+  } catch {
+    signal.throwIfAborted();
+  }
+  signal.throwIfAborted();
+  await abortableDelay(rand(6000, 9000), signal);
+
+  signal.throwIfAborted();
+  let surveyCleared: boolean;
+  try {
+    surveyCleared = await clearTrialSurvey(page, log, ui, signal);
+  } catch (error) {
+    signal.throwIfAborted();
+    if (isDomReadTimeout(error) || error instanceof OperationDeadlineError) throw error;
+    return fallback('Không xác minh được trạng thái khảo sát onboarding');
+  }
+  signal.throwIfAborted();
+  if (!surveyCleared) {
+    return fallback('Khảo sát onboarding vẫn che trang', await dump(page, 'upgrade_modal_missing'));
+  }
 
   if (!(await openUpgradeModal(page, log, ui, signal))) {
     return fallback('không mở được modal nâng cấp', await dump(page, 'upgrade_modal_missing'));

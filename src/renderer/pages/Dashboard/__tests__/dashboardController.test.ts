@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { DashboardController, type IDashboardBridge } from '../dashboardController';
 import { DEFAULT_AUTOMATION_CONFIG } from '../automationConfig';
 import type { IpcEnvelope } from '../../../../shared/schemas/ipc-envelope.schema';
-import type { AccountListItemDTO } from '../../../../shared/schemas/account.schema';
-import type { CanonicalRuntimeLog } from '../../../../shared/schemas/log.schema';
+import type { AccountListItemDTO, AccountFilterDTO } from '../../../../shared/schemas/account.schema';
+import type { CanonicalRuntimeLog, LogsResetPayload } from '../../../../shared/schemas/log.schema';
 import type {
   AutomationRunConfigDTO,
   AutomationRunProgressDTO,
@@ -11,7 +11,7 @@ import type {
 } from '../../../../shared/schemas/automation.schema';
 import type { EmailProviderConfigDTO } from '../../../../shared/schemas/provider.schema';
 import { DEFAULT_APP_SETTINGS } from '../../../../shared/settings/default-settings';
-import type { AppSettingsDTO } from '../../../../shared/schemas/settings.schema';
+import type { AppSettingsDTO, AutomationConfigSettingsDTO } from '../../../../shared/schemas/settings.schema';
 import type { SettingsSaveRequestDTO } from '../../../../shared/schemas/settings-save.schema';
 
 function account(id: string): AccountListItemDTO {
@@ -70,6 +70,7 @@ class FakeBridge implements IDashboardBridge {
   public stoppedThreads: string[] = [];
   public runningThreads: RunningThreadInfoDTO[] = [];
   public savedSettings: SettingsSaveRequestDTO[] = [];
+  public savedAutomationSettings: AutomationConfigSettingsDTO[] = [];
   public storedSettings: AppSettingsDTO = JSON.parse(JSON.stringify(DEFAULT_APP_SETTINGS)) as AppSettingsDTO;
   public saveFails = false;
 
@@ -85,24 +86,54 @@ class FakeBridge implements IDashboardBridge {
       this.savedSettings.push(req);
       this.storedSettings = req.settings;
       return { success: true, data: { success: true } };
+    },
+    saveAutomation: async (req: AutomationConfigSettingsDTO): Promise<IpcEnvelope<{ success: boolean }>> => {
+      if (this.saveFails) {
+        return { success: false, error: { code: 'ERR_PERSISTENCE_FAILED', message: 'đĩa lỗi' } };
+      }
+      this.savedAutomationSettings.push(req);
+      this.storedSettings.automation = req;
+      return { success: true, data: { success: true } };
     }
   };
   public logListeners: Array<(entry: CanonicalRuntimeLog) => void> = [];
+  public resetListeners: Array<(payload: LogsResetPayload) => void> = [];
   public progressListeners: Array<(progress: AutomationRunProgressDTO) => void> = [];
   public unsubscribeCalls = 0;
 
   public accountRows: AccountListItemDTO[] = [account('acc-1')];
   public removed: string[][] = [];
-  public startEnvelope: IpcEnvelope<{ runId: string }> = { success: true, data: { runId: 'run-1' } };
+  public startEnvelope: IpcEnvelope<{ runId: string; artifactBasename?: string; clearedThrough?: number }> = {
+    success: true,
+    data: { runId: 'run-1' }
+  };
   public listFails = false;
 
+  public threadsCalls = 0;
+  public useDeferredAccounts = false;
+  public accountsDeferred: Array<{
+    resolve: (val: IpcEnvelope<{ items: AccountListItemDTO[]; total: number }>) => void;
+    reject: (err: unknown) => void;
+  }> = [];
+
+  public useDeferredThreads = false;
+  public threadsDeferred: Array<{
+    resolve: (val: IpcEnvelope<RunningThreadInfoDTO[]>) => void;
+    reject: (err: unknown) => void;
+  }> = [];
+
   accounts = {
-    list: async (): Promise<IpcEnvelope<{ items: AccountListItemDTO[]; total: number }>> => {
+    list: (_filter?: AccountFilterDTO): Promise<IpcEnvelope<{ items: AccountListItemDTO[]; total: number }>> => {
       this.accountsListCalls += 1;
-      if (this.listFails) {
-        return { success: false, error: { code: 'ERR_PERSISTENCE_FAILED', message: 'db down' } };
+      if (this.useDeferredAccounts) {
+        return new Promise((resolve, reject) => {
+          this.accountsDeferred.push({ resolve, reject });
+        });
       }
-      return { success: true, data: { items: this.accountRows, total: this.accountRows.length } };
+      if (this.listFails) {
+        return Promise.resolve({ success: false, error: { code: 'ERR_PERSISTENCE_FAILED', message: 'db down' } });
+      }
+      return Promise.resolve({ success: true, data: { items: this.accountRows, total: this.accountRows.length } });
     },
     remove: async (ids: string[]): Promise<IpcEnvelope<{ deletedCount: number }>> => {
       this.removed.push(ids);
@@ -118,7 +149,19 @@ class FakeBridge implements IDashboardBridge {
     }),
     onEntry: (listener: (entry: CanonicalRuntimeLog) => void): (() => void) => {
       this.logListeners.push(listener);
-      return () => { this.unsubscribeCalls += 1; };
+      return () => {
+        this.unsubscribeCalls += 1;
+        const idx = this.logListeners.indexOf(listener);
+        if (idx >= 0) this.logListeners.splice(idx, 1);
+      };
+    },
+    onReset: (listener: (payload: LogsResetPayload) => void): (() => void) => {
+      this.resetListeners.push(listener);
+      return () => {
+        this.unsubscribeCalls += 1;
+        const idx = this.resetListeners.indexOf(listener);
+        if (idx >= 0) this.resetListeners.splice(idx, 1);
+      };
     },
     clear: async (): Promise<IpcEnvelope<{ success: boolean }>> => {
       this.clearLogsCalls += 1;
@@ -127,7 +170,9 @@ class FakeBridge implements IDashboardBridge {
   };
 
   run = {
-    start: async (config: AutomationRunConfigDTO): Promise<IpcEnvelope<{ runId: string }>> => {
+    start: async (
+      config: AutomationRunConfigDTO
+    ): Promise<IpcEnvelope<{ runId: string; artifactBasename?: string; clearedThrough?: number }>> => {
       this.startedConfigs.push(config);
       return this.startEnvelope;
     },
@@ -139,14 +184,26 @@ class FakeBridge implements IDashboardBridge {
       this.stoppedThreads.push(accountId);
       return { success: true, data: { stopped: true } };
     },
-    threads: async (): Promise<IpcEnvelope<RunningThreadInfoDTO[]>> => ({
-      success: true,
-      data: this.runningThreads
-    }),
+    threads: (): Promise<IpcEnvelope<RunningThreadInfoDTO[]>> => {
+      this.threadsCalls += 1;
+      if (this.useDeferredThreads) {
+        return new Promise((resolve, reject) => {
+          this.threadsDeferred.push({ resolve, reject });
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        data: this.runningThreads
+      });
+    },
     progress: async (): Promise<IpcEnvelope<AutomationRunProgressDTO>> => ({ success: true, data: IDLE }),
     onProgress: (listener: (progress: AutomationRunProgressDTO) => void): (() => void) => {
       this.progressListeners.push(listener);
-      return () => { this.unsubscribeCalls += 1; };
+      return () => {
+        this.unsubscribeCalls += 1;
+        const idx = this.progressListeners.indexOf(listener);
+        if (idx >= 0) this.progressListeners.splice(idx, 1);
+      };
     }
   };
 
@@ -160,6 +217,10 @@ class FakeBridge implements IDashboardBridge {
 
   pushProgress(progress: AutomationRunProgressDTO): void {
     for (const listener of this.progressListeners) listener(progress);
+  }
+
+  pushReset(payload: LogsResetPayload): void {
+    for (const listener of this.resetListeners) listener(payload);
   }
 }
 
@@ -427,7 +488,7 @@ describe('DashboardController live updates', () => {
 
     controller.dispose();
 
-    expect(bridge.unsubscribeCalls).toBe(2);
+    expect(bridge.unsubscribeCalls).toBe(3);
   });
 });
 
@@ -546,11 +607,11 @@ describe('DashboardController lưu cấu hình', () => {
     const saved = await controller.saveConfig();
 
     expect(saved).toBe(true);
-    const payload = bridge.savedSettings[0];
-    expect(payload.settings.automation.threadCount).toBe(7);
-    expect(payload.settings.automation.module).toBe('team');
-    expect(payload.settings.exportConfig).toEqual(bridge.storedSettings.exportConfig);
-    expect(payload.settings.general).toEqual(bridge.storedSettings.general);
+    const payload = bridge.savedAutomationSettings[0];
+    expect(payload.threadCount).toBe(7);
+    expect(payload.module).toBe('team');
+    expect(bridge.storedSettings.exportConfig).toEqual(DEFAULT_APP_SETTINGS.exportConfig);
+    expect(bridge.storedSettings.general).toEqual(DEFAULT_APP_SETTINGS.general);
   });
 
   it('không gửi credential nào khi chỉ lưu cấu hình', async () => {
@@ -559,8 +620,8 @@ describe('DashboardController lưu cấu hình', () => {
 
     await controller.saveConfig();
 
-    const ops = bridge.savedSettings[0].credentials.map((c) => c.operation.action);
-    expect(new Set(ops)).toEqual(new Set(['keep']));
+    expect(bridge.savedSettings).toHaveLength(0);
+    expect(bridge.savedAutomationSettings).toHaveLength(1);
   });
 
   it('không bao giờ ghi email hoặc mật khẩu đã dán vào Settings nhưng lưu cấu hình proxy', async () => {
@@ -576,7 +637,7 @@ describe('DashboardController lưu cấu hình', () => {
 
     await controller.saveConfig();
 
-    const asJson = JSON.stringify(bridge.savedSettings[0]);
+    const asJson = JSON.stringify(bridge.savedAutomationSettings[0]);
     expect(asJson).not.toContain('secret-pass');
     expect(asJson).not.toContain('Str0ng!Secret');
     expect(asJson).toContain('9.9.9.9:1:user:secret');
@@ -599,8 +660,8 @@ describe('DashboardController lưu cấu hình', () => {
     controller.updateConfig({ threadCount: 12 });
     await controller.flushPendingSave();
 
-    expect(bridge.savedSettings).toHaveLength(1);
-    expect(bridge.savedSettings[0].settings.automation.threadCount).toBe(12);
+    expect(bridge.savedAutomationSettings).toHaveLength(1);
+    expect(bridge.savedAutomationSettings[0].threadCount).toBe(12);
   });
 
   it('không tự lưu khi tắt autoSaveConfig', async () => {
@@ -670,3 +731,393 @@ describe('DashboardController với nguồn email domain tự sở hữu', () =>
     expect(controller.getState().error).toContain('khóa');
   });
 });
+
+async function flush(): Promise<void> {
+  for (let i = 0; i < 10; i++) {
+    await Promise.resolve();
+  }
+}
+
+describe('DashboardController - S03 Coalesced Snapshot Refresh', () => {
+  it('S03-A: giữ pair1 deferred, phát 100 progress + poll tick -> accounts=1, threads=1; state.progress là event cuối', async () => {
+    bridge.useDeferredAccounts = true;
+    bridge.useDeferredThreads = true;
+    const controller = new DashboardController(bridge);
+    controller.attach();
+
+    for (let i = 0; i < 100; i++) {
+      bridge.pushProgress({
+        ...IDLE,
+        state: 'running',
+        workerTarget: 2,
+        accountsAccepted: i + 1,
+        message: `event ${i + 1}`
+      });
+    }
+
+    expect(bridge.accountsListCalls).toBe(1);
+    expect(bridge.threadsCalls).toBe(1);
+    expect(controller.getState().progress.accountsAccepted).toBe(100);
+    expect(controller.getState().progress.message).toBe('event 100');
+
+    controller.dispose();
+  });
+
+  it('S03-B: settle một nửa -> không pair2; settle nửa còn lại -> đúng một trailing pair; hết events -> dừng ở 2', async () => {
+    bridge.useDeferredAccounts = true;
+    bridge.useDeferredThreads = true;
+    const controller = new DashboardController(bridge);
+    controller.attach();
+
+    // Push events to initiate Pair 1 and mark pending
+    bridge.pushProgress({ ...IDLE, state: 'running', accountsAccepted: 1 });
+    bridge.pushProgress({ ...IDLE, state: 'running', accountsAccepted: 2 });
+
+    expect(bridge.accountsListCalls).toBe(1);
+    expect(bridge.threadsCalls).toBe(1);
+    expect(bridge.accountsDeferred).toHaveLength(1);
+    expect(bridge.threadsDeferred).toHaveLength(1);
+
+    // Settle accounts half of pair 1
+    bridge.accountsDeferred[0].resolve({
+      success: true,
+      data: { items: [account('acc-1')], total: 1 }
+    });
+    await flush();
+
+    // Still no pair 2!
+    expect(bridge.accountsListCalls).toBe(1);
+    expect(bridge.threadsCalls).toBe(1);
+
+    // Settle threads half of pair 1
+    bridge.threadsDeferred[0].resolve({
+      success: true,
+      data: []
+    });
+    await flush();
+
+    // Exactly one trailing pair started!
+    expect(bridge.accountsListCalls).toBe(2);
+    expect(bridge.threadsCalls).toBe(2);
+    expect(bridge.accountsDeferred).toHaveLength(2);
+    expect(bridge.threadsDeferred).toHaveLength(2);
+
+    // Settle pair 2
+    bridge.accountsDeferred[1].resolve({
+      success: true,
+      data: { items: [account('acc-1'), account('acc-2')], total: 2 }
+    });
+    bridge.threadsDeferred[1].resolve({
+      success: true,
+      data: []
+    });
+    await flush();
+
+    // Stops at 2, no pair 3!
+    expect(bridge.accountsListCalls).toBe(2);
+    expect(bridge.threadsCalls).toBe(2);
+    controller.dispose();
+  });
+
+  it('S03-C: một bên reject, bên kia pending -> gate vẫn giữ; không unhandled rejection', async () => {
+    bridge.useDeferredAccounts = true;
+    bridge.useDeferredThreads = true;
+    const controller = new DashboardController(bridge);
+    controller.attach();
+
+    bridge.pushProgress({ ...IDLE, state: 'running' });
+    bridge.pushProgress({ ...IDLE, state: 'running', accountsAccepted: 3 });
+
+    expect(bridge.accountsDeferred).toHaveLength(1);
+    expect(bridge.threadsDeferred).toHaveLength(1);
+
+    // Reject accounts immediately
+    bridge.accountsDeferred[0].reject(new Error('accounts network dropped'));
+    await flush();
+
+    // Gate still holds because threads is pending
+    expect(bridge.accountsListCalls).toBe(1);
+    expect(bridge.threadsCalls).toBe(1);
+
+    // Settle threads
+    bridge.threadsDeferred[0].resolve({ success: true, data: [] });
+    await flush();
+
+    // Trailing pair started and error is recorded safely
+    expect(bridge.accountsListCalls).toBe(2);
+    expect(controller.getState().error).toContain('accounts network dropped');
+
+    // Clean up pair 2
+    bridge.accountsDeferred[1].resolve({ success: true, data: { items: [], total: 0 } });
+    bridge.threadsDeferred[1].resolve({ success: true, data: [] });
+    await flush();
+    controller.dispose();
+  });
+
+  it('S03-D: terminal event trong pair1 -> pair2 đọc final rows; Stop/counter không bị trì hoãn', async () => {
+    bridge.useDeferredAccounts = true;
+    bridge.useDeferredThreads = true;
+    const controller = new DashboardController(bridge);
+    controller.attach();
+
+    // Start running
+    bridge.pushProgress({ ...IDLE, state: 'running', accountsAccepted: 1 });
+    expect(bridge.accountsListCalls).toBe(1);
+
+    // While pair 1 is running, terminal event arrives
+    bridge.pushProgress({
+      ...IDLE,
+      state: 'completed',
+      accountsAccepted: 1,
+      accountsCompleted: 1,
+      message: 'Đã hoàn thành toàn bộ'
+    });
+
+    // Counter/progress updated immediately
+    expect(controller.getState().progress.state).toBe('completed');
+    expect(controller.getState().progress.accountsCompleted).toBe(1);
+
+    // Settle pair 1
+    bridge.accountsDeferred[0].resolve({ success: true, data: { items: [account('acc-1')], total: 1 } });
+    bridge.threadsDeferred[0].resolve({ success: true, data: [] });
+    await flush();
+
+    // Pair 2 runs to read final rows
+    expect(bridge.accountsListCalls).toBe(2);
+    bridge.accountsDeferred[1].resolve({ success: true, data: { items: [account('acc-1')], total: 1 } });
+    bridge.threadsDeferred[1].resolve({ success: true, data: [] });
+    await flush();
+    controller.dispose();
+  });
+
+  it('S03-E: dispose/attach + old response -> không stale publish/duplicate physical pair', async () => {
+    bridge.useDeferredAccounts = true;
+    bridge.useDeferredThreads = true;
+    const controller = new DashboardController(bridge);
+    controller.attach();
+
+    bridge.pushProgress({ ...IDLE, state: 'running' });
+    expect(bridge.accountsListCalls).toBe(1);
+
+    // Dispose while pair 1 is in-flight
+    controller.dispose();
+
+    // Re-attach and push new progress
+    controller.attach();
+    bridge.pushProgress({ ...IDLE, state: 'running', accountsAccepted: 10 });
+
+    // Physical gate still held (pair 1 was running), no duplicate physical pair started yet
+    expect(bridge.accountsListCalls).toBe(1);
+
+    // Pair 1 finishes with old data
+    bridge.accountsDeferred[0].resolve({
+      success: true,
+      data: { items: [account('acc-old')], total: 1 }
+    });
+    bridge.threadsDeferred[0].resolve({ success: true, data: [] });
+    await flush();
+
+    // Old data was NOT published because generation changed on dispose
+    expect(controller.getState().accounts.map((a) => a.id)).not.toContain('acc-old');
+
+    // Trailing pair for the new generation started!
+    expect(bridge.accountsListCalls).toBe(2);
+    bridge.accountsDeferred[1].resolve({
+      success: true,
+      data: { items: [account('acc-new')], total: 1 }
+    });
+    bridge.threadsDeferred[1].resolve({ success: true, data: [] });
+    await flush();
+
+    // New data is published
+    expect(controller.getState().accounts.map((a) => a.id)).toEqual(['acc-new']);
+    controller.dispose();
+  });
+
+  it('S03-F: stopThread and removeAccounts coordinate through the snapshot gate', async () => {
+    bridge.useDeferredAccounts = true;
+    bridge.useDeferredThreads = true;
+    const controller = new DashboardController(bridge);
+
+    const stopPromise = controller.stopThread('acc-1');
+    await flush();
+    expect(bridge.stoppedThreads).toEqual(['acc-1']);
+    // Snapshot pair started
+    expect(bridge.accountsListCalls).toBe(1);
+    expect(bridge.threadsCalls).toBe(1);
+
+    bridge.accountsDeferred[0].resolve({ success: true, data: { items: [], total: 0 } });
+    bridge.threadsDeferred[0].resolve({ success: true, data: [] });
+    await flush();
+    const result = await stopPromise;
+    expect(result).toBe(true);
+  });
+
+  it('S03-G: progress/poll tiếp tục đến trong mọi pair; caller awaited vẫn settle sau pair phục vụ nó, không chờ queue yên mãi', async () => {
+    bridge.useDeferredAccounts = true;
+    bridge.useDeferredThreads = true;
+    const controller = new DashboardController(bridge);
+    controller.attach();
+
+    // Pair 1 starts
+    bridge.pushProgress({ ...IDLE, state: 'running' });
+    expect(bridge.accountsListCalls).toBe(1);
+
+    // Caller A arrives while Pair 1 is running -> gets nextCompletion (Pair 2)
+    let callerASettled = false;
+    const callerAPromise = controller.stopThread('acc-target').then(() => {
+      callerASettled = true;
+    });
+
+    // Pair 1 finishes
+    bridge.accountsDeferred[0].resolve({ success: true, data: { items: [account('acc-1')], total: 1 } });
+    bridge.threadsDeferred[0].resolve({ success: true, data: [] });
+    await flush();
+
+    // Pair 2 starts (serving Caller A)
+    expect(bridge.accountsListCalls).toBe(2);
+    expect(callerASettled).toBe(false);
+
+    // While Pair 2 is running, more progress events keep arriving!
+    bridge.pushProgress({ ...IDLE, state: 'running', accountsAccepted: 50 });
+    bridge.pushProgress({ ...IDLE, state: 'running', accountsAccepted: 51 });
+
+    // Now Pair 2 settles
+    bridge.accountsDeferred[1].resolve({ success: true, data: { items: [account('acc-1')], total: 1 } });
+    bridge.threadsDeferred[1].resolve({ success: true, data: [] });
+    await flush();
+
+    // Caller A MUST BE SETTLED NOW! It must NOT wait for Pair 3!
+    expect(callerASettled).toBe(true);
+    await callerAPromise;
+
+    // Pair 3 started for the later events
+    expect(bridge.accountsListCalls).toBe(3);
+    bridge.accountsDeferred[2].resolve({ success: true, data: { items: [], total: 0 } });
+    bridge.threadsDeferred[2].resolve({ success: true, data: [] });
+    await flush();
+    controller.dispose();
+  });
+});
+
+describe('T08: Settings Revision & Save Queue', () => {
+  it('increments configRevision and saves automation settings via bridge', async () => {
+    const controller = new DashboardController(bridge);
+    await controller.load();
+
+    expect(controller.getConfigRevision()).toBe(0);
+    controller.updateConfig({ threadCount: 7 });
+    expect(controller.getConfigRevision()).toBe(1);
+
+    await controller.flushPendingSave();
+    expect(controller.getLastSavedRevision()).toBe(1);
+    expect(bridge.savedAutomationSettings).toHaveLength(1);
+    expect(bridge.savedAutomationSettings[0].threadCount).toBe(7);
+  });
+
+  it('queues multiple config updates sequentially without dropping the latest revision', async () => {
+    const controller = new DashboardController(bridge);
+    await controller.load();
+
+    controller.updateConfig({ threadCount: 3 });
+    controller.updateConfig({ threadCount: 5 });
+    controller.updateConfig({ threadCount: 9 });
+
+    expect(controller.getConfigRevision()).toBe(3);
+    await controller.flushPendingSave();
+
+    expect(controller.getLastSavedRevision()).toBe(3);
+    const lastSaved = bridge.savedAutomationSettings[bridge.savedAutomationSettings.length - 1];
+    expect(lastSaved.threadCount).toBe(9);
+  });
+
+  it('start() flushes pending save before sending start command', async () => {
+    const controller = new DashboardController(bridge);
+    await controller.load();
+    controller.updateConfig({ emailList: 'fixture@example.com|pass', threadCount: 4 });
+
+    expect(controller.getLastSavedRevision()).toBe(0);
+
+    await controller.start();
+
+    expect(controller.getLastSavedRevision()).toBe(1);
+    expect(bridge.startedConfigs[0].threadCount).toBe(4);
+  });
+
+  it('sets error when saveAutomation fails', async () => {
+    bridge.saveFails = true;
+    const controller = new DashboardController(bridge);
+    await controller.load();
+
+    controller.updateConfig({ threadCount: 8 });
+    await controller.flushPendingSave();
+
+    expect(controller.getState().error).toContain('đĩa lỗi');
+  });
+});
+
+describe('T07-B: Logs Reset Synchronization', () => {
+  it('start() does not clear logs optimistically if start fails', async () => {
+    bridge.startEnvelope = { success: false, error: { code: 'ERR_START_FAILED', message: 'preflight failed' } };
+    const controller = new DashboardController(bridge);
+    await controller.load();
+    controller.updateConfig({ emailList: 'fixture@example.com|pass' });
+
+    expect(controller.getState().logs).toHaveLength(1);
+
+    const started = await controller.start();
+    expect(started).toBe(false);
+    expect(controller.getState().logs).toHaveLength(1);
+    expect(controller.getState().error).toContain('preflight failed');
+  });
+
+  it('start() applies clearedThrough watermark from successful start response', async () => {
+    bridge.startEnvelope = { success: true, data: { runId: 'run-new', clearedThrough: 100 } };
+    const controller = new DashboardController(bridge);
+    await controller.load();
+    controller.attach();
+    controller.updateConfig({ emailList: 'fixture@example.com|pass' });
+
+    const logOld: CanonicalRuntimeLog = { ...log('old-1'), streamSequence: 50 };
+    const logNew: CanonicalRuntimeLog = { ...log('new-1'), streamSequence: 101 };
+    bridge.pushLog(logOld);
+    bridge.pushLog(logNew);
+
+    await controller.start();
+
+    const logs = controller.getState().logs;
+    expect(logs.some((l) => l.id === 'old-1')).toBe(false);
+    expect(logs.some((l) => l.id === 'new-1')).toBe(true);
+    controller.dispose();
+  });
+
+  it('attaches onReset listener and clears logs according to payload clearedThrough', async () => {
+    const controller = new DashboardController(bridge);
+    await controller.load();
+    controller.attach();
+
+    const log1: CanonicalRuntimeLog = { ...log('l1'), streamSequence: 10 };
+    const log2: CanonicalRuntimeLog = { ...log('l2'), streamSequence: 25 };
+    bridge.pushLog(log1);
+    bridge.pushLog(log2);
+
+    expect(controller.getState().logs.map((l) => l.id)).toEqual(['l2', 'l1', 'log-1']);
+
+    bridge.pushReset({ clearedThrough: 20 });
+
+    const remaining = controller.getState().logs;
+    expect(remaining.map((l) => l.id)).toEqual(['l2']);
+
+    controller.dispose();
+  });
+
+  it('disposes onReset listener on controller.dispose()', () => {
+    const controller = new DashboardController(bridge);
+    controller.attach();
+    expect(bridge.resetListeners).toHaveLength(1);
+
+    controller.dispose();
+    expect(bridge.resetListeners).toHaveLength(0);
+  });
+});
+

@@ -260,6 +260,7 @@ export function createProviderStack(
     browser: new DispatchingBrowserRuntime(browserRuntimes),
     accounts: accountService,
     logBus,
+    logReset: logBus,
     launcher: launcherFactory,
     // Chưa có `userDataDir` (test, script) thì không bật engine: luồng giữ browser
     // như trước, không có đường nào tự ý chạy nhiệm vụ thật.

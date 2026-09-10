@@ -20,7 +20,7 @@ export function registerAutomationIpc(
     'start' | 'stop' | 'stopThread' | 'getProgress' | 'getRunningThreads' | 'runHealthCheck' | 'getUserDataDir'
   >,
   emailService: Pick<EmailPurchaseService, 'getProviderConfigs' | 'readOtp'>,
-  logRepo?: Pick<LogRepository, 'clearAllLogs'>
+  _logRepo?: Pick<LogRepository, 'clearAllLogs'>
 ): () => void {
   registrar.handle(IPC_CHANNELS.RUN_HEALTH, async (_event: unknown, request?: unknown) => {
     const parsed = IpcContractRegistry.run.health.request.safeParse(request);
@@ -41,11 +41,10 @@ export function registerAutomationIpc(
   });
   registrar.handle(
     IPC_CHANNELS.RUN_START,
-    async (_event: unknown, request?: unknown): Promise<IpcEnvelope<{ runId: string }>> => {
+    async (_event: unknown, request?: unknown): Promise<IpcEnvelope<{ runId: string; artifactBasename?: string; clearedThrough?: number }>> => {
       const parsed = IpcContractRegistry.run.start.request.safeParse(request);
       if (!parsed.success) return validationError(parsed.error);
       try {
-        logRepo?.clearAllLogs();
         return ok(await runService.start(parsed.data));
       } catch (err: unknown) {
         return toErrorEnvelope(err);

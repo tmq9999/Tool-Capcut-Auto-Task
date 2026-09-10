@@ -16,6 +16,7 @@ const { Gmail94Provider } = require('../src/main/providers/Gmail94Provider.ts');
 const { FetchHttpClient } = require('../src/main/providers/HttpClient.ts');
 const { signupCapcut } = require('../src/main/services/capcut/signup.ts');
 const { createDirectUiInteraction } = require('../src/main/services/capcut/uiInteractionScheduler.ts');
+const { performDiagnosticCleanup } = require('./legacy-diagnostic-helpers.cjs');
 
 const LEAF_TASKS = [
   'capcut_web_pwa_install',
@@ -298,16 +299,9 @@ app.whenReady().then(async () => {
     console.log('========================================\n');
 
   } catch (error) {
+    if (!process.exitCode) process.exitCode = 1;
     console.error('Fatal Error:', error);
   } finally {
-    if (profile && launcher) {
-      console.log('Stopping browser profile...');
-      await launcher.stop(profile.profileId).catch(console.error);
-    }
-    if (leaseId && db) {
-      db.prepare("UPDATE proxy_leases SET released_at = datetime('now') WHERE id = ?").run(leaseId);
-      console.log('Proxy lease released cleanly.');
-    }
-    process.exit(0);
+    await performDiagnosticCleanup({ launcher, profile, db, leaseId, proc: process });
   }
 });

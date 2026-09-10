@@ -12,6 +12,7 @@ import {
   type ProxyProtocol
 } from '../repositories/ProxyLeaseRepository';
 import type { ObservationIdentity, ObservationScope } from '../providers/ObservedHttpClient';
+import { abortable } from './capcut/cancellation';
 
 /** The slice of KiotProxyProvider the lease manager depends on. */
 export interface IKiotProxyLeaseApi {
@@ -90,7 +91,8 @@ export class ProxyLeaseManager {
     return this.observation?.withObservationScope(identity, operation) ?? operation();
   }
 
-  private async loadKeys(): Promise<string[]> {
+  private async loadKeys(signal?: AbortSignal): Promise<string[]> {
+    signal?.throwIfAborted();
     if (this.cachedKeys) return this.cachedKeys;
 
     // An explicit list wins: never reach for keys the operator did not offer.
@@ -100,8 +102,10 @@ export class ProxyLeaseManager {
       return this.cachedKeys;
     }
 
-    const keys = await this.observe({ provider: 'kiotproxy', operation: 'proxy-list' }, () =>
+    const listPromise = this.observe({ provider: 'kiotproxy', operation: 'proxy-list' }, () =>
       this.api.listKeys(this.options.apiToken));
+    const keys = signal ? await abortable(listPromise, signal) : await listPromise;
+    signal?.throwIfAborted();
     this.cachedKeys = keys.map((entry) => entry.keyValue);
     return this.cachedKeys;
   }
@@ -125,20 +129,36 @@ export class ProxyLeaseManager {
    * The IP the gateway currently reports for this key, or null when it cannot
    * say. Used only to tell a real rotation from a no-op.
    */
-  private async readCurrentIp(keyValue: string): Promise<string | null> {
+  private async readCurrentIp(keyValue: string, signal?: AbortSignal): Promise<string | null> {
+    signal?.throwIfAborted();
     try {
-      const current = await this.observe({ provider: 'kiotproxy', operation: 'proxy-current' }, () =>
+      const currentPromise = this.observe({ provider: 'kiotproxy', operation: 'proxy-current' }, () =>
         this.api.getCurrentProxy(keyValue, this.options.protocol ?? 'http'));
+      const current = signal ? await abortable(currentPromise, signal) : await currentPromise;
+      signal?.throwIfAborted();
       return current.ip;
     } catch {
+      signal?.throwIfAborted();
       return null;
     }
   }
 
-  private async tryKey(keyValue: string): Promise<AcquiredProxyLease | null> {
+  private async tryKey(keyValue: string, signal?: AbortSignal): Promise<AcquiredProxyLease | null> {
+    signal?.throwIfAborted();
     this.busyKeys.add(keyValue);
 
-    const previousIp = await this.readCurrentIp(keyValue);
+    let previousIp: string | null = null;
+    try {
+      previousIp = await this.readCurrentIp(keyValue, signal);
+    } catch (err: unknown) {
+      this.busyKeys.delete(keyValue);
+      throw err;
+    }
+
+    if (signal?.aborted) {
+      this.busyKeys.delete(keyValue);
+      throw signal.reason ?? new Error('Aborted');
+    }
 
     let lease: KiotProxyLease;
     try {
@@ -198,7 +218,8 @@ export class ProxyLeaseManager {
    * passes so a run reports the stall instead of hanging forever.
    */
   async acquire(signal?: AbortSignal): Promise<AcquiredProxyLease> {
-    const keys = await this.loadKeys();
+    signal?.throwIfAborted();
+    const keys = await this.loadKeys(signal);
     if (keys.length === 0) {
       throw new ProviderError(
         'CONFIG_ERROR',
@@ -213,8 +234,9 @@ export class ProxyLeaseManager {
     for (;;) {
       signal?.throwIfAborted();
       for (const keyValue of keys) {
+        signal?.throwIfAborted();
         if (this.busyKeys.has(keyValue) || this.isCoolingDown(keyValue)) continue;
-        const lease = await this.tryKey(keyValue);
+        const lease = await this.tryKey(keyValue, signal);
         if (lease) return lease;
       }
 

@@ -34,6 +34,12 @@ interface StoredAuthBlob {
   session?: StoredSession;
 }
 
+interface CredentialSnapshot {
+  encryptedBuffer: Buffer;
+  blob: StoredAuthBlob;
+  generation: number;
+}
+
 function configError(message: string): ProviderError {
   return new ProviderError('CONFIG_ERROR', message, MULTILOGIN_SERVICE_NAME);
 }
@@ -45,7 +51,12 @@ function configError(message: string): ProviderError {
  * verbatim. Secrets never leave the main process.
  */
 export class MultiloginAuthService {
-  private inFlight: Promise<string> | null = null;
+  private inFlight: {
+    promise: Promise<string>;
+    encryptedBuffer: Buffer;
+    generation: number;
+  } | null = null;
+  private authGeneration = 0;
 
   constructor(
     private readonly credRepo: CredentialRepository,
@@ -67,7 +78,7 @@ export class MultiloginAuthService {
     return this.observation?.withObservationScope(identity, action) ?? action();
   }
 
-  private readBlob(): StoredAuthBlob {
+  private readSnapshot(): CredentialSnapshot {
     const record = this.credRepo.getCredential(MULTILOGIN_SERVICE_NAME);
     if (!record) {
       throw configError('Chưa cấu hình Multilogin trong Settings.');
@@ -85,20 +96,31 @@ export class MultiloginAuthService {
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
         throw new Error('unexpected shape');
       }
-      return parsed as StoredAuthBlob;
+      return {
+        encryptedBuffer: Buffer.from(record.encryptedCredentials),
+        blob: parsed as StoredAuthBlob,
+        generation: this.authGeneration
+      };
     } catch {
       throw configError('Thông tin Multilogin đã lưu không đúng định dạng.');
     }
   }
 
-  private persistSession(blob: StoredAuthBlob, session: StoredSession): void {
-    const next: StoredAuthBlob = { ...blob, session };
-    const record = this.credRepo.getCredential(MULTILOGIN_SERVICE_NAME);
-    this.credRepo.saveCredential(
+  private persistSession(snapshot: CredentialSnapshot, session: StoredSession): void {
+    if (this.authGeneration !== snapshot.generation) {
+      throw configError('Cấu hình Multilogin đã thay đổi trong khi xử lý.');
+    }
+
+    const next: StoredAuthBlob = { ...snapshot.blob, session };
+    const replacement = this.vault.encrypt(JSON.stringify(next));
+    const updated = this.credRepo.replaceEncryptedIfUnchanged(
       MULTILOGIN_SERVICE_NAME,
-      this.vault.encrypt(JSON.stringify(next)),
-      record?.metadata ?? { maskedHint: '••••••••', status: 'unknown' }
+      snapshot.encryptedBuffer,
+      replacement
     );
+    if (!updated) {
+      throw configError('Cấu hình Multilogin đã thay đổi hoặc bị xóa trong khi xử lý.');
+    }
   }
 
   private isSessionFresh(session: StoredSession): boolean {
@@ -107,8 +129,8 @@ export class MultiloginAuthService {
     return age < MULTILOGIN_TOKEN_TTL_MS - MULTILOGIN_TOKEN_REFRESH_SKEW_MS;
   }
 
-  private async resolveToken(): Promise<string> {
-    const blob = this.readBlob();
+  private async resolveToken(snapshot: CredentialSnapshot): Promise<string> {
+    const { blob, encryptedBuffer, generation } = snapshot;
 
     if (blob.mode === 'token') {
       const automationToken = blob.automationToken;
@@ -130,22 +152,41 @@ export class MultiloginAuthService {
     }
 
     const existingRefreshToken = session?.refreshToken;
+    let refreshFailed = false;
+    let refreshError: unknown;
+
     if (existingRefreshToken) {
+      let rotated: MultiloginTokens | undefined;
       try {
-        const rotated = await this.observeShared('token-refresh', () =>
-          this.api.refreshTokens(email, existingRefreshToken, blob.workspaceId));
-        this.persistSession(blob, {
+        rotated = await this.observeShared('token-refresh', () =>
+          this.api.refreshTokens(email, existingRefreshToken, blob.workspaceId)
+        );
+      } catch (err: unknown) {
+        refreshFailed = true;
+        refreshError = err;
+      }
+
+      if (rotated) {
+        this.persistSession(snapshot, {
           jwtToken: rotated.token,
           refreshToken: rotated.refreshToken,
           issuedAt: this.clock.now()
         });
         return rotated.token;
-      } catch (err: unknown) {
-        // A refresh token can be invalidated at any time — Multilogin rotates it
-        // on every sign-in, so signing in elsewhere kills the stored one, and it
-        // answers HTTP 400 (not 401) for that case. Whatever the reason, a fresh
-        // sign-in is the recovery path; only rethrow when we cannot sign in.
-        if (!password) throw err;
+      }
+    }
+
+    if (refreshFailed) {
+      if (!password) {
+        throw (refreshError instanceof Error ? refreshError : configError('Làm mới token thất bại.'));
+      }
+      const current = this.credRepo.getCredential(MULTILOGIN_SERVICE_NAME);
+      if (
+        !current ||
+        !current.encryptedCredentials.equals(encryptedBuffer) ||
+        this.authGeneration !== generation
+      ) {
+        throw configError('Cấu hình Multilogin đã thay đổi hoặc bị xóa trong khi làm mới token.');
       }
     }
 
@@ -154,7 +195,7 @@ export class MultiloginAuthService {
     }
 
     const signedIn = await this.observeShared('sign-in', () => this.api.signIn(email, password));
-    this.persistSession(blob, {
+    this.persistSession(snapshot, {
       jwtToken: signedIn.token,
       refreshToken: signedIn.refreshToken,
       issuedAt: this.clock.now()
@@ -164,7 +205,7 @@ export class MultiloginAuthService {
 
   /**
    * Returns a usable bearer token, signing in or refreshing as needed.
-   * Concurrent callers share one in-flight authentication.
+   * Concurrent callers share one in-flight authentication for the same snapshot.
    * When a draft payload is provided, test against the draft directly.
    */
   async getAccessToken(draft?: unknown): Promise<string> {
@@ -184,33 +225,63 @@ export class MultiloginAuthService {
       }
     }
 
-    if (this.inFlight) {
-      return this.inFlight;
+    const snapshot = this.readSnapshot();
+
+    if (snapshot.blob.mode === 'token') {
+      const automationToken = snapshot.blob.automationToken;
+      if (!automationToken) {
+        throw configError('Automation token của Multilogin đang trống.');
+      }
+      return automationToken;
     }
 
-    const pending = this.resolveToken().finally(() => {
-      this.inFlight = null;
+    const session = snapshot.blob.session;
+    if (session && this.isSessionFresh(session)) {
+      return session.jwtToken;
+    }
+
+    if (
+      this.inFlight &&
+      this.inFlight.generation === snapshot.generation &&
+      this.inFlight.encryptedBuffer.equals(snapshot.encryptedBuffer)
+    ) {
+      return this.inFlight.promise;
+    }
+
+    const currentGeneration = snapshot.generation;
+    const currentBuffer = snapshot.encryptedBuffer;
+    const promise = this.resolveToken(snapshot).finally(() => {
+      if (this.inFlight && this.inFlight.promise === promise) {
+        this.inFlight = null;
+      }
     });
-    this.inFlight = pending;
-    return pending;
+
+    this.inFlight = {
+      promise,
+      encryptedBuffer: currentBuffer,
+      generation: currentGeneration
+    };
+
+    return promise;
   }
 
   /** Drops any cached session so the next call re-authenticates. */
   invalidateSession(): void {
+    this.authGeneration += 1;
     this.inFlight = null;
-    let blob: StoredAuthBlob;
+    let snapshot: CredentialSnapshot;
     try {
-      blob = this.readBlob();
+      snapshot = this.readSnapshot();
     } catch {
       return;
     }
-    if (!blob.session) return;
-    const { session: _discarded, ...rest } = blob;
-    const record = this.credRepo.getCredential(MULTILOGIN_SERVICE_NAME);
-    this.credRepo.saveCredential(
+    if (!snapshot.blob.session) return;
+    const { session: _discarded, ...rest } = snapshot.blob;
+    const replacement = this.vault.encrypt(JSON.stringify(rest));
+    this.credRepo.replaceEncryptedIfUnchanged(
       MULTILOGIN_SERVICE_NAME,
-      this.vault.encrypt(JSON.stringify(rest)),
-      record?.metadata ?? { maskedHint: '••••••••', status: 'unknown' }
+      snapshot.encryptedBuffer,
+      replacement
     );
   }
 

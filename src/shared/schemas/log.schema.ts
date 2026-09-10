@@ -18,6 +18,12 @@ export const CanonicalRuntimeLogSchema = z.object({
 
 export type CanonicalRuntimeLog = z.infer<typeof CanonicalRuntimeLogSchema>;
 
+export const LogsResetPayloadSchema = z.object({
+  clearedThrough: z.number().int().safe()
+}).strict();
+
+export type LogsResetPayload = z.infer<typeof LogsResetPayloadSchema>;
+
 /**
  * Số dòng tối đa một lần `logs.list` được trả về.
  *

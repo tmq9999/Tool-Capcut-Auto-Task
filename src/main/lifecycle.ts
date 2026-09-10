@@ -76,11 +76,10 @@ export function createShutdownManager(deps: ShutdownDependencies): ShutdownManag
 
   return {
     async handleBeforeQuit(event: BeforeQuitEvent): Promise<void> {
-      if (isShuttingDown || isShutdownFinished) {
-        return;
-      }
-      isShuttingDown = true;
+      if (isShutdownFinished) return;
       event.preventDefault();
+      if (isShuttingDown) return;
+      isShuttingDown = true;
 
       try {
         if (deps.automation) {

@@ -2,7 +2,11 @@ import {
   SettingsSaveRequestSchema,
   type SettingsSaveRequestDTO,
 } from '../../shared/schemas/settings-save.schema';
-import type { AppSettingsDTO } from '../../shared/schemas/settings.schema';
+import {
+  type AppSettingsDTO,
+  AutomationConfigSettingsSchema,
+  type AutomationConfigSettingsDTO
+} from '../../shared/schemas/settings.schema';
 import { DEFAULT_APP_SETTINGS } from '../../shared/settings/default-settings';
 import type { SettingsRepository } from '../repositories/SettingsRepository';
 import type { CredentialRepository } from '../repositories/CredentialRepository';
@@ -98,6 +102,13 @@ export class SettingsService {
           });
         }
       }
+    });
+  }
+
+  saveAutomationSettings(automation: AutomationConfigSettingsDTO): void {
+    const validated = AutomationConfigSettingsSchema.parse(automation);
+    this.transactionRunner.run(() => {
+      this.settingsRepo.saveAutomationSettings(validated);
     });
   }
 }

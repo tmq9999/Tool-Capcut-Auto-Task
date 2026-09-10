@@ -183,12 +183,16 @@ function initializePrimaryInstance(): void {
     const unsubscribeLogs = providerStack.logBus.subscribe((entry) => {
       sendToRenderer(IPC_EVENTS.LOG_ENTRY, entry);
     });
+    const unsubscribeLogReset = providerStack.logBus.onReset((payload) => {
+      sendToRenderer(IPC_EVENTS.LOGS_RESET, payload);
+    });
     const unsubscribeProgress = providerStack.automationRunService.subscribe((progress) => {
       sendToRenderer(IPC_EVENTS.RUN_PROGRESS, progress);
     });
     providerStack.logBus.start();
     cleanupSubscriptions = () => {
       unsubscribeLogs();
+      unsubscribeLogReset();
       unsubscribeProgress();
     };
 

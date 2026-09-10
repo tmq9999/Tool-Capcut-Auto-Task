@@ -11,9 +11,9 @@ const { KiotProxyProvider } = require('../src/main/providers/KiotProxyProvider.t
 const { FetchHttpClient } = require('../src/main/providers/HttpClient.ts');
 const { parseTrialOffers } = require('../src/main/services/capcut/http/trialOffers.ts');
 
-const workspaceRoot = path.resolve(__dirname, '..');
 const vaultHelper = path.join(workspaceRoot, '.superpowers/sdd/2026-09-09-native-signup-live/mailbox-vault.cjs');
 const { protect, unprotect } = require(vaultHelper);
+const { pollGmailOtp } = require('./legacy-diagnostic-helpers.cjs');
 
 function resolveRunDir() {
   const dir = process.env.CAPCUT_LIVE_RUN_DIR || path.join(workspaceRoot, '.superpowers/sdd/2026-09-09-onboarding-probe-r3');
@@ -280,16 +280,7 @@ async function main() {
 
     // Step 4.6: Poll OTP
     emit({ step: 'polling-otp-started' });
-    let otpCode = null;
-    const otpTimeout = Date.now() + 45000;
-    while (Date.now() < otpTimeout) {
-      await new Promise(r => setTimeout(r, 3000));
-      const orderStatus = await gmailProvider.getOrderStatus(process.env.GMAIL94_API_KEY, orderInfo.orderId);
-      if (orderStatus.status === 'completed' && orderStatus.code) {
-        otpCode = orderStatus.code;
-        break;
-      }
-    }
+    const otpCode = await pollGmailOtp(gmailProvider, process.env.GMAIL94_API_KEY, orderInfo.orderId, 'capcut');
     if (!otpCode) throw new Error('OTP_TIMEOUT');
     emit({ step: 'otp-received', received: true });
 
@@ -399,7 +390,7 @@ async function main() {
 
   } catch (err) {
     emit({ step: 'probe-error', error: err.message, stack: err.stack });
-    process.exitCode = 1;
+    if (!process.exitCode) process.exitCode = 1;
   } finally {
     // 5. Guaranteed KiotProxy release
     if (leaseInfo && db) {
@@ -421,6 +412,7 @@ async function main() {
           }
         }
       } catch (relErr) {
+        if (!process.exitCode) process.exitCode = 1;
         emit({ step: 'kiot-release-network-error', message: relErr.message });
       }
 
@@ -428,18 +420,37 @@ async function main() {
         db.prepare("UPDATE proxy_leases SET released_at=datetime('now') WHERE id=? AND released_at IS NULL").run(leaseInfo.leaseId);
         emit({ step: 'db-lease-released', leaseId: leaseInfo.leaseId });
       } catch (dbErr) {
+        if (!process.exitCode) process.exitCode = 1;
         emit({ step: 'db-release-error', message: dbErr.message });
       }
     }
 
-    if (nativeProxied) await nativeProxied.dispose();
-    if (nativeGeneral) await nativeGeneral.dispose();
-    db.close();
+    if (nativeProxied) {
+      try {
+        await nativeProxied.dispose();
+      } catch {
+        if (!process.exitCode) process.exitCode = 1;
+      }
+    }
+    if (nativeGeneral) {
+      try {
+        await nativeGeneral.dispose();
+      } catch {
+        if (!process.exitCode) process.exitCode = 1;
+      }
+    }
+    try {
+      db.close();
+    } catch {
+      if (!process.exitCode) process.exitCode = 1;
+    }
     emit({ step: 'cleanup-complete' });
+    process.exit(process.exitCode ?? 0);
   }
 }
 
 main().catch(e => {
   process.stderr.write(`FATAL: ${e.message}\n`);
-  process.exit(1);
+  if (!process.exitCode) process.exitCode = 1;
+  process.exit(process.exitCode ?? 1);
 });

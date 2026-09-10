@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { AccountTaskRepository } from './AccountTaskRepository';
 import type { AccountStatus, AccountListItemDTO, AccountFilterDTO } from '../../shared/schemas/account.schema';
 import { ACCOUNT_PAGE_SIZE_MAX } from '../../shared/schemas/account.schema';
 
@@ -365,8 +366,15 @@ export class AccountRepository {
 
   deleteAccounts(ids: string[]): number {
     if (ids.length === 0) return 0;
-    const placeholders = ids.map(() => '?').join(',');
-    const result = this.db.prepare(`DELETE FROM accounts WHERE id IN (${placeholders})`).run(...ids);
-    return result.changes;
+    const tasks = new AccountTaskRepository(this.db);
+    const remove = this.db.prepare('DELETE FROM accounts WHERE id = ?');
+    return this.db.transaction(() => {
+      let deleted = 0;
+      for (const id of new Set(ids)) {
+        tasks.deleteByAccount(id);
+        deleted += remove.run(id).changes;
+      }
+      return deleted;
+    })();
   }
 }

@@ -40,6 +40,11 @@ function verificationBadgeConfig(state: 'verified' | 'partial' | 'stale' | 'miss
   }
 }
 
+interface LoadedState {
+  accountId: string;
+  data: AccountTasksResponseDTO;
+}
+
 /**
  * Bảng tiến độ nhiệm vụ của một account.
  *
@@ -54,32 +59,59 @@ export const TaskProgressDialog: React.FC<TaskProgressDialogProps> = ({
   loadTasks,
   initialData = null,
 }) => {
-  const [data, setData] = useState<AccountTasksResponseDTO | null>(initialData);
+  const [loaded, setLoaded] = useState<LoadedState | null>(() =>
+    initialData && accountId ? { accountId, data: initialData } : null
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestTokenRef = React.useRef(0);
 
   useEffect(() => {
-    if (!isOpen || !accountId || !loadTasks) return;
+    if (!isOpen || !accountId) {
+      setLoaded(null);
+      setError(null);
+      setIsLoading(false);
+      return;
+    }
+    if (!loadTasks) {
+      setLoaded((prev) => (prev && prev.accountId !== accountId ? null : prev));
+      return;
+    }
+
+    const token = ++requestTokenRef.current;
     let canceled = false;
-    setIsLoading(true);
+
+    setLoaded(null);
     setError(null);
+    setIsLoading(true);
+
     void loadTasks(accountId)
       .then((result) => {
-        if (canceled) return;
+        if (canceled || token !== requestTokenRef.current) return;
         if (!result) {
           setError('Không đọc được tiến độ nhiệm vụ.');
-          setData(null);
+          setLoaded(null);
           return;
         }
-        setData(result);
+        setLoaded({ accountId, data: result });
+      })
+      .catch((err: unknown) => {
+        if (canceled || token !== requestTokenRef.current) return;
+        setError(err instanceof Error ? err.message : 'Không đọc được tiến độ nhiệm vụ.');
+        setLoaded(null);
       })
       .finally(() => {
-        if (!canceled) setIsLoading(false);
+        if (!canceled && token === requestTokenRef.current) {
+          setIsLoading(false);
+        }
       });
+
     return () => {
       canceled = true;
     };
   }, [isOpen, accountId, loadTasks]);
+
+  const activeData = loaded && loaded.accountId === accountId ? loaded.data : null;
 
   const footer = (
     <Button variant="secondary" size="md" onClick={onClose}>
@@ -101,19 +133,19 @@ export const TaskProgressDialog: React.FC<TaskProgressDialogProps> = ({
           <span className="text-on-surface-variant">
             CapCut ghi nhận:{' '}
             <span className="text-on-surface font-semibold">
-              {data?.verification
-                ? `${data.verification.serverDone}/${data.verification.serverTotal}`
-                : `${data ? data.doneCount : 0}/${data ? data.items.length : 0}`}
+              {activeData?.verification
+                ? `${activeData.verification.serverDone}/${activeData.verification.serverTotal}`
+                : `${activeData ? activeData.doneCount : 0}/${activeData ? activeData.items.length : 0}`}
             </span>
           </span>
           <span className="text-on-surface-variant">
             Credit đã nhận:{' '}
-            <span className="text-on-surface font-semibold">{data ? data.creditsEarned : 0}</span>
+            <span className="text-on-surface font-semibold">{activeData ? activeData.creditsEarned : 0}</span>
           </span>
-          {data && (
+          {activeData && (
             <Badge
-              variant={verificationBadgeConfig(data.verification?.state ?? 'missing').variant}
-              label={verificationBadgeConfig(data.verification?.state ?? 'missing').label}
+              variant={verificationBadgeConfig(activeData.verification?.state ?? 'missing').variant}
+              label={verificationBadgeConfig(activeData.verification?.state ?? 'missing').label}
             />
           )}
         </div>
@@ -124,13 +156,13 @@ export const TaskProgressDialog: React.FC<TaskProgressDialogProps> = ({
           <p className="font-body-sm text-body-sm text-on-surface-variant">Đang đọc tiến độ...</p>
         )}
 
-        {!isLoading && !error && data && data.items.length === 0 && (
+        {!isLoading && !error && activeData && activeData.items.length === 0 && (
           <p className="font-body-sm text-body-sm text-on-surface-variant">
             Account này chưa chạy nhiệm vụ nào nên chưa có tiến độ.
           </p>
         )}
 
-        {!isLoading && data && data.items.length > 0 && (
+        {!isLoading && activeData && activeData.items.length > 0 && (
           <div className="border border-panel-border rounded overflow-hidden">
             <table className="w-full text-left font-body-sm text-body-sm">
               <thead className="bg-surface-container-low text-on-surface-variant">
@@ -142,7 +174,7 @@ export const TaskProgressDialog: React.FC<TaskProgressDialogProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-panel-border/70">
-                {data.items.map((item) => (
+                {activeData.items.map((item) => (
                   <tr key={item.taskKey}>
                     <td className="px-sm py-1 text-on-surface">{item.title || item.taskKey}</td>
                     <td className="px-sm py-1 font-code text-on-surface-variant">{item.reward}</td>

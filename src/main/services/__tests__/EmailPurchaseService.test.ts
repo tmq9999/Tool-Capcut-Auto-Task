@@ -2120,3 +2120,109 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
 
   });
 });
+
+describe.each(['gmail94', 'dongvanfb'] as const)('F01 %s', provider => {
+  it.each(['release', 'other-owner', 'cleanup-error'] as const)(
+    'preserves paid INSERT and latches acquisition: %s',
+    async mode => {
+      storeKey(provider, 'KEY-DEMO');
+      dongvan.rows = [[{
+        email: 'paid@example.test', password: 'PASS-DEMO',
+        refreshToken: 'REFRESH-DEMO', clientId: 'CLIENT-DEMO', raw: 'fixture'
+      }]];
+      const signal = new AbortController().signal;
+      const session = await createService().openAcquisitionSession(
+        provider, 1, { maxBillablePurchases: 2 }, signal
+      );
+      const primary = new Error('fixture DTO read after INSERT');
+      const cleanup = new Error('fixture reservation cleanup');
+      const release = vi.spyOn(purchasedRepo, 'releaseReservation');
+      if (mode === 'cleanup-error') {
+        release.mockImplementationOnce(() => { throw cleanup; });
+      }
+
+      let insertedId = '';
+      let movedId: string | undefined;
+      const read = vi.spyOn(purchasedRepo, 'getDtoById')
+        .mockImplementationOnce(id => {
+          insertedId = id;
+          if (mode === 'other-owner') {
+            purchasedRepo.clearStaleReservations(); // Isolated fixture DB only.
+            movedId = purchasedRepo.reserveOldestAvailable(
+              provider, 'other-owner',
+              provider === 'gmail94' ? CAPCUT_OTP_SERVICE : undefined
+            )?.id;
+          }
+          throw primary;
+        });
+      const calls = () => provider === 'gmail94'
+        ? gmail.createCalls.length : dongvan.buyCalls;
+
+      try {
+        const thrown = await session.acquireOne('original', signal)
+          .then(() => null, error => error);
+        if (mode === 'cleanup-error') {
+          expect(thrown).toBeInstanceOf(AggregateError);
+          expect((thrown as AggregateError).errors).toEqual([primary, cleanup]);
+        } else {
+          expect(thrown).toBe(primary);
+        }
+        expect(purchasedRepo.listRecent(10)).toHaveLength(1);
+        expect(release).toHaveBeenCalledTimes(1);
+        expect(release.mock.calls[0][0]).toBe(insertedId);
+        expect(release.mock.calls[0][1]).toMatch(/^original:/);
+        expect(calls()).toBe(1);
+        expect(dongvan.oauthCalls).toEqual([]);
+        expect(session.purchaseStats()).toEqual({
+          budget: 2, attempted: 1, confirmed: 1, ambiguous: 0
+        });
+        expect(purchasedRepo.countAvailable(provider))
+          .toBe(mode === 'release' ? 1 : 0);
+        if (mode === 'other-owner') {
+          expect(movedId).toBe(insertedId);
+          expect(release.mock.results[0].value).toBe(false);
+        }
+        await expect(session.acquireOne('next', signal)).rejects.toMatchObject({
+          state: 'failed', reason: { code: 'INTERNAL_ERROR' }
+        });
+        expect(calls()).toBe(1);
+        expect(purchasedRepo.listRecent(10)).toHaveLength(1);
+        if (mode === 'other-owner') {
+          expect(purchasedRepo.consumeReserved(
+            insertedId, 'other-owner', null
+          )).toBe(true);
+        }
+      } finally {
+        read.mockRestore();
+        release.mockRestore();
+      }
+    }
+  );
+
+  it('F01 latches an insert failure before a row exists', async () => {
+    storeKey(provider, 'KEY-DEMO');
+    dongvan.rows = [[{
+      email: 'paid@example.test', password: 'PASS-DEMO',
+      refreshToken: 'REFRESH-DEMO', clientId: 'CLIENT-DEMO', raw: 'fixture'
+    }]];
+    const signal = new AbortController().signal;
+    const session = await createService().openAcquisitionSession(
+      provider, 1, { maxBillablePurchases: 2 }, signal
+    );
+    const failure = new Error('fixture insert unavailable');
+    const insert = vi.spyOn(purchasedRepo, 'insertReserved')
+      .mockImplementationOnce(() => { throw failure; });
+    try {
+      await expect(session.acquireOne('first', signal)).rejects.toBe(failure);
+      expect(purchasedRepo.listRecent(10)).toHaveLength(0);
+      expect(session.purchaseStats().confirmed).toBe(1);
+      await expect(session.acquireOne('second', signal)).rejects.toMatchObject({
+        state: 'failed', reason: { code: 'INTERNAL_ERROR' }
+      });
+      expect(provider === 'gmail94' ? gmail.createCalls.length : dongvan.buyCalls)
+        .toBe(1);
+    } finally {
+      insert.mockRestore();
+    }
+  });
+});

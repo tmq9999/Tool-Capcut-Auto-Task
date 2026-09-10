@@ -1,3 +1,4 @@
+import type React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
@@ -122,5 +123,29 @@ describe('Dashboard continuous-run rendering', () => {
 
     expect(html).toContain('KEY-DEMO');
     expect(html).not.toContain('••••••••');
+  });
+
+  it.each([
+    ['PASS-DEMO', true, 'PASS-DEMO'],
+    [null, true, 'Không đọc được mật khẩu'],
+    [null, false, '-']
+  ] as const)('F02 renders value %s with presence %s', (value, present, expected) => {
+    const column = createDashboardColumns({
+      isThreadRunning: () => false, onStopThread: () => {}
+    }).find(c => 'accessorKey' in c && c.accessorKey === 'passwordCapcut');
+    if (!column || typeof column.cell !== 'function') {
+      throw new Error('Password cell expected');
+    }
+    const cell = column.cell as (props: {
+      row: { original: {
+        passwordCapcut: string | null; hasPasswordCapcut: boolean;
+      } };
+    }) => React.ReactElement;
+    const html = renderToStaticMarkup(cell({
+      row: { original: { passwordCapcut: value, hasPasswordCapcut: present } }
+    }));
+    expect(html).toContain('>' + expected + '</span>');
+    expect(html).not.toContain('••••••••');
+    if (value !== null) expect(html).toContain('select-all');
   });
 });

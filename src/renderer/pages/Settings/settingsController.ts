@@ -124,6 +124,15 @@ export class SettingsController {
   private state: SettingsState;
   private readonly listeners = new Set<(state: SettingsState) => void>();
   private editRevision = 0;
+  private loadToken = 0;
+  private generation = 0;
+  private disposed = false;
+  private touchedSettings = false;
+  private touchedDrafts = new Set<KnownServiceName>();
+  private lastCommittedGeneral: {
+    revision: number;
+    general: Pick<AppSettingsDTO['general'], 'theme' | 'sessionRestore'>;
+  } | null = null;
 
   constructor(private readonly bridge: ISettingsBridge) {
     this.state = {
@@ -141,6 +150,13 @@ export class SettingsController {
     return this.state;
   }
 
+  getLastCommittedGeneral(): {
+    revision: number;
+    general: Pick<AppSettingsDTO['general'], 'theme' | 'sessionRestore'>;
+  } | null {
+    return this.lastCommittedGeneral;
+  }
+
   subscribe(listener: (state: SettingsState) => void): () => void {
     this.listeners.add(listener);
     return () => {
@@ -155,6 +171,8 @@ export class SettingsController {
   }
 
   async load(): Promise<void> {
+    const token = ++this.loadToken;
+    const gen = this.generation;
     this.state = {
       ...this.state,
       isLoading: true,
@@ -164,6 +182,9 @@ export class SettingsController {
 
     try {
       const response = await this.bridge.settings.get();
+      if (this.disposed || token !== this.loadToken || gen !== this.generation) {
+        return;
+      }
 
       if (!response.success) {
         this.state = {
@@ -190,17 +211,26 @@ export class SettingsController {
         }
       }
 
-      this.editRevision += 1;
+      const nextSettings = this.touchedSettings ? this.state.settings : parsedSettings;
+
+      const nextDrafts = { ...createInitialDrafts() };
+      for (const svc of this.touchedDrafts) {
+        (nextDrafts as Record<string, unknown>)[svc] = this.state.drafts[svc];
+      }
+
       this.state = {
         ...this.state,
         isLoading: false,
-        settings: parsedSettings,
+        settings: nextSettings,
         credentialStatuses: parsedStatuses,
-        drafts: createInitialDrafts(),
+        drafts: nextDrafts,
         error: null,
       };
       this.notify();
     } catch {
+      if (this.disposed || token !== this.loadToken || gen !== this.generation) {
+        return;
+      }
       this.state = {
         ...this.state,
         isLoading: false,
@@ -214,6 +244,7 @@ export class SettingsController {
   }
 
   updateSettings(updater: (prev: AppSettingsDTO) => AppSettingsDTO): void {
+    this.touchedSettings = true;
     this.editRevision += 1;
     this.state = {
       ...this.state,
@@ -224,6 +255,7 @@ export class SettingsController {
   }
 
   setSimpleDraft(service: SimpleServiceName, draft: SimpleDraft): void {
+    this.touchedDrafts.add(service);
     this.editRevision += 1;
     this.state = {
       ...this.state,
@@ -237,6 +269,7 @@ export class SettingsController {
   }
 
   setMultiloginDraft(draft: MultiloginDraft): void {
+    this.touchedDrafts.add('multilogin');
     this.editRevision += 1;
     this.state = {
       ...this.state,
@@ -255,14 +288,6 @@ export class SettingsController {
     }
 
     const savedRevision = this.editRevision;
-
-    this.state = {
-      ...this.state,
-      isSaving: true,
-      isSaved: false,
-      error: null,
-    };
-    this.notify();
 
     const savePayload: SettingsSaveRequestDTO = {
       settings: this.state.settings,
@@ -291,54 +316,17 @@ export class SettingsController {
       return false;
     }
 
+    this.state = {
+      ...this.state,
+      isSaving: true,
+      isSaved: false,
+      error: null,
+    };
+    this.notify();
+
+    let response: IpcEnvelope<{ success: boolean }>;
     try {
-      const response = await this.bridge.settings.save(savePayload);
-
-      if (!response.success) {
-        this.state = {
-          ...this.state,
-          isSaving: false,
-          isSaved: false,
-          error: {
-            code: response.error.code || 'ERR_PERSISTENCE_FAILED',
-            message: 'Failed to persist application settings or credentials.',
-          },
-        };
-        this.notify();
-        return false;
-      }
-
-      // Refresh credentials and settings from backend after saving
-      const refreshResponse = await this.bridge.settings.get();
-      let nextStatuses = this.state.credentialStatuses;
-      let nextSettings = this.state.settings;
-
-      if (refreshResponse.success) {
-        nextSettings = AppSettingsSchema.parse(refreshResponse.data.settings);
-        nextStatuses = createInitialStatuses();
-        if (Array.isArray(refreshResponse.data.credentials)) {
-          for (const rawCred of refreshResponse.data.credentials) {
-            const validCred = CredentialStatusDTOSchema.parse(rawCred);
-            if (KNOWN_SERVICES.includes(validCred.serviceName as KnownServiceName)) {
-              nextStatuses[validCred.serviceName as KnownServiceName] = validCred;
-            }
-          }
-        }
-      }
-
-      const hasNewEdits = this.editRevision !== savedRevision;
-
-      this.state = {
-        ...this.state,
-        isSaving: false,
-        isSaved: !hasNewEdits,
-        settings: hasNewEdits ? this.state.settings : nextSettings,
-        credentialStatuses: nextStatuses,
-        drafts: hasNewEdits ? this.state.drafts : createInitialDrafts(),
-        error: null,
-      };
-      this.notify();
-      return true;
+      response = await this.bridge.settings.save(savePayload);
     } catch {
       this.state = {
         ...this.state,
@@ -352,13 +340,79 @@ export class SettingsController {
       this.notify();
       return false;
     }
+
+    if (!response.success || !response.data?.success) {
+      this.state = {
+        ...this.state,
+        isSaving: false,
+        isSaved: false,
+        error: {
+          code: (!response.success && response.error?.code) || 'ERR_PERSISTENCE_FAILED',
+          message: (!response.success && response.error?.message) || 'Failed to persist application settings or credentials.',
+        },
+      };
+      this.notify();
+      return false;
+    }
+
+    this.lastCommittedGeneral = {
+      revision: savedRevision,
+      general: {
+        theme: savePayload.settings.general.theme,
+        sessionRestore: savePayload.settings.general.sessionRestore,
+      },
+    };
+
+    let nextStatuses = this.state.credentialStatuses;
+    let nextSettings = this.state.settings;
+
+    try {
+      const refreshResponse = await this.bridge.settings.get();
+      if (refreshResponse.success) {
+        nextSettings = AppSettingsSchema.parse(refreshResponse.data.settings);
+        nextStatuses = createInitialStatuses();
+        if (Array.isArray(refreshResponse.data.credentials)) {
+          for (const rawCred of refreshResponse.data.credentials) {
+            const validCred = CredentialStatusDTOSchema.parse(rawCred);
+            if (KNOWN_SERVICES.includes(validCred.serviceName as KnownServiceName)) {
+              nextStatuses[validCred.serviceName as KnownServiceName] = validCred;
+            }
+          }
+        }
+      }
+    } catch {
+      // Refresh error is non-fatal to save outcome
+    }
+
+    const hasNewEdits = this.editRevision !== savedRevision;
+
+    this.state = {
+      ...this.state,
+      isSaving: false,
+      isSaved: !hasNewEdits,
+      settings: hasNewEdits ? this.state.settings : nextSettings,
+      credentialStatuses: nextStatuses,
+      drafts: hasNewEdits ? this.state.drafts : createInitialDrafts(),
+      error: null,
+    };
+    if (!hasNewEdits) {
+      this.touchedDrafts.clear();
+      this.touchedSettings = false;
+    }
+    this.notify();
+    return true;
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.generation += 1;
+    this.loadToken += 1;
     this.state = {
       ...this.state,
       drafts: createInitialDrafts(),
     };
+    this.touchedDrafts.clear();
+    this.touchedSettings = false;
     this.listeners.clear();
   }
 }

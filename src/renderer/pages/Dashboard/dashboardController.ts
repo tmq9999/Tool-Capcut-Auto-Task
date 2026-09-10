@@ -5,12 +5,16 @@ import {
   toRunConfig,
   type AutomationConfigState
 } from './automationConfig';
-import type { AppSettingsDTO, CustomEmailSettingsDTO } from '../../../shared/schemas/settings.schema';
+import type {
+  AppSettingsDTO,
+  AutomationConfigSettingsDTO,
+  CustomEmailSettingsDTO
+} from '../../../shared/schemas/settings.schema';
 import type { SettingsSaveRequestDTO } from '../../../shared/schemas/settings-save.schema';
 import type { CredentialStatusDTO } from '../../../shared/schemas/diagnostics.schema';
 import type { IpcEnvelope } from '../../../shared/schemas/ipc-envelope.schema';
 import type { AccountFilterDTO, AccountListItemDTO } from '../../../shared/schemas/account.schema';
-import type { CanonicalRuntimeLog, LogFilterDTO } from '../../../shared/schemas/log.schema';
+import type { CanonicalRuntimeLog, LogFilterDTO, LogsResetPayload } from '../../../shared/schemas/log.schema';
 import type {
   AutomationRunConfigDTO,
   AutomationRunProgressDTO,
@@ -28,10 +32,11 @@ export interface IDashboardBridge {
   logs: {
     list(filter: LogFilterDTO): Promise<IpcEnvelope<{ items: CanonicalRuntimeLog[]; total: number }>>;
     onEntry(listener: (entry: CanonicalRuntimeLog) => void): () => void;
-    clear?(): Promise<IpcEnvelope<{ success: boolean }>>;
+    clear?(): Promise<IpcEnvelope<{ success: boolean; clearedThrough?: number }>>;
+    onReset?(listener: (payload: LogsResetPayload) => void): () => void;
   };
   run: {
-    start(config: AutomationRunConfigDTO): Promise<IpcEnvelope<{ runId: string }>>;
+    start(config: AutomationRunConfigDTO): Promise<IpcEnvelope<{ runId: string; artifactBasename?: string; clearedThrough?: number }>>;
     stop(): Promise<IpcEnvelope<{ success: boolean }>>;
     stopThread(accountId: string): Promise<IpcEnvelope<{ stopped: boolean }>>;
     threads(): Promise<IpcEnvelope<RunningThreadInfoDTO[]>>;
@@ -44,6 +49,7 @@ export interface IDashboardBridge {
   settings: {
     get(): Promise<IpcEnvelope<{ settings: AppSettingsDTO; credentials: CredentialStatusDTO[] }>>;
     save(req: SettingsSaveRequestDTO): Promise<IpcEnvelope<{ success: boolean }>>;
+    saveAutomation?(req: AutomationConfigSettingsDTO): Promise<IpcEnvelope<{ success: boolean }>>;
   };
 }
 
@@ -107,8 +113,16 @@ export class DashboardController {
   /** Latest settings read from Main; patched and written back when saving config. */
   private storedSettings: AppSettingsDTO | null = null;
   private autoSaveEnabled = false;
-  private pendingSave: Promise<boolean> | null = null;
+  private configRevision = 0;
+  private lastSavedRevision = 0;
+  private inFlightSave: Promise<boolean> | null = null;
   private pendingStop: Promise<boolean> | null = null;
+  private snapshotPromise: Promise<void> | null = null;
+  private snapshotPending = false;
+  private generation = 0;
+  private currentCompletion: { promise: Promise<void>; resolve: () => void } | null = null;
+  private nextCompletion: { promise: Promise<void>; resolve: () => void } | null = null;
+  private isDisposed = false;
   private readonly maxLogs: number;
   private readonly accountPageSize: number;
 
@@ -140,6 +154,14 @@ export class DashboardController {
     return this.state;
   }
 
+  getConfigRevision(): number {
+    return this.configRevision;
+  }
+
+  getLastSavedRevision(): number {
+    return this.lastSavedRevision;
+  }
+
   subscribe(listener: (state: DashboardState) => void): () => void {
     this.listeners.add(listener);
     return () => {
@@ -159,18 +181,87 @@ export class DashboardController {
   }
 
   updateConfig(patch: Partial<AutomationConfigState>): void {
+    this.configRevision += 1;
     this.setState({ config: { ...this.state.config, ...patch }, configSavedAt: null });
     if (this.autoSaveEnabled) {
-      this.pendingSave = this.saveConfig();
+      void this.scheduleSave();
     }
   }
 
+  private scheduleSave(): Promise<boolean> {
+    if (this.inFlightSave) {
+      return this.inFlightSave.then(() => {
+        if (this.lastSavedRevision < this.configRevision) {
+          return this.scheduleSave();
+        }
+        return true;
+      });
+    }
+
+    const targetRevision = this.configRevision;
+    const targetConfig = toPersistedConfig(this.state.config);
+    this.setState({ isSavingConfig: true });
+
+    this.inFlightSave = (async () => {
+      try {
+        const response = this.bridge.settings.saveAutomation
+          ? await this.bridge.settings.saveAutomation(targetConfig)
+          : await (async () => {
+              const base = this.storedSettings;
+              if (!base) {
+                return {
+                  success: false,
+                  error: { code: 'ERR_PERSISTENCE_FAILED', message: 'Chưa đọc được cài đặt hiện tại, hãy thử tải lại.' }
+                };
+              }
+              return await this.bridge.settings.save({
+                settings: { ...base, automation: targetConfig },
+                credentials: KEEP_ALL_CREDENTIALS
+              });
+            })();
+
+        if (!response.success) {
+          this.setState({ isSavingConfig: false, error: response.error.message });
+          return false;
+        }
+
+        this.lastSavedRevision = Math.max(this.lastSavedRevision, targetRevision);
+        if (this.storedSettings) {
+          this.storedSettings = { ...this.storedSettings, automation: targetConfig };
+        }
+        this.setState({
+          isSavingConfig: this.lastSavedRevision < this.configRevision,
+          configSavedAt: new Date().toISOString(),
+          error: null
+        });
+        return true;
+      } finally {
+        this.inFlightSave = null;
+      }
+    })();
+
+    return this.inFlightSave.then((success) => {
+      if (success && this.lastSavedRevision < this.configRevision) {
+        return this.scheduleSave();
+      }
+      return success;
+    });
+  }
+
   /** Lets a caller (or a test) await an auto-save that is in flight. */
-  async flushPendingSave(): Promise<void> {
-    const pending = this.pendingSave;
-    if (!pending) return;
-    this.pendingSave = null;
-    await pending;
+  async flushPendingSave(targetRevision?: number): Promise<void> {
+    if (!this.autoSaveEnabled && !this.inFlightSave) {
+      return;
+    }
+    const target = targetRevision ?? this.configRevision;
+    while (this.lastSavedRevision < target && (this.autoSaveEnabled || this.inFlightSave)) {
+      if (this.inFlightSave) {
+        await this.inFlightSave;
+      } else if (this.autoSaveEnabled) {
+        const ok = await this.scheduleSave();
+        if (!ok) break;
+      }
+    }
   }
 
   /**
@@ -179,37 +270,91 @@ export class DashboardController {
    * secret-bearing fields are excluded by toPersistedConfig.
    */
   async saveConfig(): Promise<boolean> {
-    const base = this.storedSettings;
-    if (!base) {
-      this.setState({ error: 'Chưa đọc được cài đặt hiện tại, hãy thử tải lại.' });
-      return false;
-    }
-
-    this.setState({ isSavingConfig: true });
-    const response = await this.bridge.settings.save({
-      settings: { ...base, automation: toPersistedConfig(this.state.config) },
-      credentials: KEEP_ALL_CREDENTIALS
-    });
-
-    if (!response.success) {
-      this.setState({ isSavingConfig: false, error: response.error.message });
-      return false;
-    }
-
-    this.storedSettings = { ...base, automation: toPersistedConfig(this.state.config) };
-    this.setState({
-      isSavingConfig: false,
-      configSavedAt: new Date().toISOString(),
-      error: null
-    });
-    return true;
+    this.configRevision += 1;
+    return this.scheduleSave();
   }
 
-  /** Which accounts hold a live browser right now. */
-  private async refreshRunningThreads(): Promise<void> {
-    const response = await this.bridge.run.threads();
-    if (response.success) {
-      this.setState({ runningThreads: response.data });
+  private requestSnapshotRefresh(): Promise<void> {
+    if (this.isDisposed) {
+      return Promise.resolve();
+    }
+
+    if (this.snapshotPromise === null) {
+      let resolveCurrent!: () => void;
+      const currentPromise = new Promise<void>((resolve) => {
+        resolveCurrent = resolve;
+      });
+      this.currentCompletion = { promise: currentPromise, resolve: resolveCurrent };
+      this.snapshotPromise = this.executeSnapshotPair();
+      return currentPromise;
+    }
+
+    this.snapshotPending = true;
+    if (!this.nextCompletion) {
+      let resolveNext!: () => void;
+      const nextPromise = new Promise<void>((resolve) => {
+        resolveNext = resolve;
+      });
+      this.nextCompletion = { promise: nextPromise, resolve: resolveNext };
+    }
+    return this.nextCompletion.promise;
+  }
+
+  private async executeSnapshotPair(): Promise<void> {
+    const currentGen = this.generation;
+    try {
+      const accountsRead = this.bridge.accounts.list({ page: 1, pageSize: this.accountPageSize });
+      const threadsRead = this.bridge.run.threads();
+      const results = await Promise.allSettled([accountsRead, threadsRead]);
+
+      if (!this.isDisposed && this.generation === currentGen) {
+        const statePatch: Partial<DashboardState> = {};
+        const [accountsResult, threadsResult] = results;
+
+        if (accountsResult.status === 'fulfilled') {
+          const response = accountsResult.value;
+          if (response.success) {
+            statePatch.accounts = response.data.items;
+            statePatch.totalAccounts = response.data.total;
+          } else {
+            statePatch.error = 'Không tải được danh sách tài khoản.';
+          }
+        } else {
+          const reason = accountsResult.reason;
+          statePatch.error = reason instanceof Error ? reason.message : 'Không tải được danh sách tài khoản.';
+        }
+
+        if (threadsResult.status === 'fulfilled') {
+          const response = threadsResult.value;
+          if (response.success) {
+            statePatch.runningThreads = response.data;
+          }
+        }
+
+        if (Object.keys(statePatch).length > 0) {
+          this.setState(statePatch);
+        }
+      }
+    } catch {
+      // Identity guard: unexpected errors should never crash or leave gates stuck
+    } finally {
+      const finishedCompletion = this.currentCompletion;
+      this.currentCompletion = null;
+      finishedCompletion?.resolve();
+
+      if (!this.isDisposed && this.snapshotPending) {
+        this.snapshotPending = false;
+        this.currentCompletion = this.nextCompletion;
+        this.nextCompletion = null;
+        this.snapshotPromise = this.executeSnapshotPair();
+      } else {
+        this.snapshotPromise = null;
+        if (this.nextCompletion) {
+          const dangling = this.nextCompletion;
+          this.nextCompletion = null;
+          dangling.resolve();
+        }
+      }
     }
   }
 
@@ -225,22 +370,12 @@ export class DashboardController {
       return false;
     }
 
-    await this.refreshRunningThreads();
-    await this.refreshAccounts();
+    await this.requestSnapshotRefresh();
     if (!response.data.stopped) {
       this.setState({ error: 'Không thể dừng phiên trình duyệt. Hãy thử lại hoặc kiểm tra cửa sổ Multilogin.' });
       return false;
     }
     return response.data.stopped;
-  }
-
-  private async refreshAccounts(): Promise<string | null> {
-    const response = await this.bridge.accounts.list({ page: 1, pageSize: this.accountPageSize });
-    if (!response.success) {
-      return 'Không tải được danh sách tài khoản.';
-    }
-    this.setState({ accounts: response.data.items, totalAccounts: response.data.total });
-    return null;
   }
 
   async load(): Promise<void> {
@@ -263,8 +398,6 @@ export class DashboardController {
       });
     }
 
-    const accountError = await this.refreshAccounts();
-
     const logsResponse = await this.bridge.logs.list({ page: 1, pageSize: this.maxLogs });
     if (logsResponse.success) {
       this.setState({ logs: logsResponse.data.items });
@@ -280,13 +413,18 @@ export class DashboardController {
       this.setState({ progress: progressResponse.data });
     }
 
-    await this.refreshRunningThreads();
+    await this.requestSnapshotRefresh();
 
-    this.setState({ isLoading: false, error: accountError });
+    this.setState({ isLoading: false });
   }
 
   /** Wires the push channels. Returns the detach function for convenience. */
   attach(): () => void {
+    if (this.detachers.length > 0) {
+      return () => this.dispose();
+    }
+    this.isDisposed = false;
+
     this.detachers.push(
       this.bridge.logs.onEntry((entry) => {
         const next = [entry, ...this.state.logs].slice(0, this.maxLogs);
@@ -307,16 +445,22 @@ export class DashboardController {
         // Rows appear as threads launch, so the grid follows every progress
         // event rather than waiting for the run to finish — otherwise the
         // per-row stop control is unreachable while the run is live.
-        void this.refreshRunningThreads();
-        void this.refreshAccounts();
+        void this.requestSnapshotRefresh();
       })
     );
+
+    if (this.bridge.logs.onReset) {
+      this.detachers.push(
+        this.bridge.logs.onReset((payload) => {
+          this.applyLogReset(payload.clearedThrough);
+        })
+      );
+    }
 
     const pollInterval = setInterval(() => {
       const isLive = this.isRunning() || this.state.progress.workersActive > 0;
       if (isLive) {
-        void this.refreshRunningThreads();
-        void this.refreshAccounts();
+        void this.requestSnapshotRefresh();
       }
     }, 1000);
     this.detachers.push(() => clearInterval(pollInterval));
@@ -325,22 +469,15 @@ export class DashboardController {
   }
 
   async start(): Promise<boolean> {
-    await this.flushPendingSave();
+    const startRevision = this.configRevision;
+    await this.flushPendingSave(startRevision);
     const mapped = toRunConfig(this.state.config);
     if (!mapped.ok) {
       this.setState({ error: mapped.message });
       return false;
     }
 
-    // Clear runtime logs for the new session immediately
-    this.setState({ logs: [], isSubmitting: true, error: null });
-    try {
-      if (this.bridge.logs.clear) {
-        await this.bridge.logs.clear();
-      }
-    } catch {
-      // Best-effort clear
-    }
+    this.setState({ isSubmitting: true, error: null });
 
     const response = await this.bridge.run.start(mapped.config);
     this.setState({ isSubmitting: false });
@@ -350,8 +487,31 @@ export class DashboardController {
       return false;
     }
 
+    if (response.data.clearedThrough !== undefined) {
+      this.applyLogReset(response.data.clearedThrough);
+    } else {
+      try {
+        if (this.bridge.logs.clear) {
+          const clearRes = await this.bridge.logs.clear();
+          if (clearRes.success && clearRes.data?.clearedThrough !== undefined) {
+            this.applyLogReset(clearRes.data.clearedThrough);
+          } else {
+            this.setState({ logs: [] });
+          }
+        }
+      } catch {
+        // Best-effort clear
+      }
+    }
+
     this.setState({ error: null });
     return true;
+  }
+
+  private applyLogReset(clearedThrough: number): void {
+    this.setState({
+      logs: this.state.logs.filter((l) => (l.streamSequence ?? 0) > clearedThrough)
+    });
   }
 
   /** Deletes account rows from the grid, e.g. clearing finished runs. */
@@ -364,7 +524,7 @@ export class DashboardController {
       return false;
     }
 
-    await this.refreshAccounts();
+    await this.requestSnapshotRefresh();
     return true;
   }
 
@@ -381,7 +541,7 @@ export class DashboardController {
   private async stopAndRefresh(): Promise<boolean> {
     try {
       const response = await this.bridge.run.stop();
-      await Promise.all([this.refreshRunningThreads(), this.refreshAccounts()]);
+      await this.requestSnapshotRefresh();
       const progress = await this.bridge.run.progress();
       if (progress.success) this.setState({ progress: progress.data });
       if (!response.success || !response.data.success) {
@@ -397,11 +557,23 @@ export class DashboardController {
   }
 
   dispose(): void {
+    this.isDisposed = true;
+    this.generation++;
     for (const detach of this.detachers) {
       detach();
     }
     this.detachers = [];
     this.listeners.clear();
+
+    if (this.currentCompletion) {
+      this.currentCompletion.resolve();
+      this.currentCompletion = null;
+    }
+    if (this.nextCompletion) {
+      this.nextCompletion.resolve();
+      this.nextCompletion = null;
+    }
+    this.snapshotPending = false;
   }
 }
 

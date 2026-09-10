@@ -27,7 +27,13 @@ import { dump, StepError } from './diag';
 import { skipOnboardingSurvey } from './overlays';
 import type { AccountUiInteraction } from './types';
 import { foregroundPage } from './human';
-import { abortableDelay, boundedDomRead, isDomReadTimeout } from './cancellation';
+import {
+  abortable,
+  abortableDelay,
+  boundedDomRead,
+  isDomReadTimeout,
+  withinDeadline,
+} from './cancellation';
 
 /**
  * Thông tin đăng nhập tối thiểu mà engine cần. Bản gốc là `Credentials` trong
@@ -121,7 +127,8 @@ async function clickUntilVisible(
 }
 
 /** Kiểm tra đã đăng nhập chưa (đang ở trong app và không còn ở trang login/signup) */
-export async function isLoggedIn(page: Page): Promise<boolean> {
+export async function isLoggedIn(page: Page, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
   const url = page.url();
   if (url.includes('/login') || url.includes('/signup')) return false;
   if (!url.includes('capcut.com')) return false;
@@ -143,7 +150,12 @@ export async function isLoggedIn(page: Page): Promise<boolean> {
       'button:has-text("Free credits"), .credit-section, button[class*="credit"], [class*="avatar"], [class*="userProfile"], [class*="account"]'
     )
     .first();
-  return marker.isVisible({ timeout: 4000 }).catch(() => false);
+  try {
+    return await withinDeadline(marker.isVisible({ timeout: 4000 }), 4000, signal);
+  } catch {
+    signal?.throwIfAborted();
+    return false;
+  }
 }
 
 /**
@@ -166,11 +178,22 @@ export async function loginCapcut(
   log('🔐 ĐĂNG NHẬP CAPCUT WEB');
   log('============================================================');
 
-  await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
-  await page.waitForTimeout(4000);
+  try {
+    await withinDeadline(
+      page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 90000 }),
+      90000,
+      signal
+    );
+  } catch (error) {
+    signal.throwIfAborted();
+    throw error;
+  }
+  signal.throwIfAborted();
+  await abortableDelay(4000, signal);
 
   // Trường hợp profile đã có cookie session -> CapCut tự redirect vào my-edit
-  if (await isLoggedIn(page)) {
+  if (await isLoggedIn(page, signal)) {
+    signal.throwIfAborted();
     log('   ✅ Profile đã có session sẵn, không cần đăng nhập lại');
     return;
   }
@@ -201,7 +224,12 @@ export async function loginCapcut(
    * `yuzhpxhu31823` chết đúng ở đây (`locator.waitFor: Timeout 25000ms`) và đến
    * giờ vẫn "chưa có nguyên nhân gốc" vì không có hiện trường để xem.
    */
-  await heading.waitFor({ state: 'visible', timeout: 25000 }).catch(async (e: unknown) => {
+  await withinDeadline(
+    heading.waitFor({ state: 'visible', timeout: 25000 }),
+    25000,
+    signal
+  ).catch(async (e: unknown) => {
+    signal.throwIfAborted();
     throw new StepError(
       'Không thấy heading Welcome back / Create an account sau 25s: ' + (e as Error).message,
       await dump(page, 'login_heading_khong_hien')
@@ -231,10 +259,18 @@ export async function loginCapcut(
   log('   → Đã bấm đăng nhập, chờ chuyển trang...');
 
   // --- Bước 5: chờ vào app ---
-  await page
-    .waitForURL((u) => !u.toString().includes('/login'), { timeout: 60000 })
-    .catch(() => {});
-  await page.waitForTimeout(5000);
+  try {
+    await abortable(
+      page.waitForURL((u) => !u.toString().includes('/login'), { timeout: 60000 }),
+      signal
+    ).catch((error: unknown) => {
+      rethrowInterrupted(error, signal);
+    });
+  } catch (error) {
+    rethrowInterrupted(error, signal);
+  }
+  signal.throwIfAborted();
+  await abortableDelay(5000, signal);
 
   // Bỏ khảo sát onboarding — và kiểm modal đã tắt thật (xem `onboarding.ts`)
   await skipOnboardingSurvey(page, log, ui, signal);
@@ -249,21 +285,29 @@ export async function loginCapcut(
         rethrowInterrupted(error, signal);
       });
     });
-    await page.waitForTimeout(1500);
+    await abortableDelay(1500, signal);
   }
 
-  if (!(await isLoggedIn(page))) {
+  if (!(await isLoggedIn(page, signal))) {
     // Cố gắng điều hướng thủ công một lần nữa trước khi báo lỗi
-    await page
-      .goto('https://www.capcut.com/my-edit?start_tab=video', {
-        waitUntil: 'domcontentloaded',
-        timeout: 60000,
-      })
-      .catch(() => {});
-    await page.waitForTimeout(5000);
+    try {
+      await abortable(
+        page.goto('https://www.capcut.com/my-edit?start_tab=video', {
+          waitUntil: 'domcontentloaded',
+          timeout: 60000,
+        }),
+        signal
+      ).catch((error: unknown) => {
+        rethrowInterrupted(error, signal);
+      });
+    } catch (error) {
+      rethrowInterrupted(error, signal);
+    }
+    signal.throwIfAborted();
+    await abortableDelay(5000, signal);
   }
 
-  if (!(await isLoggedIn(page))) {
+  if (!(await isLoggedIn(page, signal))) {
     throw new StepError(
       `Đăng nhập thất bại (URL hiện tại: ${page.url()}). Có thể sai mật khẩu hoặc bị chặn captcha.`,
       await dump(page, 'dang_nhap_that_bai')

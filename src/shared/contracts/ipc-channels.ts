@@ -2,6 +2,7 @@ export const IPC_CHANNELS = {
   PING: 'app:ping',
   SETTINGS_GET: 'settings:get',
   SETTINGS_SAVE: 'settings:save',
+  SETTINGS_SAVE_AUTOMATION: 'settings:save-automation',
   CREDENTIALS_TEST: 'credentials:test',
 
   ACCOUNTS_LIST: 'accounts:list',
@@ -38,6 +39,7 @@ export const IPC_CHANNELS = {
 /** Main to renderer push channels. */
 export const IPC_EVENTS = {
   LOG_ENTRY: 'logs:on-entry',
+  LOGS_RESET: 'logs:on-reset',
   RUN_PROGRESS: 'run:on-progress',
   SERVICE_STATUS: 'services:on-status-changed'
 } as const;

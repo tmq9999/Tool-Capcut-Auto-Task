@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -201,6 +201,72 @@ describe('AccountService.getAutomationCredential', () => {
       status: 'active'
     });
     expect(service.list({ page: 1, pageSize: 50 }).items[0].passwordCapcut).toBe('PASS-DEMO');
+  });
+
+  it('F02 keeps healthy, unreadable and missing rows in one page', () => {
+    const service = createService();
+    const good = service.create({
+      email: 'good@example.test', emailProvider: 'manual',
+      passwordCapcut: 'PASS-DEMO', credit: 0, status: 'active'
+    });
+    const bad = service.create({
+      email: 'bad@example.test', emailProvider: 'manual',
+      passwordCapcut: 'UNREADABLE-DEMO', credit: 0, status: 'active'
+    });
+    const empty = service.create({
+      email: 'empty@example.test', emailProvider: 'manual',
+      credit: 0, status: 'active'
+    });
+    const blob = Buffer.from(repo.getAccountById(bad.id)!.passwordCapcutEncrypted!);
+    const decrypt = vault.decrypt.bind(vault);
+    const spy = vi.spyOn(vault, 'decrypt').mockImplementation(value => {
+      if (value.equals(blob)) throw new Error('fixture unreadable');
+      return decrypt(value);
+    });
+    try {
+      const page = service.list({ page: 1, pageSize: 50 });
+      expect(page.total).toBe(3);
+      expect(page.items).toHaveLength(3);
+      expect(page.items.find(row => row.id === good.id)).toMatchObject({
+        passwordCapcut: 'PASS-DEMO', hasPasswordCapcut: true
+      });
+      expect(page.items.find(row => row.id === bad.id)).toMatchObject({
+        passwordCapcut: null, hasPasswordCapcut: true
+      });
+      expect(page.items.find(row => row.id === empty.id)).toMatchObject({
+        passwordCapcut: null, hasPasswordCapcut: false
+      });
+      expect(repo.getAccountById(bad.id)!.passwordCapcutEncrypted).toEqual(blob);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(service.list({ page: 1, pageSize: 50 }).items.find(row => row.id === bad.id)?.passwordCapcut)
+      .toBe('UNREADABLE-DEMO');
+  });
+
+  it('F02 tolerates all decrypt failures but propagates database errors', () => {
+    const service = createService();
+    service.create({
+      email: 'one@example.test', emailProvider: 'manual',
+      passwordCapcut: 'PASS-DEMO', credit: 0, status: 'active'
+    });
+    const decrypt = vi.spyOn(vault, 'decrypt')
+      .mockImplementation(() => { throw new Error('fixture unavailable'); });
+    try {
+      expect(service.list({ page: 1, pageSize: 50 })).toMatchObject({
+        total: 1, items: [{ passwordCapcut: null, hasPasswordCapcut: true }]
+      });
+    } finally {
+      decrypt.mockRestore();
+    }
+    const dbError = new Error('fixture database failure');
+    const query = vi.spyOn(repo, 'queryAccountsForExport')
+      .mockImplementationOnce(() => { throw dbError; });
+    try {
+      expect(() => service.list({ page: 1, pageSize: 50 })).toThrow(dbError);
+    } finally {
+      query.mockRestore();
+    }
   });
 });
 

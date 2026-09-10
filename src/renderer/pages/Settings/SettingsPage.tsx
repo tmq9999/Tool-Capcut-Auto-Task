@@ -81,17 +81,13 @@ export const SettingsPage: React.FC = () => {
   };
 
   const handleSaveSettings = async () => {
-    await controller.save();
-    /**
-     * Áp ngay hai cài đặt hiển thị sau khi lưu, và cập nhật bộ đệm khởi động —
-     * nếu chỉ ghi DB thì người dùng phải khởi động lại app mới thấy tác dụng.
-     */
-    const general = controller.getState().settings.general;
-    writeBootPreferences(window.localStorage, {
-      theme: general.theme,
-      sessionRestore: general.sessionRestore
-    });
-    applyTheme(general.theme, document.documentElement);
+    const saved = await controller.save();
+    if (!saved) return;
+    const committed = controller.getLastCommittedGeneral();
+    if (committed) {
+      writeBootPreferences(window.localStorage, committed.general);
+      applyTheme(committed.general.theme, document.documentElement);
+    }
   };
 
   const handleTestConnection = async (serviceName: KnownServiceName) => {

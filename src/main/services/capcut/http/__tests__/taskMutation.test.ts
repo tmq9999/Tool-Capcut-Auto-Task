@@ -14,4 +14,14 @@ describe('HTTP task mutation', () => {
     await expect(sendTaskAction({ requestJson } as never, { actionKey: 'bad', opId: 'bad' })).rejects.toThrow('TASK_ACTION_INPUT_INVALID');
     expect(requestJson).not.toHaveBeenCalled();
   });
+
+  it.each(['0', false, null, undefined, NaN, 1])('rejects non-numeric-zero err_no value: %s', async (badErrNo) => {
+    const requestJson = vi.fn().mockResolvedValue({ status: 200, ok: true, data: { err_no: badErrNo, err_tips: '' } });
+    await expect(
+      sendTaskAction({ requestJson } as never, {
+        actionKey: 'capcut_web_design_chat',
+        opId: 'capcut_web_design_chat_user_2026-09-07',
+      })
+    ).rejects.toThrow('TASK_ACTION_REJECTED');
+  });
 });

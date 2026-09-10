@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -414,5 +414,134 @@ describe('ProxyLeaseManager chỉ dùng đúng danh sách key được chỉ đ�
     expect(manager.activeLeaseCount()).toBe(1);
     await expect(manager.acquire()).rejects.toMatchObject({ code: 'CONFIG_ERROR' });
     await manager.release(second);
+  });
+
+  describe('S06: Stop trước rotation không được xoay proxy sau đó', () => {
+    it('S06-A: signal đã abort trước khi acquire -> không gọi listKeys, getCurrentProxy hay getNewProxy', async () => {
+      const api = new StubProxyApi(['K1']);
+      api.setIps('K1', ['10.0.0.1']);
+      const manager = createManager(api, { keys: ['K1'] });
+
+      const controller = new AbortController();
+      const stopError = new Error('STOP-PRE-ACQUIRE');
+      controller.abort(stopError);
+
+      await expect(manager.acquire(controller.signal)).rejects.toThrow('STOP-PRE-ACQUIRE');
+      expect(api.getCurrentCalls).toEqual([]);
+      expect(api.getNewCalls).toEqual([]);
+    });
+
+    it('S06-B: abort trong khi readCurrentIp đang chờ -> reject lý do gốc, không dispatch getNewProxy kể cả khi read trả lời muộn', async () => {
+      let resolveCurrent!: (val: KiotProxyLease) => void;
+      const deferredCurrent = new Promise<KiotProxyLease>((resolve) => {
+        resolveCurrent = resolve;
+      });
+
+      const api = new StubProxyApi(['K1']);
+      api.getCurrentProxy = vi.fn().mockImplementation(() => deferredCurrent);
+      api.setIps('K1', ['10.0.0.1']);
+
+      const manager = createManager(api, { keys: ['K1'] });
+      const controller = new AbortController();
+      const stopError = new Error('STOP-DURING-CURRENT-IP');
+
+      const acquirePromise = manager.acquire(controller.signal);
+
+      // Wait a tick to ensure getCurrentProxy was called
+      await new Promise((r) => setTimeout(r, 10));
+      expect(api.getCurrentProxy).toHaveBeenCalledWith('K1', 'http');
+
+      // Abort while getCurrentProxy is in flight
+      controller.abort(stopError);
+
+      await expect(acquirePromise).rejects.toThrow('STOP-DURING-CURRENT-IP');
+      expect(api.getNewCalls).toEqual([]);
+
+      // Late resolve of getCurrentProxy
+      resolveCurrent({
+        keyValue: 'K1',
+        ip: '9.9.9.9',
+        host: '9.9.9.9',
+        port: 20001,
+        protocol: 'http',
+        username: null,
+        password: null,
+        nextChangeSeconds: null
+      });
+
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Assert getNewProxy was NEVER dispatched
+      expect(api.getNewCalls).toEqual([]);
+    });
+
+    it('S06-C: busy key sau pre-rotation abort được giải phóng; ordinary read error vẫn fallback null và xoay proxy bình thường', async () => {
+      const api = new StubProxyApi(['K1']);
+      api.setIps('K1', ['10.0.0.1']);
+      // Ordinary error in getCurrentProxy (not aborted)
+      api.getCurrentProxy = vi.fn().mockRejectedValue(new Error('Network error'));
+
+      const manager = createManager(api, { keys: ['K1'] });
+
+      // First run: abort during tryKey before getNewProxy
+      const controller = new AbortController();
+      controller.abort(new Error('ABORTED'));
+
+      await expect(manager.acquire(controller.signal)).rejects.toThrow('ABORTED');
+
+      // Key K1 should NOT be stuck in busyKeys or cooldown!
+      // Second run without abort should succeed and proceed with getNewProxy
+      const lease = await manager.acquire();
+      expect(lease).toBeDefined();
+      expect(lease.ip).toBe('10.0.0.1');
+      expect(api.getNewCalls).toEqual(['K1']);
+      await manager.release(lease);
+    });
+
+    it('S06-D: abort sau khi getNewProxy đã dispatch -> hoàn tất 1 rotation, lease được record/owned để runtime cleanup, không xoay lần hai', async () => {
+      let resolveNew!: (val: KiotProxyLease) => void;
+      const deferredNew = new Promise<KiotProxyLease>((resolve) => {
+        resolveNew = resolve;
+      });
+
+      const api = new StubProxyApi(['K1']);
+      api.setIps('K1', ['10.0.0.1']);
+      api.getNewProxy = vi.fn().mockImplementation(() => deferredNew);
+
+      const manager = createManager(api, { keys: ['K1'] });
+      const controller = new AbortController();
+
+      const acquirePromise = manager.acquire(controller.signal);
+
+      // Wait a tick to ensure getNewProxy was dispatched
+      await new Promise((r) => setTimeout(r, 10));
+      expect(api.getNewProxy).toHaveBeenCalledTimes(1);
+
+      // Abort after getNewProxy has dispatched
+      controller.abort(new Error('STOP-POST-DISPATCH'));
+
+      // Resolve getNewProxy
+      resolveNew({
+        keyValue: 'K1',
+        ip: '10.0.0.2',
+        host: '10.0.0.2',
+        port: 20001,
+        protocol: 'http',
+        username: null,
+        password: null,
+        nextChangeSeconds: 60
+      });
+
+      // Acquire returns the lease because rotation was committed
+      const lease = await acquirePromise;
+      expect(lease).toBeDefined();
+      expect(lease.ip).toBe('10.0.0.2');
+      expect(manager.activeLeaseCount()).toBe(1);
+      expect(api.getNewProxy).toHaveBeenCalledTimes(1);
+
+      // Runtime cleanup releases the lease exactly once
+      await manager.release(lease);
+      expect(manager.activeLeaseCount()).toBe(0);
+    });
   });
 });

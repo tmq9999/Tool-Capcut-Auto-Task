@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { createIpcEnvelopeSchema, type IpcEnvelope } from '../schemas/ipc-envelope.schema';
-import { AppSettingsSchema, type AppSettingsDTO } from '../schemas/settings.schema';
+import {
+  AppSettingsSchema,
+  AutomationConfigSettingsSchema,
+  type AppSettingsDTO,
+  type AutomationConfigSettingsDTO
+} from '../schemas/settings.schema';
 import { SettingsSaveRequestSchema, type SettingsSaveRequestDTO } from '../schemas/settings-save.schema';
 import { SaveCredentialInputSchema } from '../schemas/credentials.schema';
 import {
@@ -9,7 +14,13 @@ import {
   AccountFilterSchema,
   AccountListItemSchema
 } from '../schemas/account.schema';
-import { LogFilterSchema, CanonicalRuntimeLogSchema, type CanonicalRuntimeLog, type LogFilterDTO } from '../schemas/log.schema';
+import {
+  LogFilterSchema,
+  CanonicalRuntimeLogSchema,
+  type CanonicalRuntimeLog,
+  type LogFilterDTO,
+  type LogsResetPayload
+} from '../schemas/log.schema';
 import {
   AutomationRunConfigSchema,
   AutomationRunProgressSchema,
@@ -77,6 +88,10 @@ export const IpcContractRegistry = {
     },
     save: {
       request: SettingsSaveRequestSchema,
+      response: z.object({ success: z.boolean() }).strict()
+    },
+    saveAutomation: {
+      request: AutomationConfigSettingsSchema,
       response: z.object({ success: z.boolean() }).strict()
     }
   },
@@ -151,7 +166,11 @@ export const IpcContractRegistry = {
   run: {
     start: {
       request: AutomationRunConfigSchema,
-      response: z.object({ runId: z.string().min(1), artifactBasename: z.string().min(1).optional() }).strict()
+      response: z.object({
+        runId: z.string().min(1),
+        artifactBasename: z.string().min(1).optional(),
+        clearedThrough: z.number().int().safe().optional()
+      }).strict()
     },
     health: { request: RunHealthRequestSchema, response: RunHealthResponseSchema },
     userData: { request: z.void(), response: z.object({ userDataDir: z.string().min(1), rolloutHandshake: z.string().regex(/^[a-f0-9]{32,128}$/i).optional() }).strict() },
@@ -194,6 +213,7 @@ export interface ElectronBridge {
   settings: {
     get(): Promise<IpcEnvelope<{ settings: AppSettingsDTO; credentials: CredentialStatusDTO[] }>>;
     save(req: SettingsSaveRequestDTO): Promise<IpcEnvelope<{ success: boolean }>>;
+    saveAutomation(req: AutomationConfigSettingsDTO): Promise<IpcEnvelope<{ success: boolean }>>;
   };
   credentials: {
     test(
@@ -226,11 +246,12 @@ export interface ElectronBridge {
   };
   logs: {
     list(filter: LogFilterDTO): Promise<IpcEnvelope<{ items: CanonicalRuntimeLog[]; total: number }>>;
-    clear(): Promise<IpcEnvelope<{ success: boolean }>>;
+    clear(): Promise<IpcEnvelope<{ success: boolean; clearedThrough?: number }>>;
     onEntry(listener: (log: CanonicalRuntimeLog) => void): () => void;
+    onReset(listener: (payload: LogsResetPayload) => void): () => void;
   };
   run: {
-    start(config: AutomationRunConfigDTO): Promise<IpcEnvelope<{ runId: string; artifactBasename?: string }>>;
+    start(config: AutomationRunConfigDTO): Promise<IpcEnvelope<{ runId: string; artifactBasename?: string; clearedThrough?: number }>>;
     health(input: RunHealthRequestDTO): Promise<IpcEnvelope<RunHealthResponseDTO>>;
     userData(): Promise<IpcEnvelope<{ userDataDir: string; rolloutHandshake?: string }>>;
     stop(): Promise<IpcEnvelope<{ success: boolean }>>;

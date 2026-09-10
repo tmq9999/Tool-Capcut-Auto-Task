@@ -34,6 +34,7 @@ class FakeIpcRegistrar implements IpcRegistrar {
 describe('Settings IPC Registration (Task 2.1.3 RED)', () => {
   const SETTINGS_GET_CHANNEL = IPC_CHANNELS.SETTINGS_GET;
   const SETTINGS_SAVE_CHANNEL = IPC_CHANNELS.SETTINGS_SAVE;
+  const SETTINGS_SAVE_AUTOMATION_CHANNEL = IPC_CHANNELS.SETTINGS_SAVE_AUTOMATION;
   const CREDENTIALS_TEST_CHANNEL = IPC_CHANNELS.CREDENTIALS_TEST;
 
   const validSettings: AppSettingsDTO = {
@@ -117,16 +118,17 @@ describe('Settings IPC Registration (Task 2.1.3 RED)', () => {
 
   const CredentialsTestEnvelopeSchema = createIpcEnvelopeSchema(SanitizedDiagnosticResultSchema);
 
-  it('registers exactly SETTINGS_GET, SETTINGS_SAVE, and CREDENTIALS_TEST channels', () => {
+  it('registers exactly SETTINGS_GET, SETTINGS_SAVE, SETTINGS_SAVE_AUTOMATION, and CREDENTIALS_TEST channels', () => {
     const registrar = new FakeIpcRegistrar();
     const fakeSettingsService = {} as SettingsService;
     const fakeConnectionManager = {} as ServiceConnectionManager;
 
     registerSettingsIpc(registrar as never, fakeSettingsService, fakeConnectionManager);
 
-    expect(registrar.handlers.size).toBe(3);
+    expect(registrar.handlers.size).toBe(4);
     expect(registrar.handlers.has(SETTINGS_GET_CHANNEL)).toBe(true);
     expect(registrar.handlers.has(SETTINGS_SAVE_CHANNEL)).toBe(true);
+    expect(registrar.handlers.has(SETTINGS_SAVE_AUTOMATION_CHANNEL)).toBe(true);
     expect(registrar.handlers.has(CREDENTIALS_TEST_CHANNEL)).toBe(true);
   });
 
@@ -320,23 +322,24 @@ describe('Settings IPC Registration (Task 2.1.3 RED)', () => {
     expect(String(response.error.details?.field)).toContain('serviceName');
   });
 
-  it('cleanup removes all three handlers exactly once and is idempotent', () => {
+  it('cleanup removes all handlers exactly once and is idempotent', () => {
     const registrar = new FakeIpcRegistrar();
     const fakeSettingsService = {} as SettingsService;
     const fakeConnectionManager = {} as ServiceConnectionManager;
 
     const cleanup = registerSettingsIpc(registrar as never, fakeSettingsService, fakeConnectionManager);
 
-    expect(registrar.handlers.size).toBe(3);
+    expect(registrar.handlers.size).toBe(4);
 
     cleanup();
     expect(registrar.handlers.size).toBe(0);
-    expect(registrar.removedChannels).toHaveLength(3);
+    expect(registrar.removedChannels).toHaveLength(4);
     expect(registrar.removedChannels).toContain(SETTINGS_GET_CHANNEL);
     expect(registrar.removedChannels).toContain(SETTINGS_SAVE_CHANNEL);
+    expect(registrar.removedChannels).toContain(SETTINGS_SAVE_AUTOMATION_CHANNEL);
     expect(registrar.removedChannels).toContain(CREDENTIALS_TEST_CHANNEL);
 
     expect(() => cleanup()).not.toThrow();
-    expect(registrar.removedChannels).toHaveLength(3);
+    expect(registrar.removedChannels).toHaveLength(4);
   });
 });

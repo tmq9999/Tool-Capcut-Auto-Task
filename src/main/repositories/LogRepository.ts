@@ -100,4 +100,24 @@ export class LogRepository {
   clearAllLogs(): void {
     this.db.prepare('DELETE FROM runtime_logs').run();
   }
+
+  listIds(): string[] {
+    const rows = this.db.prepare('SELECT id FROM runtime_logs ORDER BY created_at ASC, id ASC').all() as Array<{ id: string }>;
+    return rows.map((r) => r.id);
+  }
+
+  deleteIds(ids: readonly string[]): void {
+    if (ids.length === 0) return;
+    const CHUNK_SIZE = 400;
+
+    const tx = this.db.transaction((allIds: readonly string[]) => {
+      for (let i = 0; i < allIds.length; i += CHUNK_SIZE) {
+        const chunk = allIds.slice(i, i + CHUNK_SIZE);
+        const placeholders = chunk.map(() => '?').join(',');
+        this.db.prepare(`DELETE FROM runtime_logs WHERE id IN (${placeholders})`).run(...chunk);
+      }
+    });
+
+    tx(ids);
+  }
 }

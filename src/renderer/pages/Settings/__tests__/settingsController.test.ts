@@ -377,3 +377,76 @@ describe('Pure SettingsController Unit Tests (Task 2.1.4 RED)', () => {
     expect(c.getState().isSaved).toBe(false);
   });
 });
+
+describe('T09: Settings hydration and committed boot prefs', () => {
+  it('getLastCommittedGeneral returns null initially and committed general after successful save', async () => {
+    const { bridge } = createMockBridge();
+    const controller = new SettingsController(bridge);
+    await controller.load();
+
+    expect(controller.getLastCommittedGeneral()).toBeNull();
+
+    controller.updateSettings((s) => ({
+      ...s,
+      general: { ...s.general, theme: 'dark', sessionRestore: true },
+    }));
+
+    const saved = await controller.save();
+    expect(saved).toBe(true);
+
+    const committed = controller.getLastCommittedGeneral();
+    expect(committed).not.toBeNull();
+    expect(committed?.general.theme).toBe('dark');
+    expect(committed?.general.sessionRestore).toBe(true);
+  });
+
+  it('preserves user edits made while load() is pending', async () => {
+    const { bridge, getSpy } = createMockBridge();
+    let resolveGet!: (val: unknown) => void;
+    getSpy.mockImplementationOnce(() => new Promise((resolve) => { resolveGet = resolve; }));
+
+    const controller = new SettingsController(bridge);
+    const loading = controller.load();
+
+    // User edits while load is pending
+    controller.setSimpleDraft('gmail94', { action: 'replace', value: 'my-draft-key' });
+    controller.updateSettings((s) => ({
+      ...s,
+      general: { ...s.general, theme: 'dark' },
+    }));
+
+    // Now load resolves with server defaults
+    resolveGet({
+      success: true,
+      data: {
+        settings: DEFAULT_APP_SETTINGS,
+        credentials: [],
+      },
+    });
+
+    await loading;
+
+    // Touched draft and touched settings should NOT be overwritten by server response
+    expect(controller.getState().drafts.gmail94).toEqual({ action: 'replace', value: 'my-draft-key' });
+    expect(controller.getState().settings.general.theme).toBe('dark');
+  });
+
+  it('save() succeeds and records lastCommittedGeneral even if post-save refresh rejects', async () => {
+    const { bridge, getSpy } = createMockBridge();
+    const controller = new SettingsController(bridge);
+    await controller.load();
+
+    // Make refresh reject
+    getSpy.mockRejectedValueOnce(new Error('temporary refresh timeout'));
+
+    controller.updateSettings((s) => ({
+      ...s,
+      general: { ...s.general, theme: 'light' },
+    }));
+
+    const saved = await controller.save();
+    expect(saved).toBe(true);
+    expect(controller.getState().error).toBeNull();
+    expect(controller.getLastCommittedGeneral()?.general.theme).toBe('light');
+  });
+});

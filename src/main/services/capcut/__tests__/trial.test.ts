@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { BrowserContext, Page } from 'playwright-core';
+import type { BrowserContext, Page, Locator } from 'playwright-core';
 
 import { createDirectUiInteraction } from '../uiInteractionScheduler';
 import { checkProTrial, isEligible, MIN_TRIAL_DAYS, type TrialInfo } from '../trial';
+import { DomReadTimeoutError } from '../cancellation';
 
 vi.mock('../diag', () => ({ dump: vi.fn(async () => 'trial-read-dump') }));
 
@@ -70,6 +71,7 @@ function trialPage(evaluateResult: unknown, evaluateRejects = false): Page {
       const isProduct = selector === '[class*="subscriptionProduct"]';
       const locator = {
         first: () => locator,
+        filter: () => locator,
         count: vi.fn(async () => isUpgradeEntry ? 1 : 0),
         isVisible: vi.fn(async () => isProduct),
         click: vi.fn(async () => {}),
@@ -80,16 +82,39 @@ function trialPage(evaluateResult: unknown, evaluateRejects = false): Page {
   return page as unknown as Page;
 }
 
+async function runWithFakeTimers<T>(fn: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  try {
+    let finished = false;
+    let result: T;
+    let error: unknown;
+    fn().then(
+      r => { finished = true; result = r; },
+      e => { finished = true; error = e; }
+    );
+    let guard = 0;
+    while (!finished && guard < 100) {
+      guard++;
+      await vi.advanceTimersByTimeAsync(2000);
+      await Promise.resolve();
+    }
+    if (error) throw error;
+    return result!;
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 describe('checkProTrial DOM boundary', () => {
   it('returns explicit unknown and cannot trial when the Pro-card DOM read fails', async () => {
     const signal = new AbortController().signal;
-    const result = await checkProTrial(
+    const result = await runWithFakeTimers(() => checkProTrial(
       trialPage(null, true),
       {} as BrowserContext,
       () => {},
       createDirectUiInteraction(signal),
       signal
-    );
+    ));
 
     expect(result).toMatchObject({
       status: 'unknown',
@@ -102,7 +127,7 @@ describe('checkProTrial DOM boundary', () => {
 
   it('preserves an observed seven-day DOM offer as eligible', async () => {
     const signal = new AbortController().signal;
-    const result = await checkProTrial(
+    const result = await runWithFakeTimers(() => checkProTrial(
       trialPage({
         found: true,
         days: 7,
@@ -114,7 +139,7 @@ describe('checkProTrial DOM boundary', () => {
       () => {},
       createDirectUiInteraction(signal),
       signal
-    );
+    ));
 
     expect(result).toMatchObject({
       status: 'eligible',
@@ -125,5 +150,318 @@ describe('checkProTrial DOM boundary', () => {
       hasStartButton: true,
     });
     expect(isEligible(result)).toBe(true);
+  });
+});
+
+describe('S01 — Onboarding survey handling before Upgrade (AC S01-A...F)', () => {
+  interface StatefulTrialOptions {
+    surveyInitiallyVisible?: boolean;
+    skipClosesSurvey?: boolean;
+    pricingInitiallyVisible?: boolean;
+    upgradeClickFails?: boolean;
+    stopOnSurveyRead?: boolean;
+    surveyReadError?: Error;
+    evaluateResult?: {
+      found?: boolean;
+      days?: number;
+      listPrice?: string;
+      trialPrice?: string;
+      hasStartButton?: boolean;
+    } | null;
+  }
+
+  function createStatefulTrialPage(options: StatefulTrialOptions, trace: string[]) {
+    let surveyVisible = options.surveyInitiallyVisible ?? false;
+    let pricingVisible = options.pricingInitiallyVisible ?? false;
+
+    const page = {
+      goto: vi.fn(async () => {
+        trace.push('goto');
+        return null;
+      }),
+      waitForTimeout: vi.fn(async () => {}),
+      bringToFront: vi.fn(async () => {}),
+      evaluate: vi.fn(async () => {
+        trace.push('evaluate');
+        return options.evaluateResult ?? null;
+      }),
+      locator: vi.fn((selector: string) => {
+        const isWrapper = selector.includes('.lv-modal-wrapper');
+        const isSkip = selector.includes('.skip-mrkR37') || selector.includes('Skip');
+        const isMask = selector.includes('.lv-modal-mask');
+        const isUpgrade = selector === '[data-id="TitleBarUpgradeVip"]';
+        const isPricing = selector.includes('subscriptionProduct');
+        const isClose = selector.includes('Close') || selector.includes('banner');
+
+        const loc: Record<string, unknown> = {
+          first: () => loc as unknown as Locator,
+          filter: (_filterOpts?: { has?: unknown }) => {
+            return loc as unknown as Locator;
+          },
+          count: vi.fn(async () => {
+            if (isUpgrade) return 1;
+            if (isMask) return surveyVisible ? 1 : 0;
+            return 0;
+          }),
+          isVisible: vi.fn(async () => {
+            if (options.stopOnSurveyRead) {
+              trace.push('survey-read-check');
+            }
+            if (isWrapper || isMask || isSkip) {
+              if (options.surveyReadError) throw options.surveyReadError;
+              return surveyVisible;
+            }
+            if (isPricing) {
+              return pricingVisible;
+            }
+            if (isClose) {
+              return false;
+            }
+            return false;
+          }),
+          click: vi.fn(async () => {
+            if (isSkip) {
+              trace.push('skip-click');
+              if (options.skipClosesSurvey !== false) {
+                surveyVisible = false;
+              }
+              return;
+            }
+            if (isUpgrade) {
+              trace.push('upgrade-click');
+              if (options.upgradeClickFails) {
+                throw new Error('Upgrade button click failed');
+              }
+              if (!surveyVisible) {
+                pricingVisible = true;
+              }
+              return;
+            }
+            if (isClose) {
+              trace.push('close-click');
+              return;
+            }
+          }),
+          waitFor: vi.fn(async () => undefined),
+        };
+        return loc;
+      }),
+    };
+    return page as unknown as Page;
+  }
+
+  it('S01-A: survey blocks upgrade, Skip closes it before Upgrade click, then reads eligible offer', async () => {
+    const trace: string[] = [];
+    const page = createStatefulTrialPage({
+      surveyInitiallyVisible: true,
+      skipClosesSurvey: true,
+      evaluateResult: {
+        found: true,
+        days: 7,
+        listPrice: '222,000₫',
+        trialPrice: '0₫',
+        hasStartButton: true,
+      }
+    }, trace);
+
+    const logs: string[] = [];
+    const controller = new AbortController();
+    const result = await runWithFakeTimers(() => checkProTrial(
+      page,
+      {} as BrowserContext,
+      (msg) => logs.push(msg),
+      createDirectUiInteraction(controller.signal),
+      controller.signal
+    ));
+
+    expect(trace).toContain('skip-click');
+    expect(trace).toContain('upgrade-click');
+    const skipIndex = trace.indexOf('skip-click');
+    const upgradeIndex = trace.indexOf('upgrade-click');
+    expect(skipIndex).toBeLessThan(upgradeIndex);
+    // Exactly 1 upgrade attempt since survey was closed and pricing opened
+    const upgradeClicks = trace.filter(t => t === 'upgrade-click').length;
+    expect(upgradeClicks).toBe(1);
+    expect(result).toMatchObject({
+      status: 'eligible',
+      canTrial: true,
+      days: 7,
+    });
+  });
+
+  it('S01-B: Skip fails to close survey -> returns unknown with clear onboarding blocker error, zero Upgrade clicks', async () => {
+    const trace: string[] = [];
+    const page = createStatefulTrialPage({
+      surveyInitiallyVisible: true,
+      skipClosesSurvey: false,
+    }, trace);
+
+    const logs: string[] = [];
+    const controller = new AbortController();
+    const result = await runWithFakeTimers(() => checkProTrial(
+      page,
+      {} as BrowserContext,
+      (msg) => logs.push(msg),
+      createDirectUiInteraction(controller.signal),
+      controller.signal
+    ));
+
+    expect(trace).toContain('skip-click');
+    const upgradeClicks = trace.filter(t => t === 'upgrade-click').length;
+    expect(upgradeClicks).toBe(0);
+    expect(result.status).toBe('unknown');
+    expect(result.canTrial).toBe(false);
+    expect(result.error).toContain('onboarding');
+  });
+
+  it('S01-C: Pricing already opened without survey -> does not click Skip or Close pricing, reads offer intact', async () => {
+    const trace: string[] = [];
+    const page = createStatefulTrialPage({
+      surveyInitiallyVisible: false,
+      pricingInitiallyVisible: true,
+      evaluateResult: {
+        found: true,
+        days: 7,
+        listPrice: '222,000₫',
+        trialPrice: '0₫',
+        hasStartButton: true,
+      }
+    }, trace);
+
+    const logs: string[] = [];
+    const controller = new AbortController();
+    const result = await runWithFakeTimers(() => checkProTrial(
+      page,
+      {} as BrowserContext,
+      (msg) => logs.push(msg),
+      createDirectUiInteraction(controller.signal),
+      controller.signal
+    ));
+
+    expect(trace).not.toContain('skip-click');
+    expect(trace).not.toContain('close-click');
+    expect(trace).not.toContain('upgrade-click');
+    expect(result.status).toBe('eligible');
+  });
+
+  it('S01-D: Upgrade click failure logs error and does not falsely claim success', async () => {
+    const trace: string[] = [];
+    const page = createStatefulTrialPage({
+      surveyInitiallyVisible: false,
+      upgradeClickFails: true,
+    }, trace);
+
+    const logs: string[] = [];
+    const controller = new AbortController();
+    const result = await runWithFakeTimers(() => checkProTrial(
+      page,
+      {} as BrowserContext,
+      (msg) => logs.push(msg),
+      createDirectUiInteraction(controller.signal),
+      controller.signal
+    ));
+
+    expect(trace).toContain('upgrade-click');
+    expect(result.status).toBe('unknown');
+    expect(logs.some(l => l.includes('thất bại'))).toBe(true);
+    expect(logs.some(l => l.includes('đã bấm') && !l.includes('thất bại'))).toBe(false);
+  });
+
+  it('S01-E: Stop signal during survey wait throws original abort reason without opening Upgrade', async () => {
+    const trace: string[] = [];
+    const stopError = new Error('USER_STOP_SIGNAL');
+    const controller = new AbortController();
+
+    const page = createStatefulTrialPage({
+      surveyInitiallyVisible: true,
+      stopOnSurveyRead: true,
+    }, trace);
+
+    // Abort controller before or when survey is checked
+    controller.abort(stopError);
+
+    await expect(
+      checkProTrial(
+        page,
+        {} as BrowserContext,
+        () => {},
+        createDirectUiInteraction(controller.signal),
+        controller.signal
+      )
+    ).rejects.toBe(stopError);
+
+    expect(trace).not.toContain('upgrade-click');
+  });
+
+  it('S01-F: No survey happy path with ineligible trial returns ineligible without survey action', async () => {
+    const trace: string[] = [];
+    const page = createStatefulTrialPage({
+      surveyInitiallyVisible: false,
+      evaluateResult: {
+        found: true,
+        days: 3,
+        listPrice: '222,000₫',
+        trialPrice: '0₫',
+        hasStartButton: true,
+      }
+    }, trace);
+
+    const logs: string[] = [];
+    const controller = new AbortController();
+    const result = await runWithFakeTimers(() => checkProTrial(
+      page,
+      {} as BrowserContext,
+      (msg) => logs.push(msg),
+      createDirectUiInteraction(controller.signal),
+      controller.signal
+    ));
+
+    expect(trace).not.toContain('skip-click');
+    expect(trace).toContain('upgrade-click');
+    expect(result.status).toBe('ineligible');
+    expect(result.days).toBe(3);
+    expect(isEligible(result)).toBe(false);
+  });
+
+  it('T04: survey read timeout (DomReadTimeoutError) rethrows without opening Upgrade modal', async () => {
+    const trace: string[] = [];
+    const timeoutErr = new DomReadTimeoutError('trial:survey-visible');
+    const page = createStatefulTrialPage({
+      surveyReadError: timeoutErr
+    }, trace);
+
+    const controller = new AbortController();
+    await expect(
+      runWithFakeTimers(() => checkProTrial(
+        page,
+        {} as BrowserContext,
+        () => {},
+        createDirectUiInteraction(controller.signal),
+        controller.signal
+      ))
+    ).rejects.toThrow('DOM_READ_TIMEOUT');
+
+    expect(trace).not.toContain('upgrade-click');
+  });
+
+  it('T04: survey read generic error returns status unknown without opening Upgrade modal', async () => {
+    const trace: string[] = [];
+    const genericErr = new Error('DOM query broken');
+    const page = createStatefulTrialPage({
+      surveyReadError: genericErr
+    }, trace);
+
+    const controller = new AbortController();
+    const result = await runWithFakeTimers(() => checkProTrial(
+      page,
+      {} as BrowserContext,
+      () => {},
+      createDirectUiInteraction(controller.signal),
+      controller.signal
+    ));
+
+    expect(trace).not.toContain('upgrade-click');
+    expect(result.status).toBe('unknown');
+    expect(result.error).toContain('Không xác minh được trạng thái khảo sát onboarding');
   });
 });

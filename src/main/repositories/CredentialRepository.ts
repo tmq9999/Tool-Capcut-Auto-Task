@@ -111,6 +111,28 @@ export class CredentialRepository {
     `).run(metadataStr, serviceName);
   }
 
+  replaceEncryptedIfUnchanged(serviceName: string, expected: Buffer, replacement: Buffer): boolean {
+    return this.db.prepare(`
+      UPDATE service_credentials
+      SET encrypted_credentials = ?, updated_at = datetime('now')
+      WHERE service_name = ? AND encrypted_credentials = ?
+    `).run(replacement, serviceName, expected).changes === 1;
+  }
+
+  updateMetadataIfUnchanged(
+    serviceName: string,
+    expected: Buffer,
+    metadata: CredentialDiagnosticMetadata
+  ): boolean {
+    const validMeta = CredentialDiagnosticMetadataSchema.parse(metadata);
+    const metadataStr = JSON.stringify(validMeta);
+    return this.db.prepare(`
+      UPDATE service_credentials
+      SET metadata = ?, updated_at = datetime('now')
+      WHERE service_name = ? AND encrypted_credentials = ?
+    `).run(metadataStr, serviceName, expected).changes === 1;
+  }
+
   delete(serviceName: string): boolean {
     const res = this.db.prepare(`
       DELETE FROM service_credentials

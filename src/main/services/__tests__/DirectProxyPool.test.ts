@@ -98,4 +98,24 @@ describe('DirectProxyPool', () => {
     await expect(acquire1).rejects.toThrow('Session stopped');
     await expect(acquire2).rejects.toThrow('Session stopped');
   });
+
+  it('từ chối khi khởi tạo danh sách có route trùng lặp', () => {
+    const duplicateList: BrowserProxySettings[] = [
+      { host: 'proxy.com', port: 8080, type: 'http', username: 'u', password: 'p' },
+      { host: 'PROXY.COM', port: 8080, type: 'HTTP', username: 'u', password: 'p' },
+    ];
+    expect(() => new DirectProxyPool(duplicateList)).toThrowError(
+      /Duplicate proxy route detected for PROXY\.COM:8080/
+    );
+  });
+
+  it('chấp nhận cùng host:port nếu khác username hoặc password (khác route)', () => {
+    const distinctList: BrowserProxySettings[] = [
+      { host: 'proxy.com', port: 8080, type: 'http', username: 'user1', password: 'p' },
+      { host: 'proxy.com', port: 8080, type: 'http', username: 'user2', password: 'p' },
+    ];
+    const pool = new DirectProxyPool(distinctList);
+    expect(pool.totalCount).toBe(2);
+  });
 });
+

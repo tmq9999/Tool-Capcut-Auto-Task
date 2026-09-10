@@ -47,8 +47,12 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({
   const [isExporting, setIsExporting] = useState(false);
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
 
+  const exportLatchRef = React.useRef(false);
+  const sessionIdRef = React.useRef(0);
+
   React.useEffect(() => {
     if (isOpen) {
+      sessionIdRef.current += 1;
       setScope(checkedCount > 0 ? 'checked' : 'all');
       setFormat(defaultFormat);
       setStatus(null);
@@ -82,26 +86,47 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({
   };
 
   const handleExport = async () => {
-    if (isExporting) return;
+    if (exportLatchRef.current) return;
+    exportLatchRef.current = true;
     setIsExporting(true);
     setStatus(null);
+    const sessionToken = sessionIdRef.current;
 
-    const outcome = await onExport({
-      format,
-      fields: orderedFields,
-      scope:
-        scope === 'checked'
-          ? { kind: 'checked', ids: checkedIds }
-          : scope === 'filtered'
-            ? { kind: 'filtered', filter: currentFilter }
-            : { kind: 'all' },
-    });
+    const snapshotFormat = format;
+    const snapshotFields = [...orderedFields];
+    const snapshotScope =
+      scope === 'checked'
+        ? { kind: 'checked' as const, ids: [...checkedIds] }
+        : scope === 'filtered'
+          ? { kind: 'filtered' as const, filter: { ...currentFilter } }
+          : { kind: 'all' as const };
 
-    setIsExporting(false);
-    if (outcome.kind === 'done') {
-      setStatus({ ok: true, text: `Đã xuất ${outcome.exportedCount} tài khoản → ${outcome.filePath}` });
-    } else if (outcome.kind === 'error') {
-      setStatus({ ok: false, text: outcome.message });
+    try {
+      const outcome = await onExport({
+        format: snapshotFormat,
+        fields: snapshotFields,
+        scope: snapshotScope,
+      });
+
+      if (sessionIdRef.current === sessionToken) {
+        if (outcome.kind === 'done') {
+          setStatus({ ok: true, text: `Đã xuất ${outcome.exportedCount} tài khoản → ${outcome.filePath}` });
+        } else if (outcome.kind === 'error') {
+          setStatus({ ok: false, text: outcome.message });
+        } else if (outcome.kind === 'canceled') {
+          setStatus(null);
+        }
+      }
+    } catch (err: unknown) {
+      if (sessionIdRef.current === sessionToken) {
+        setStatus({
+          ok: false,
+          text: err instanceof Error ? err.message : 'Xuất dữ liệu thất bại.'
+        });
+      }
+    } finally {
+      exportLatchRef.current = false;
+      setIsExporting(false);
     }
   };
 

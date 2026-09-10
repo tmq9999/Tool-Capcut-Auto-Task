@@ -647,6 +647,36 @@ describe('AccountsController.exportAccounts', () => {
     expect(bridge.lastFilter).toBeNull();
   });
 
+  it('bắt lỗi khi bridge.accounts.export bị reject và trả về kind error', async () => {
+    bridge.accounts.export = async () => {
+      throw new Error('IPC transport disconnected');
+    };
+    const controller = new AccountsController(bridge);
+
+    const outcome = await controller.exportAccounts({
+      format: 'TXT',
+      fields: ['email'],
+      scope: { kind: 'all' }
+    });
+
+    expect(outcome).toEqual({
+      kind: 'error',
+      message: 'IPC transport disconnected'
+    });
+  });
+
+  it('bắt lỗi khi bridge.accounts.tasks bị reject và ghi nhận vào state error', async () => {
+    bridge.accounts.tasks = async () => {
+      throw new Error('IPC transport disconnected');
+    };
+    const controller = new AccountsController(bridge);
+
+    const result = await controller.loadTasks('acc-fail');
+
+    expect(result).toBeNull();
+    expect(controller.getState().error).toBe('IPC transport disconnected');
+  });
+
   it('UI-01 requests page two without truncating the dataset', async () => {
     const seen: unknown[] = [];
     bridge.accounts.list = async (filter) => {

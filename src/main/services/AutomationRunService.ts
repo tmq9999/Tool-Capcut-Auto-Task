@@ -2,11 +2,11 @@ import crypto from 'node:crypto';
 import type { BrowserContext as CapcutContext, Page as CapcutPage } from 'playwright-core';
 import { ProviderError } from '../providers/ProviderError';
 import { AutomationTerminalError } from './AutomationTerminalError';
-import { DirectProxyPool } from './DirectProxyPool';
+import { DirectProxyPool, getDirectProxyRouteKey } from './DirectProxyPool';
 import { generateCapcutPassword } from './passwordGenerator';
 import { measureStage } from './stageTiming';
 import type { BrowserLauncher, LauncherProxy } from './capcut/launcher';
-import { abortableDelay } from './capcut/cancellation';
+import { abortableDelay, withinDeadline } from './capcut/cancellation';
 import {
   RunUiInteractionScheduler,
   createDirectUiInteraction,
@@ -26,7 +26,7 @@ import type {
   CapcutVerificationReceipt,
   UnsettledTaskProof
 } from './capcut/types';
-import type { LogBus } from './LogBus';
+import type { LogBus, StartLogResetTicket, StartLogResetPort } from './LogBus';
 import type { AcquiredProxyLease } from './ProxyLeaseManager';
 import type { ObservationIdentity, ObservationScope } from '../providers/ObservedHttpClient';
 import type {
@@ -241,6 +241,7 @@ export interface AutomationRunCollaborators {
   browser: IBrowserRuntimeApi;
   accounts: IAccountSink;
   logBus: Pick<LogBus, 'emit'>;
+  logReset?: StartLogResetPort;
   launcher?: () => BrowserLauncher | null;
   capcut?: CapcutTaskRunner;
   httpOnlyRunner?: HttpOnlyAccountRunner;
@@ -326,8 +327,10 @@ interface ThreadRuntime {
   sessionRecycleCount: number;
   outcomeStep?: string;
   outcome?: ThreadOutcome;
+  outcomePersisted?: boolean;
   completionPromise?: Promise<void>;
   notifyDone?: () => void;
+  routeReleased?: boolean;
 }
 
 class InitialWaveBarrier {
@@ -407,28 +410,34 @@ export function parseDirectProxy(entry: string): BrowserProxySettings | null {
     const authColon = authPart.indexOf(':');
     if (authColon >= 0) {
       username = authPart.slice(0, authColon).trim();
-      password = authPart.slice(authColon + 1).trim();
+      password = authPart.slice(authColon + 1);
     } else {
       username = authPart;
     }
 
     const hostPortParts = hostPortPart.split(':').map((p) => p.trim());
+    if (hostPortParts.length !== 2) return null;
     host = hostPortParts[0] ?? '';
     port = Number(hostPortParts[1]);
   } else {
-    // Format: host:port[:user:pass]
-    const parts = rest.split(':').map((part) => part.trim());
-    host = parts[0] ?? '';
-    port = Number(parts[1]);
-    if (parts[2] !== undefined && parts[2] !== '') username = parts[2];
-    if (parts[3] !== undefined && parts[3] !== '') password = parts[3];
+    // Format: host:port[:user[:pass]]
+    const parts = rest.split(':');
+    if (parts.length < 2) return null;
+    host = parts[0].trim();
+    port = Number(parts[1].trim());
+    if (parts[2] !== undefined && parts[2].trim() !== '') {
+      username = parts[2].trim();
+    }
+    if (parts.length > 3) {
+      password = parts.slice(3).join(':');
+    }
   }
 
   if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null;
 
-  const settings: BrowserProxySettings = { host, port, type };
-  if (username) settings.username = username;
-  if (password) settings.password = password;
+  const settings: BrowserProxySettings = { host: host.toLowerCase(), port, type: type.toLowerCase() };
+  if (username !== undefined && username !== '') settings.username = username;
+  if (password !== undefined && password !== '') settings.password = password;
   return settings;
 }
 
@@ -512,6 +521,7 @@ export class AutomationRunService {
   private acquisitionAbort: AbortController | null = null;
   private terminalIntent: AutomationTerminalReasonDTO | null = null;
   private terminalState: 'blocked' | 'failed' | 'stopped' | null = null;
+  private terminalPersistenceFailure: AutomationTerminalError | null = null;
   private readonly iterationAbort = new Map<string, AbortController>();
   private readonly iterationOwners = new Map<string, object>();
   private cleanupFailures = 0;
@@ -902,11 +912,23 @@ export class AutomationRunService {
 
     const parsed: BrowserProxySettings[] = [];
     const badLines: string[] = [];
+    const seenRoutes = new Map<string, number>();
+    const duplicateLines: string[] = [];
 
     entries.forEach((entry, index) => {
+      const lineNum = index + 1;
       const proxy = parseDirectProxy(entry);
-      if (proxy) parsed.push(proxy);
-      else badLines.push('dòng ' + (index + 1));
+      if (!proxy) {
+        badLines.push('dòng ' + lineNum);
+        return;
+      }
+      const routeKey = getDirectProxyRouteKey(proxy);
+      if (seenRoutes.has(routeKey)) {
+        duplicateLines.push('dòng ' + lineNum + ' (trùng với dòng ' + seenRoutes.get(routeKey) + ')');
+      } else {
+        seenRoutes.set(routeKey, lineNum);
+      }
+      parsed.push(proxy);
     });
 
     if (badLines.length > 0) {
@@ -915,6 +937,14 @@ export class AutomationRunService {
         'Không đọc được ' + badLines.length + ' dòng proxy (' + badLines.join(', ') + '). ' +
           'Định dạng đầy đủ: http://ip:port[:user:pass] hoặc socks5://ip:port[:user:pass] ' +
           '(hỗ trợ cả user:pass@ip:port, scheme: http, https, socks4, socks5). Không chạy tiếp để tránh luồng đi bằng IP thật.'
+      );
+    }
+
+    if (duplicateLines.length > 0) {
+      throw new ProviderError(
+        'CONFIG_ERROR',
+        'Phát hiện proxy trùng lặp: ' + duplicateLines.join(', ') + '. ' +
+          'Mỗi luồng cần proxy riêng biệt, hãy xoá dòng trùng hoặc thay bằng proxy khác.'
       );
     }
 
@@ -955,13 +985,9 @@ export class AutomationRunService {
     }
   }
 
-  private recordOutcome(thread: ThreadRuntime, outcome: ThreadOutcome): void {
-    if (thread.outcome) return;
+  private commitOutcome(thread: ThreadRuntime, outcome: ThreadOutcome, persisted: boolean): void {
     thread.outcome = outcome;
-    this.deps.accounts.update(thread.accountId, {
-      status: outcome.status,
-      automationStep: outcome.step
-    });
+    thread.outcomePersisted = persisted;
     if (outcome.kind === 'completed') this.increment('accountsCompleted');
     if (outcome.kind === 'skipped') this.skippedAccounts += 1;
     if (outcome.kind === 'failed') this.increment('accountsFailed');
@@ -975,6 +1001,51 @@ export class AutomationRunService {
       type: 'account-terminal',
       outcome: outcome.kind
     });
+  }
+
+  private recordOutcome(thread: ThreadRuntime, outcome: ThreadOutcome): void {
+    if (thread.outcome) return;
+
+    let writeSucceeded = false;
+    let writeError: unknown;
+    try {
+      const updateResult = this.deps.accounts.update(thread.accountId, {
+        status: outcome.status,
+        automationStep: outcome.step
+      });
+      if (updateResult && updateResult.success === false) {
+        writeError = new Error('Database returned success: false');
+      } else {
+        writeSucceeded = true;
+      }
+    } catch (err) {
+      writeError = err;
+    }
+
+    if (!writeSucceeded) {
+      const cause = writeError instanceof Error ? writeError : new Error(String(writeError ?? 'Unknown database error'));
+      const failureOutcome: ThreadOutcome = {
+        kind: 'failed',
+        status: 'error',
+        step: outcome.step
+      };
+      this.commitOutcome(thread, failureOutcome, false);
+
+      const termErr = new AutomationTerminalError(
+        'failed',
+        {
+          code: 'INTERNAL_ERROR',
+          details: { failure: 'ACCOUNT_TERMINAL_PERSISTENCE_FAILED', persisted: false }
+        },
+        `Không thể lưu trạng thái kết thúc của tài khoản vào database: ${cause.message}`,
+        cause
+      );
+      this.terminalPersistenceFailure = termErr;
+      this.acceptTerminalError(termErr);
+      return;
+    }
+
+    this.commitOutcome(thread, outcome, true);
   }
 
   private acceptTerminalError(error: unknown): void {
@@ -1216,14 +1287,23 @@ export class AutomationRunService {
       }
     }
 
+    let stopSuccess = true;
     if (thread) {
       if (thread.session) {
-        await this.stopSession(thread, thread.session);
+        stopSuccess = await this.stopSession(thread, thread.session);
       }
       if (!thread.session) {
         this.activeThreads.delete(thread.accountId);
       }
       this.iterationAbort.delete(thread.accountId);
+    }
+
+    if (!stopSuccess || Boolean(thread?.session)) {
+      return;
+    }
+
+    if (thread?.routeReleased) {
+      return;
     }
 
     if (lease) {
@@ -1252,6 +1332,9 @@ export class AutomationRunService {
         await this.observe(cleanupIdentity, () => this.deps.proxies.release(lease));
         this.activeProxyCount = Math.max(0, this.activeProxyCount - 1);
         this.recordResourceSnapshot();
+        if (thread) {
+          thread.routeReleased = true;
+        }
       } catch {
         this.noteCleanupFailure(thread, 'proxy-lease');
       }
@@ -1261,9 +1344,15 @@ export class AutomationRunService {
         directProxyPool.release(proxyToRelease);
         this.activeProxyCount = Math.max(0, this.activeProxyCount - 1);
         this.recordResourceSnapshot();
+        if (thread) {
+          thread.routeReleased = true;
+        }
       } else if (thread?.directProxy) {
         this.activeProxyCount = Math.max(0, this.activeProxyCount - 1);
         this.recordResourceSnapshot();
+        if (thread) {
+          thread.routeReleased = true;
+        }
       }
     }
   }
@@ -1532,6 +1621,8 @@ export class AutomationRunService {
 
       while (Date.now() < deadline) {
         signal.throwIfAborted();
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
         attempt += 1;
         try {
           const code = await this.observe({
@@ -1541,7 +1632,17 @@ export class AutomationRunService {
             sessionAlias: thread.session?.alias ?? 'unassigned',
             provider: thread.emailProvider,
             operation: 'read-otp'
-          }, () => this.deps.emailOtp.readOtp(purchasedEmailId));
+          }, () => {
+            const readPromise = this.deps.emailOtp.readOtp(purchasedEmailId);
+            const currentRemaining = deadline - Date.now();
+            return withinDeadline(
+              readPromise,
+              Math.max(0, currentRemaining),
+              signal
+            );
+          });
+          signal.throwIfAborted();
+          if (Date.now() >= deadline) break;
           if (code) {
             say('SUCCESS', 'Đã nhận mã xác minh sau ' + waited() + ' (' + attempt + ' lượt đọc)');
             return code;
@@ -1552,7 +1653,9 @@ export class AutomationRunService {
           lastError = err instanceof Error ? err.message : String(err);
           say('WARNING', 'Đọc mã thất bại ở lượt ' + attempt + ': ' + lastError);
         }
-        await this.holdForThread(5_000, signal);
+        const remainingAfter = deadline - Date.now();
+        if (remainingAfter <= 0) break;
+        await this.holdForThread(Math.min(5_000, remainingAfter), signal);
       }
 
       throw new Error(
@@ -1703,6 +1806,17 @@ export class AutomationRunService {
     result: CapcutAccountResult | CapcutUiAccountResult,
     config: AutomationRunConfigDTO
   ): ThreadOutcome {
+    if (result.fatalError) {
+      this.log('ERROR', thread.email, 'Nhiệm vụ', result.fatalError, thread.accountId);
+      thread.outcomeStep = 'Lỗi khi làm nhiệm vụ: ' + result.fatalError;
+      this.deps.accounts.update(thread.accountId, {
+        automationStep: thread.outcomeStep,
+        ...(result.credits !== undefined ? { credit: result.credits } : {}),
+        ...(result.subscription ? { subscription: result.subscription } : {})
+      });
+      return { kind: 'failed', status: 'error', step: thread.outcomeStep };
+    }
+
     if (result.skipped) {
       thread.outcomeStep = 'Bỏ qua — không đủ điều kiện';
       this.deps.accounts.update(thread.accountId, {
@@ -1750,11 +1864,6 @@ export class AutomationRunService {
         (full ? '' : ' — còn thiếu: ' + result.missing.join(', ')),
       thread.accountId
     );
-
-    if (result.fatalError) {
-      this.log('ERROR', thread.email, 'Nhiệm vụ', result.fatalError, thread.accountId);
-      return { kind: 'failed', status: 'error', step: 'Lỗi khi làm nhiệm vụ: ' + result.fatalError };
-    }
 
     if (!full) {
       return {
@@ -2289,30 +2398,36 @@ export class AutomationRunService {
         }
       }
 
-      if (directProxyPool) {
-        directProxyPool.drain();
-      }
+      const hasRetainedSessions = Array.from(this.activeThreads.values()).some((t) => Boolean(t.session));
+      if (!hasRetainedSessions) {
+        if (directProxyPool) {
+          directProxyPool.drain();
+        }
 
-
-      try {
-        await this.observe({
-          runId: this.progress.runId,
-          workerAlias: null,
-          acquisitionAlias: null,
-          accountAlias: null,
-          sessionAlias: null,
-          provider: 'kiotproxy',
-          operation: 'proxy-release',
-          authorityRef: 'all'
-        }, () => this.deps.proxies.releaseAll());
-        this.activeProxyCount = 0;
-        this.recordResourceSnapshot();
-      } catch {
-        this.noteCleanupFailure(undefined, 'proxy-lease');
+        try {
+          await this.observe({
+            runId: this.progress.runId,
+            workerAlias: null,
+            acquisitionAlias: null,
+            accountAlias: null,
+            sessionAlias: null,
+            provider: 'kiotproxy',
+            operation: 'proxy-release',
+            authorityRef: 'all'
+          }, () => this.deps.proxies.releaseAll());
+          this.activeProxyCount = 0;
+          this.recordResourceSnapshot();
+        } catch {
+          this.noteCleanupFailure(undefined, 'proxy-lease');
+        }
       }
 
       let finalReason: AutomationTerminalReasonDTO | undefined = this.terminalIntent ?? undefined;
-      if (!finalReason) {
+      if (this.terminalPersistenceFailure) {
+        finalReason = this.terminalPersistenceFailure.reason;
+        this.terminalIntent = finalReason;
+        this.terminalState = 'failed';
+      } else if (!finalReason) {
         if ((config.mailLimit ?? 0) > 0 && this.progress.accountsAccepted >= config.mailLimit!) {
           finalReason = { code: 'MAIL_LIMIT_REACHED', details: { mailLimit: config.mailLimit! } };
         } else if (source.kind === 'finite') {
@@ -2341,7 +2456,11 @@ export class AutomationRunService {
         };
       }
 
-      if (this.terminalIntent?.code === 'USER_STOP' || this.terminalIntent?.code === 'APP_SHUTDOWN') {
+      if (this.terminalPersistenceFailure) {
+        this.terminalIntent = finalReason;
+        this.terminalState = 'failed';
+        this.publish('failed', this.terminalPersistenceFailure.message, { terminalReason: finalReason });
+      } else if (this.terminalIntent?.code === 'USER_STOP' || this.terminalIntent?.code === 'APP_SHUTDOWN') {
         this.publish('stopped', 'Phiên chạy đã dừng.', { terminalReason: finalReason });
       } else if (hasCleanupFailure) {
         this.terminalIntent = finalReason;
@@ -2459,7 +2578,7 @@ export class AutomationRunService {
     return stopped;
   }
 
-  start(config: AutomationRunConfigDTO): Promise<{ runId: string; artifactBasename?: string }> {
+  start(config: AutomationRunConfigDTO): Promise<{ runId: string; artifactBasename?: string; clearedThrough?: number }> {
     if (this.isRunning() || this.activeThreads.size > 0 || this.iterationOwners.size > 0) {
       return Promise.reject(new ProviderError('CONFIG_ERROR', 'Đang có phiên hoặc profile chưa dừng, hãy dừng trước khi bắt đầu.'));
     }
@@ -2470,6 +2589,7 @@ export class AutomationRunService {
       ));
     }
     const runId = this.nextId();
+    const logResetTicket = this.deps.logReset?.capture(runId);
     const headedRollout = config.headless === false && (config.missionTransport ?? 'ui') === 'ui' && config.rolloutStage !== undefined;
     this.telemetry = headedRollout
       ? this.runtime.createTelemetry?.(runId) ?? createRunTelemetry({ userDataDir: this.getUserDataDir(), runId })
@@ -2479,6 +2599,7 @@ export class AutomationRunService {
     this.acquisitionAbort = new AbortController();
     this.terminalIntent = null;
     this.terminalState = null;
+    this.terminalPersistenceFailure = null;
     this.iterationAbort.clear();
     this.cleanupFailures = 0;
     this.skippedAccounts = 0;
@@ -2496,7 +2617,7 @@ export class AutomationRunService {
     const runSignal = this.runAbort.signal;
     const operation = Promise.resolve().then(async () => {
       try {
-        return await this.prepareRun(config, runId, runSignal);
+        return await this.prepareRun(config, runId, runSignal, logResetTicket);
       } catch (error: unknown) {
         if (!runSignal.aborted) {
           if (this.telemetry) {
@@ -2544,10 +2665,19 @@ export class AutomationRunService {
       }
     });
     this.starting = operation;
-    return operation.then(() => ({ runId, ...(artifactBasename ? { artifactBasename } : {}) }));
+    return operation.then((result) => ({
+      runId,
+      ...(artifactBasename ? { artifactBasename } : {}),
+      ...(result?.clearedThrough !== undefined ? { clearedThrough: result.clearedThrough } : {})
+    }));
   }
 
-  private async prepareRun(config: AutomationRunConfigDTO, runId: string, runSignal: AbortSignal): Promise<{ runId: string }> {
+  private async prepareRun(
+    config: AutomationRunConfigDTO,
+    runId: string,
+    runSignal: AbortSignal,
+    logResetTicket?: StartLogResetTicket
+  ): Promise<{ runId: string; clearedThrough?: number }> {
     const workerTarget = (config.mailLimit ?? 0) > 0 ? Math.min(config.threadCount, config.mailLimit!) : config.threadCount;
     this.publish('preparing', 'Đang chuẩn bị dữ liệu cho phiên chạy...', {
       runId, workerTarget, workersActive: 0,
@@ -2717,6 +2847,24 @@ export class AutomationRunService {
     }
 
     runSignal.throwIfAborted();
+    let clearedThrough: number | undefined;
+    if (logResetTicket && this.deps.logReset) {
+      try {
+        const commitRes = this.deps.logReset.commit(logResetTicket);
+        clearedThrough = commitRes.clearedThrough;
+      } catch (err: unknown) {
+        const terminalErr = new AutomationTerminalError(
+          'failed',
+          { code: 'INTERNAL_ERROR' },
+          'Failed to commit log reset: ' + (err instanceof Error ? err.message : String(err)),
+          err instanceof Error ? err : undefined
+        );
+        this.publish('failed', terminalErr.message, { terminalReason: terminalErr.reason });
+        throw terminalErr;
+      }
+
+    }
+
     this.publish('running', 'Đang chạy ' + readiness.workerTarget + ' luồng...', {
       workerTarget: readiness.workerTarget
     });
@@ -2735,10 +2883,13 @@ export class AutomationRunService {
         return this.lastSummary;
       })
       .finally(() => {
-        this.activeDirectProxyPool = null;
+        const hasRetained = Array.from(this.activeThreads.values()).some((t) => Boolean(t.session));
+        if (!hasRetained) {
+          this.activeDirectProxyPool = null;
+        }
       });
 
-    return { runId };
+    return { runId, ...(clearedThrough !== undefined ? { clearedThrough } : {}) };
   }
 
   private releaseRunningWaiters(): void {
@@ -2791,7 +2942,20 @@ export class AutomationRunService {
       if (this.starting) await this.starting.catch(() => undefined);
       if (this.activeRun) await this.activeRun;
       if (this.healthRun) await this.healthRun.catch(() => undefined);
-      if (this.activeThreads.size > 0 || this.terminalState === 'failed') {
+      if (this.activeThreads.size > 0 || this.terminalState === 'failed' || this.terminalPersistenceFailure) {
+        if (this.terminalPersistenceFailure) {
+          const reason = this.terminalPersistenceFailure.reason;
+          this.terminalIntent = reason;
+          this.terminalState = 'failed';
+          this.publish('failed', this.terminalPersistenceFailure.message, { terminalReason: reason });
+          this.lastSummary = {
+            ...this.progress,
+            state: 'failed',
+            terminalReason: reason,
+            startedProfiles: [...this.startedProfiles]
+          };
+          return;
+        }
         const message = 'Chưa xác nhận dừng được ' + this.activeThreads.size + ' profile. Cần xử lý thủ công trước khi chạy lại.';
         const reason: AutomationTerminalReasonDTO = this.terminalIntent?.code === 'RESOURCE_CLEANUP_FAILED'
           ? this.terminalIntent

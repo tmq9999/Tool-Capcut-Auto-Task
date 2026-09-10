@@ -607,14 +607,17 @@ export class EmailPurchaseService {
 
           remainingAffordablePurchases -= 1;
           stats.confirmed += 1;
-          const purchasedEmail = this.purchasedRepo.insertReserved({
-            id: this.nextId(),
-            provider: 'gmail94',
-            email: order.email,
-            orderId: order.orderId,
-            service: gmailServiceSlug
-          }, reservationId);
+          const id = this.nextId();
+          let insertReturned = false;
           try {
+            const purchasedEmail = this.purchasedRepo.insertReserved({
+              id,
+              provider: 'gmail94',
+              email: order.email,
+              orderId: order.orderId,
+              service: gmailServiceSlug
+            }, reservationId);
+            insertReturned = true;
             settlePurchase(purchasedEmail.id);
             try {
               emitPurchaseEvent('confirmed');
@@ -623,10 +626,14 @@ export class EmailPurchaseService {
               throw error;
             }
             workerSignal.throwIfAborted();
-            return { purchasedEmail, reservationId, ...(mutationIdentity ? { ownerRef: mutationIdentity.ownerRef } : {}) };
+            return {
+              purchasedEmail, reservationId,
+              ...(mutationIdentity ? { ownerRef: mutationIdentity.ownerRef } : {})
+            };
           } catch (error) {
+            if (!insertReturned) poisonPurchaseAccounting();
             try {
-              this.purchasedRepo.releaseReservation(purchasedEmail.id, reservationId);
+              this.purchasedRepo.releaseReservation(id, reservationId);
             } catch (cleanupError) {
               throw new AggregateError(
                 [error, cleanupError],
@@ -785,18 +792,22 @@ export class EmailPurchaseService {
 
           stats.confirmed += 1;
           const id = this.nextId();
-          let purchasedEmail = this.purchasedRepo.insertReserved({
-            id,
-            provider: 'dongvanfb',
-            email: mail.email,
-            passwordEncrypted: mail.password ? this.vault.encrypt(mail.password) : null,
-            refreshTokenEncrypted: mail.refreshToken ? this.vault.encrypt(mail.refreshToken) : null,
-            clientId: mail.clientId ?? null,
-            rawPayloadEncrypted: this.vault.encrypt(
-              [mail.email, mail.password ?? '', mail.refreshToken ?? '', mail.clientId ?? ''].join('|')
-            )
-          }, reservationId);
+          let insertReturned = false;
           try {
+            let purchasedEmail = this.purchasedRepo.insertReserved({
+              id,
+              provider: 'dongvanfb',
+              email: mail.email,
+              passwordEncrypted: mail.password ? this.vault.encrypt(mail.password) : null,
+              refreshTokenEncrypted: mail.refreshToken
+                ? this.vault.encrypt(mail.refreshToken) : null,
+              clientId: mail.clientId ?? null,
+              rawPayloadEncrypted: this.vault.encrypt(
+                [mail.email, mail.password ?? '', mail.refreshToken ?? '', mail.clientId ?? '']
+                  .join('|')
+              )
+            }, reservationId);
+            insertReturned = true;
             settlePurchase(purchasedEmail.id);
             try {
               emitPurchaseEvent('confirmed');
@@ -804,7 +815,6 @@ export class EmailPurchaseService {
               poisonPurchaseAccounting();
               throw error;
             }
-
             if ((!mail.refreshToken || !mail.clientId) && mail.password) {
               workerSignal.throwIfAborted();
               const pair = await this.observe(
@@ -813,26 +823,26 @@ export class EmailPurchaseService {
               );
               workerSignal.throwIfAborted();
               const updated = this.purchasedRepo.updateReservedOauth(
-                id,
-                reservationId,
-                this.vault.encrypt(pair.refreshToken),
-                pair.clientId
+                id, reservationId, this.vault.encrypt(pair.refreshToken), pair.clientId
               );
               if (!updated) {
                 throw new AutomationTerminalError(
-                  'failed',
-                  { code: 'INTERNAL_ERROR' },
+                  'failed', { code: 'INTERNAL_ERROR' },
                   'Quyền sở hữu mailbox đã thay đổi; chưa cấp mailbox cho worker.'
                 );
               }
-              purchasedEmail = this.purchasedRepo.getDtoById(id) ?? { ...purchasedEmail, hasOauth: true };
+              purchasedEmail = this.purchasedRepo.getDtoById(id)
+                ?? { ...purchasedEmail, hasOauth: true };
             }
-
             workerSignal.throwIfAborted();
-            return { purchasedEmail, reservationId, ...(mutationIdentity ? { ownerRef: mutationIdentity.ownerRef } : {}) };
+            return {
+              purchasedEmail, reservationId,
+              ...(mutationIdentity ? { ownerRef: mutationIdentity.ownerRef } : {})
+            };
           } catch (error) {
+            if (!insertReturned) poisonPurchaseAccounting();
             try {
-              this.purchasedRepo.releaseReservation(purchasedEmail.id, reservationId);
+              this.purchasedRepo.releaseReservation(id, reservationId);
             } catch (cleanupError) {
               throw new AggregateError(
                 [error, cleanupError],

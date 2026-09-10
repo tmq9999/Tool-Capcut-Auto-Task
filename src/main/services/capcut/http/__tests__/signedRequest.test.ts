@@ -3,7 +3,7 @@ import { assertSignedRequest, captureNextSignedRequest } from '../signedRequest'
 
 it('captures one browser-signed request draft without editing its query or body', async () => {
   const request = { url: () => 'https://edit-api-sg.capcut.com/lv/v2/canvas/save?X-Bogus=current', method: () => 'POST', postData: () => '{"draft_id":"fresh"}', headers: () => ({ 'content-type': 'application/json', sign: 'current' }) };
-  const page = { waitForRequest: vi.fn(async (predicate: (r: typeof request) => boolean) => { expect(predicate(request)).toBe(true); return { path: '/lv/v2/canvas/save?X-Bogus=current', method: 'POST', body: '{"draft_id":"fresh"}', headers: { 'content-type': 'application/json', sign: 'current' } }; }) } as never;
+  const page = { waitForRequest: vi.fn(async (predicate: (r: typeof request) => boolean) => { expect(predicate(request)).toBe(true); return request; }) } as never;
   const draft = await captureNextSignedRequest(page, r => r.path.startsWith('/lv/v2/canvas/save'), async () => {});
   assertSignedRequest(draft);
   expect(draft.path).toContain('X-Bogus=current');
@@ -13,4 +13,24 @@ it('captures one browser-signed request draft without editing its query or body'
 it('rejects unsigned or newline-injected drafts', () => {
   expect(() => assertSignedRequest({ path: '/x', method: 'POST', headers: {} })).toThrow('CAPCUT_SIGNED_REQUEST_INVALID');
   expect(() => assertSignedRequest({ path: '/x\n/y', method: 'GET', headers: { 'content-type': 'application/json' } })).toThrow('CAPCUT_SIGNED_REQUEST_INVALID');
+});
+
+it('rejects requests with unsupported HTTP methods like PUT or DELETE', async () => {
+  const request = { url: () => 'https://edit-api-sg.capcut.com/lv/v2/canvas/save', method: () => 'PUT', postData: () => null, headers: () => ({ 'content-type': 'application/json' }) };
+  const page = { waitForRequest: vi.fn(async () => request) } as never;
+  await expect(captureNextSignedRequest(page, () => true, async () => {})).rejects.toThrow('CAPCUT_SIGNED_REQUEST_INVALID');
+});
+
+it('preserves trigger error when trigger rejects without unhandled rejection', async () => {
+  let rejectPending!: (err: Error) => void;
+  const pendingPromise = new Promise((_, reject) => { rejectPending = reject; });
+  const page = { waitForRequest: vi.fn(() => pendingPromise) } as never;
+  
+  await expect(
+    captureNextSignedRequest(page, () => true, async () => {
+      throw new Error('TRIGGER_FAILED');
+    })
+  ).rejects.toThrow('TRIGGER_FAILED');
+
+  rejectPending(new Error('REQUEST_TIMEOUT'));
 });

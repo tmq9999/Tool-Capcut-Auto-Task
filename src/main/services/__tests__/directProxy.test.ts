@@ -96,3 +96,31 @@ describe('parseDirectProxy — dòng hỏng', () => {
     });
   });
 });
+
+describe('parseDirectProxy — password chứa dấu hai chấm (colon) và chuẩn hóa', () => {
+  it('ip:port:user:pass giữ nguyên password chứa colon', () => {
+    expect(parseDirectProxy('192.0.2.1:8080:demo:a:b')).toMatchObject({
+      host: '192.0.2.1',
+      port: 8080,
+      username: 'demo',
+      password: 'a:b',
+    });
+  });
+
+  it('user:pass@host:port giữ nguyên password chứa colon', () => {
+    expect(parseDirectProxy('http://demo:a:b@192.0.2.1:8080')).toMatchObject({
+      host: '192.0.2.1',
+      port: 8080,
+      username: 'demo',
+      password: 'a:b',
+    });
+  });
+
+  it('chuẩn hóa host và scheme về lowercase', () => {
+    expect(parseDirectProxy('HTTP://MY-HOST.COM:8080')).toEqual({
+      host: 'my-host.com',
+      port: 8080,
+      type: 'http',
+    });
+  });
+});

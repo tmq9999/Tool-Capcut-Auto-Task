@@ -1,4 +1,6 @@
-export type LogStatus = 'DEBUG' | 'INFO' | 'WAITING' | 'SUCCESS' | 'ERROR' | 'WARN' | 'OK';
+import type { CanonicalLogStatus } from '../schemas/log.schema';
+
+export type LogStatus = CanonicalLogStatus;
 
 export interface RuntimeLog {
   id: string;
