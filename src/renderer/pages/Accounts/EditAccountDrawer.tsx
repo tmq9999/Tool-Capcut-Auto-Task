@@ -10,7 +10,7 @@ export interface EditAccountDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   account: Account | null;
-  onSaveAccount: (updatedAccount: Account) => void;
+  onSaveAccount: (updatedAccount: Account) => Promise<boolean> | void;
 }
 
 export const EditAccountDrawer: React.FC<EditAccountDrawerProps> = ({
@@ -28,9 +28,10 @@ export const EditAccountDrawer: React.FC<EditAccountDrawerProps> = ({
   const [status, setStatus] = useState<AccountStatus>('active');
   const [fullData, setFullData] = useState('');
   const [notes, setNotes] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
-    if (account) {
+    if (account && isOpen) {
       setEmail(account.email || '');
       setPassword(account.password || '');
       setEmailPassword(account.emailPassword || '');
@@ -41,36 +42,48 @@ export const EditAccountDrawer: React.FC<EditAccountDrawerProps> = ({
       setFullData(account.fullData || '');
       setNotes(account.notes || '');
     }
-  }, [account]);
+  }, [account, isOpen]);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!account) return;
-
-    onSaveAccount({
-      ...account,
-      email,
-      password,
-      emailPassword,
-      provider,
-      proxy,
-      browserProfile,
-      status,
-      fullData,
-      notes,
-      updatedAt: 'Just now',
-    });
-
+  const handleClose = () => {
+    if (isSubmitting) return;
     onClose();
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!account || isSubmitting) return;
+
+    setIsSubmitting(true);
+    try {
+      const outcome = await onSaveAccount({
+        ...account,
+        email,
+        password,
+        emailPassword,
+        provider,
+        proxy,
+        browserProfile,
+        status,
+        fullData,
+        notes,
+        updatedAt: 'Just now',
+      });
+
+      if (outcome !== false) {
+        onClose();
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const footer = (
     <>
-      <Button variant="secondary" size="md" onClick={onClose} type="button">
+      <Button variant="secondary" size="md" onClick={handleClose} type="button" disabled={isSubmitting}>
         Hủy
       </Button>
-      <Button variant="primary" size="md" onClick={handleSubmit} type="button">
-        Lưu thay đổi
+      <Button variant="primary" size="md" onClick={handleSubmit} type="button" disabled={isSubmitting}>
+        {isSubmitting ? 'Đang lưu...' : 'Lưu thay đổi'}
       </Button>
     </>
   );
@@ -78,7 +91,7 @@ export const EditAccountDrawer: React.FC<EditAccountDrawerProps> = ({
   return (
     <Drawer
       isOpen={isOpen}
-      onClose={onClose}
+      onClose={handleClose}
       title="Chỉnh sửa tài khoản"
       subtitle={`Cập nhật thông tin cho ${account?.email || ''}`}
       footer={footer}

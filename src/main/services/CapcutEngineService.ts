@@ -49,6 +49,7 @@ import { CapcutHttpTaskApi } from './capcut/http/taskApi';
 import { attachPrivateCapture } from './capcut/http/privateCapture';
 import { SessionEvidenceBudget } from './capcut/evidenceBudget';
 import { attachTaskListDiagnostics } from './capcut/taskApi';
+import { TaskEvidenceError } from './capcut/TaskEvidenceError';
 
 /**
  * Từ `outcomes` + `snapshot` của `runAllTasks` thành các dòng tiến độ để lưu DB.
@@ -360,13 +361,16 @@ export class CapcutEngineService implements CapcutTaskRunner {
       sessionStartedAt,
       unsettledProofs: input.unsettledProofs,
       onCheckpoint: async (checkpoint: TaskCheckpoint) => {
+        if (input.signal?.aborted) return;
         if (!input.onTaskCheckpoint) return;
         const rows = toTaskProgressRows(checkpoint.outcomes, checkpoint.snapshot);
+        if (input.signal?.aborted) return;
         const receipt = toVerificationReceipt(
           checkpoint.snapshot,
           input.runId ?? 'run-local',
           input.sessionAlias ?? 'session-1'
         );
+        if (input.signal?.aborted) return;
         await input.onTaskCheckpoint({
           rows,
           receipt,
@@ -375,10 +379,15 @@ export class CapcutEngineService implements CapcutTaskRunner {
       }
     });
 
+    input.signal?.throwIfAborted();
+
     const { outcomes, snapshot } = runResult;
     if (!snapshot) {
       // Không có snapshot thì KHÔNG được suy ra "xong" — thà báo lỗi rõ.
-      throw new Error('Không đọc được task_list của CapCut nên không thể xác nhận kết quả.');
+      throw new TaskEvidenceError(
+        'Không đọc được task_list của CapCut nên không thể xác nhận kết quả.',
+        runResult.unsettledProofs ?? []
+      );
     }
 
     const receipt = toVerificationReceipt(

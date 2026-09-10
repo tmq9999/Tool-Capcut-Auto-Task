@@ -66,6 +66,7 @@ export class ProxyLeaseManager {
   private readonly busyKeys = new Set<string>();
   private readonly cooldownUntil = new Map<string, number>();
   private readonly activeLeases = new Map<string, AcquiredProxyLease>();
+  private readonly releasingLeases = new Map<string, Promise<void>>();
   private cachedKeys: string[] | null = null;
 
   private readonly now: () => number;
@@ -260,15 +261,34 @@ export class ProxyLeaseManager {
   }
 
   async release(lease: AcquiredProxyLease): Promise<void> {
-    this.activeLeases.delete(lease.leaseId);
-    this.leaseRepo.release(lease.leaseId);
-    this.busyKeys.delete(lease.keyValue);
-    this.cooldownUntil.delete(lease.keyValue);
+    const existing = this.releasingLeases.get(lease.leaseId);
+    if (existing) {
+      await existing;
+      return;
+    }
+
+    const owned = this.activeLeases.get(lease.leaseId);
+    if (!owned) return;
+
+    const releaseOp = (async () => {
+      try {
+        await this.observe({ provider: 'kiotproxy', operation: 'proxy-release' }, () =>
+          this.api.releaseKey(owned.keyValue)
+        );
+      } catch {
+        // Releasing is best effort: the gateway may have rotated the key already.
+      }
+      this.leaseRepo.release(owned.leaseId);
+      this.activeLeases.delete(owned.leaseId);
+      this.busyKeys.delete(owned.keyValue);
+      this.cooldownUntil.delete(owned.keyValue);
+    })();
+
+    this.releasingLeases.set(owned.leaseId, releaseOp);
     try {
-      await this.observe({ provider: 'kiotproxy', operation: 'proxy-release' }, () =>
-        this.api.releaseKey(lease.keyValue));
-    } catch {
-      // Releasing is best effort: the gateway may have rotated the key already.
+      await releaseOp;
+    } finally {
+      this.releasingLeases.delete(owned.leaseId);
     }
   }
 

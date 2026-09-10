@@ -109,6 +109,30 @@ describe('LazyProxyLeaseSource', () => {
 
     await expect(source.releaseAll()).resolves.toBeUndefined();
   });
+
+  it('OP-01 retains failed cleanup owner', async () => {
+    const manager = new FakeManager('TOKEN');
+    let builds = 0;
+    let fail = true;
+    manager.releaseAll = async () => {
+      if (fail) throw new Error('fixture');
+    };
+    const source = new LazyProxyLeaseSource(
+      { readSimpleKey: () => 'TOKEN' },
+      () => {
+        builds++;
+        return manager;
+      }
+    );
+    await source.acquire();
+    await expect(source.releaseAll()).rejects.toThrow('fixture');
+    await expect(source.acquire()).rejects.toThrow();
+    expect(builds).toBe(1);
+    fail = false;
+    await source.releaseAll();
+    await source.acquire();
+    expect(builds).toBe(2);
+  });
 });
 
 describe('LazyProxyLeaseSource với danh sách key chỉ định', () => {
@@ -162,9 +186,11 @@ describe('LazyProxyLeaseSource với danh sách key chỉ định', () => {
     );
 
     source.configure({ keys: ['K1'], region: 'hanoi' });
-    await source.acquire();
+    const lease1 = await source.acquire();
+    await source.release(lease1);
     source.configure({ keys: ['K1'], region: 'saigon' });
-    await source.acquire();
+    const lease2 = await source.acquire();
+    await source.release(lease2);
 
     expect(seen).toEqual(['hanoi', 'saigon']);
   });
@@ -181,9 +207,11 @@ describe('LazyProxyLeaseSource với danh sách key chỉ định', () => {
     );
 
     source.configure({ keys: ['K1'] });
-    await source.acquire();
+    const lease1 = await source.acquire();
+    await source.release(lease1);
     source.configure({ keys: ['K2', 'K3'] });
-    await source.acquire();
+    const lease2 = await source.acquire();
+    await source.release(lease2);
 
     expect(built.map((m) => m.keys)).toEqual([['K1'], ['K2', 'K3']]);
   });
@@ -241,5 +269,23 @@ describe('LazyProxyLeaseSource với danh sách key chỉ định', () => {
 
     expect(built).toHaveLength(1);
     expect(built[0].acquireSignals).toEqual([controller.signal]);
+  });
+
+  it('B04 refuses changed config until leases are released', async () => {
+    const built: FakeManager[] = [];
+    const source = new LazyProxyLeaseSource({ readSimpleKey: () => 'TOKEN' }, (options) => {
+      const manager = new FakeManager(options.apiToken, options.keys);
+      built.push(manager);
+      return manager;
+    });
+    source.configure({ keys: ['K1'] });
+    const lease = await source.acquire();
+    expect(() => source.configure({ keys: ['K2'] })).toThrow();
+    expect(built).toHaveLength(1);
+    expect(() => source.configure({ keys: ['K1'] })).not.toThrow();
+    await source.release(lease);
+    source.configure({ keys: ['K2'] });
+    await source.acquire();
+    expect(built.map((x) => x.keys)).toEqual([['K1'], ['K2']]);
   });
 });

@@ -7,7 +7,14 @@ vi.mock('electron', () => ({
   app: {
     getPath: () => state.dataPath,
     setPath: (_name: string, value: string) => { state.events.push('user-data'); state.dataPath = value; },
-    getName: () => 'offline-test', setAppUserModelId: () => {}, on: () => {}, quit: () => {},
+    getName: () => 'offline-test',
+    setName: () => {},
+    setAppUserModelId: () => {},
+    on: () => {},
+    quit: () => {},
+    isPackaged: false,
+    getAppPath: () => process.cwd(),
+    getVersion: () => '3.0.2',
     requestSingleInstanceLock: () => true,
     whenReady: () => state.ready,
     exit: () => { state.events.push('exit'); }

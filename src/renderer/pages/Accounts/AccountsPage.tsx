@@ -54,10 +54,11 @@ const OFFLINE_BRIDGE: IAccountsBridge = {
 
 export const AccountsPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
+  const pageSize = 50;
   const controller = useMemo(() => {
     const api = window.electronAPI;
-    return new AccountsController(api ? { accounts: api.accounts } : OFFLINE_BRIDGE);
-  }, []);
+    return new AccountsController(api ? { accounts: api.accounts } : OFFLINE_BRIDGE, pageSize);
+  }, [pageSize]);
 
   const controllerState = useSyncExternalStore(
     (onStoreChange) => controller.subscribe(onStoreChange),
@@ -70,8 +71,6 @@ export const AccountsPage: React.FC = () => {
   }, [controller]);
 
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
-  const [currentPage, setCurrentPage] = useState(1);
-  const pageSize = 50;
 
   const [exportConfig, setExportConfig] = useState<ExportSettingsDTO>(
     DEFAULT_APP_SETTINGS.exportConfig
@@ -133,9 +132,10 @@ export const AccountsPage: React.FC = () => {
       query: filters.searchQuery,
       status: filters.statusFilter,
       emailProvider: filters.providerFilter,
+      browserProvider: filters.browserFilter !== 'all' ? filters.browserFilter : undefined,
       createdFrom: dateFilterToCreatedFrom(filters.dateFilter),
     }),
-    [filters.searchQuery, filters.statusFilter, filters.providerFilter, filters.dateFilter]
+    [filters.searchQuery, filters.statusFilter, filters.providerFilter, filters.browserFilter, filters.dateFilter]
   );
 
   /**
@@ -145,27 +145,12 @@ export const AccountsPage: React.FC = () => {
    */
   useEffect(() => {
     const timer = setTimeout(() => {
-      void controller.load(serverFilter);
-      setCurrentPage(1);
+      void controller.load(serverFilter, 1);
     }, 250);
     return () => clearTimeout(timer);
   }, [controller, serverFilter]);
 
-  /**
-   * Ba bộ lọc trên đã chạy Ở SERVER nên KHÔNG lọc lại ở đây — lọc hai lần thì kết
-   * quả server trả về đúng lại bị cắt bởi phép so client-side yếu hơn.
-   * `browserFilter` vẫn ở client vì contract chưa có khoá tương ứng.
-   */
-  const filteredAccounts = useMemo(() => {
-    return accounts.filter((acc) => {
-      const matchesBrowser =
-        filters.browserFilter === 'all' ||
-        (acc.browserProfile &&
-          acc.browserProfile.toLowerCase().includes(filters.browserFilter.toLowerCase()));
-
-      return matchesBrowser;
-    });
-  }, [accounts, filters.browserFilter]);
+  const filteredAccounts = accounts;
 
   // Checked count
   const checkedAccountIds = Object.keys(rowSelection).filter((k) => rowSelection[k]);
@@ -196,12 +181,12 @@ export const AccountsPage: React.FC = () => {
     });
   };
 
-  const handleAddAccount = (newAccData: Omit<Account, 'id' | 'stt'>) => {
-    void controller.create(newAccData);
+  const handleAddAccount = async (newAccData: Omit<Account, 'id' | 'stt'>): Promise<boolean> => {
+    return await controller.create(newAccData);
   };
 
-  const handleSaveAccount = (updated: Account) => {
-    void controller.update(updated.id, updated);
+  const handleSaveAccount = async (updated: Account): Promise<boolean> => {
+    return await controller.update(updated.id, updated);
   };
 
   const handleDeleteSelected = () => {
@@ -304,7 +289,6 @@ export const AccountsPage: React.FC = () => {
               rowSelection={rowSelection}
               onRowSelectionChange={setRowSelection}
               getRowId={(row) => row.id}
-              pagination={{ pageIndex: currentPage - 1, pageSize }}
               emptyText={
                 controllerState.isLoading
                   ? 'Đang tải danh sách tài khoản...'
@@ -315,11 +299,13 @@ export const AccountsPage: React.FC = () => {
 
           {/* Pagination */}
           <Pagination
-            currentPage={currentPage}
-            totalItems={filteredAccounts.length}
+            currentPage={controllerState.page}
+            totalItems={controllerState.total}
             pageSize={pageSize}
             selectedCount={checkedCount}
-            onPageChange={setCurrentPage}
+            onPageChange={(page) => {
+              void controller.load(serverFilter, page);
+            }}
           />
         </div>
       </div>
@@ -349,12 +335,12 @@ export const AccountsPage: React.FC = () => {
         isOpen={isExportDialogOpen}
         onClose={() => setIsExportDialogOpen(false)}
         checkedCount={checkedCount}
-        filteredCount={filteredAccounts.length}
+        filteredCount={controllerState.total}
         /**
          * Tổng THẬT trong DB, không phải số dòng đã tải. Phạm vi "Tất cả" xuất
          * hết bảng nên con số trên nút phải là con số đó.
          */
-        totalCount={controllerState.total}
+        totalCount={controllerState.globalTotal || controllerState.total}
         exportFields={exportConfig.checkedFields}
         defaultFormat={CANONICAL_TO_DISPLAY_FORMAT[exportConfig.defaultFormat] ?? 'TXT'}
         checkedIds={checkedAccountIds}

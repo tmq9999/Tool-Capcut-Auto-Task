@@ -292,4 +292,13 @@ describe('AccountExportService — hộp thoại và lỗi', () => {
     const lines = readLines(savePath as string);
     expect(lines[1]).toBe('one@example.com||3');
   });
+
+  it('UI-03 CSV escapes a formula without changing stored secret', async () => {
+    seedAccount({ id: 'csv', email: 'a@example.test', passwordCapcut: '=1+1' });
+    savePath = path.join(tmpDir, 'out.csv');
+    await createService().export({ format: 'CSV', fields: ['passwordCapcut'], scope: { kind: 'all' } });
+    expect(readLines(savePath!)[1]).toBe("'=1+1");
+    const record = repo.getAccountById('csv')!;
+    expect(vaultForSeed.decrypt(record.passwordCapcutEncrypted!)).toBe('=1+1');
+  });
 });

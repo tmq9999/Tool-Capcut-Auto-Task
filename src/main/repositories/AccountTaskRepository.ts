@@ -327,6 +327,53 @@ export class AccountTaskRepository {
     };
   }
 
+  /** Ghi riêng unsettled proofs khi không có receipt (ví dụ lỗi snapshot) */
+  recordUnsettledProofs(
+    accountId: string,
+    runId: string,
+    proofs: readonly { key: string; proof: { actionKey: string; opId: string; errNo: 0; at: number } }[]
+  ): void {
+    if (proofs.length === 0) return;
+
+    const seen = new Set<string>();
+    for (const item of proofs) {
+      if (seen.has(item.key)) {
+        throw new Error(`Duplicate unsettled proof key: ${item.key}`);
+      }
+      seen.add(item.key);
+      if (
+        item.key !== item.proof.actionKey ||
+        item.proof.errNo !== 0 ||
+        !Number.isFinite(item.proof.at) ||
+        !item.proof.opId
+      ) {
+        throw new Error('INVALID_UNSETTLED_PROOF');
+      }
+    }
+
+    const upsertStmt = this.db.prepare(`
+      INSERT INTO account_unsettled_proofs (account_id, run_id, task_key, op_id, proved_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(account_id, run_id, task_key) DO UPDATE SET
+        op_id = excluded.op_id,
+        proved_at = excluded.proved_at
+    `);
+
+    const transaction = this.db.transaction(() => {
+      for (const item of proofs) {
+        upsertStmt.run(
+          accountId,
+          runId,
+          item.key,
+          item.proof.opId,
+          new Date(item.proof.at).toISOString()
+        );
+      }
+    });
+
+    transaction();
+  }
+
   /** Same-run proof is separate from exact status/receipt membership. */
   listUnsettledProofs(accountId: string, runId: string): Array<{ key: string; opId: string; provedAt: string }> {
     return this.db.prepare(`
@@ -337,6 +384,7 @@ export class AccountTaskRepository {
 
   /** Dọn tiến độ khi account bị xoá. */
   deleteByAccount(accountId: string): number {
+    this.db.prepare('DELETE FROM account_unsettled_proofs WHERE account_id = ?').run(accountId);
     this.db.prepare('DELETE FROM account_task_receipt_items WHERE account_id = ?').run(accountId);
     this.db.prepare('DELETE FROM account_task_receipts WHERE account_id = ?').run(accountId);
     const result = this.db.prepare('DELETE FROM account_tasks WHERE account_id = ?').run(accountId);

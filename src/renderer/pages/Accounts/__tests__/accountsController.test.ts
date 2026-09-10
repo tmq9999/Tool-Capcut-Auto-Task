@@ -646,4 +646,35 @@ describe('AccountsController.exportAccounts', () => {
 
     expect(bridge.lastFilter).toBeNull();
   });
+
+  it('UI-01 requests page two without truncating the dataset', async () => {
+    const seen: unknown[] = [];
+    bridge.accounts.list = async (filter) => {
+      seen.push(filter);
+      return { success: true, data: { items: [dto()], total: 1201 } };
+    };
+    const c = new AccountsController(bridge, 50);
+    await c.load({}, 2);
+    expect(seen).toContainEqual({ page: 2, pageSize: 50 });
+  });
+
+  it('UI-03 nested false is not a successful update', async () => {
+    bridge.accounts.update = async () => ({ success: true, data: { success: false } });
+    const c = new AccountsController(bridge);
+    expect(await c.update('missing', toViewAccount(dto(), 0))).toBe(false);
+  });
+
+  it('B12 late page two never overwrites page three', async () => {
+    const replies: Array<(v: IpcEnvelope<{ items: AccountListItemDTO[]; total: number }>) => void> = [];
+    bridge.accounts.list = () => new Promise((resolve) => replies.push(resolve));
+    const c = new AccountsController(bridge, 50);
+    const p2 = c.load({}, 2);
+    const p3 = c.load({}, 3);
+    replies[1]({ success: true, data: { items: [dto({ id: 'p3' })], total: 150 } });
+    await p3;
+    replies[0]({ success: true, data: { items: [dto({ id: 'p2' })], total: 150 } });
+    await p2;
+    expect(c.getState().accounts[0].id).toBe('p3');
+    expect(c.getState().page).toBe(3);
+  });
 });

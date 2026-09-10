@@ -238,7 +238,86 @@ describe('LogsController', () => {
 
     await controller.load({ level: 'ERROR' });
     await controller.load({ level: 'ALL' });
-
     expect(bridge.lastFilter).not.toHaveProperty('level');
+  });
+
+  it('UI-02 filters live events by the active query', async () => {
+    bridge.rows = [];
+    const c = new LogsController(bridge);
+    await c.load({ level: 'ERROR', email: 'worker@x.com' });
+    c.attach();
+    bridge.push(log('wrong', { status: 'INFO' }));
+    bridge.push(log('right', { status: 'ERROR' }));
+    expect(c.getState().logs.map((x) => x.id)).toEqual(['right']);
+  });
+
+  it('B13 ignores history response started before Clear', async () => {
+    let finish!: (v: IpcEnvelope<{ items: CanonicalRuntimeLog[]; total: number }>) => void;
+    bridge.logs.list = () => new Promise((r) => { finish = r; });
+    const c = new LogsController(bridge);
+    const load = c.load();
+    await c.clear();
+    finish({ success: true, data: { items: [log('old')], total: 1 } });
+    await load;
+    expect(c.getState().logs).toEqual([]);
+    expect(c.getState().isLoading).toBe(false);
+  });
+
+  it('B13 merges live pushes received during pending load and deduplicates by id', async () => {
+    let finish!: (v: IpcEnvelope<{ items: CanonicalRuntimeLog[]; total: number }>) => void;
+    bridge.logs.list = () => new Promise((r) => { finish = r; });
+    const c = new LogsController(bridge);
+    c.attach();
+    const loadPromise = c.load();
+
+    bridge.push(log('live-1', { message: 'live during load' }));
+    bridge.push(log('history-1', { message: 'duplicate in both' }));
+
+    finish({
+      success: true,
+      data: {
+        items: [
+          log('history-1', { message: 'from db' }),
+          log('history-2', { message: 'older db' })
+        ],
+        total: 2
+      }
+    });
+    await loadPromise;
+
+    const ids = c.getState().logs.map((l) => l.id);
+    expect(ids).toEqual(['history-1', 'live-1', 'history-2']);
+    expect(c.getState().logs.find((l) => l.id === 'history-1')?.message).toBe('duplicate in both');
+  });
+
+  it('B13 discards live pushes with streamSequence <= clearedThrough', async () => {
+    bridge.logs.clear = async () => ({
+      success: true,
+      data: { success: true, clearedThrough: 10 }
+    });
+    const c = new LogsController(bridge);
+    c.attach();
+    await c.clear();
+
+    bridge.push(log('stale-1', { streamSequence: 10 }));
+    bridge.push(log('fresh-1', { streamSequence: 11 }));
+
+    expect(c.getState().logs.map((l) => l.id)).toEqual(['fresh-1']);
+  });
+
+  it('B13 restores previous logs on clear failure', async () => {
+    bridge.logs.clear = async () => ({
+      success: false,
+      error: { code: 'INTERNAL_ERROR', message: 'failed to clear' }
+    });
+    const c = new LogsController(bridge);
+    await c.load();
+    expect(c.getState().logs.length).toBeGreaterThan(0);
+    const initialLogs = c.getState().logs;
+
+    const success = await c.clear();
+    expect(success).toBe(false);
+    expect(c.getState().error).toBe('failed to clear');
+    expect(c.getState().logs).toEqual(initialLogs);
   });
 });

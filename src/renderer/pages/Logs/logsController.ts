@@ -7,7 +7,7 @@ export interface ILogsBridge {
   logs: {
     list(filter: { page: number; pageSize: number; level?: string; email?: string }):
       Promise<IpcEnvelope<{ items: CanonicalRuntimeLog[]; total: number }>>;
-    clear(): Promise<IpcEnvelope<{ success: boolean }>>;
+    clear(): Promise<IpcEnvelope<{ success: boolean; clearedThrough?: number }>>;
     onEntry(listener: (entry: CanonicalRuntimeLog) => void): () => void;
   };
 }
@@ -51,7 +51,7 @@ export function toViewLog(entry: CanonicalRuntimeLog): RuntimeLog {
     ? entry.createdAt
     : parsed.toTimeString().slice(0, 8);
 
-  return {
+  const view: RuntimeLog = {
     id: entry.id,
     time,
     email: entry.email,
@@ -59,6 +59,10 @@ export function toViewLog(entry: CanonicalRuntimeLog): RuntimeLog {
     status: entry.status as LogStatus,
     message: entry.message
   };
+  if (entry.streamSequence !== undefined) {
+    view.streamSequence = entry.streamSequence;
+  }
+  return view;
 }
 
 /** Owns the Logs page: persisted history plus the live stream from the main process. */
@@ -79,6 +83,9 @@ export class LogsController {
    * "tất cả".
    */
   private lastQuery: LogsQuery = {};
+  private loadToken = 0;
+  private clearedThrough: number | null = null;
+  private pendingPushes: CanonicalRuntimeLog[] = [];
 
   constructor(
     private readonly bridge: ILogsBridge,
@@ -105,6 +112,17 @@ export class LogsController {
     }
   }
 
+  private matchesFilter(entry: CanonicalRuntimeLog): boolean {
+    if (this.lastQuery.level && this.lastQuery.level !== 'ALL') {
+      if (entry.status !== this.lastQuery.level) return false;
+    }
+    if (this.lastQuery.email && this.lastQuery.email.trim().length > 0) {
+      const q = this.lastQuery.email.trim().toLowerCase();
+      if (!entry.email.toLowerCase().includes(q)) return false;
+    }
+    return true;
+  }
+
   async load(filter?: LogsQuery): Promise<void> {
     /**
      * Gọi kèm bộ lọc thì THAY luôn bộ nhớ cũ, không merge: người dùng chọn lại
@@ -117,6 +135,8 @@ export class LogsController {
       };
     }
 
+    const token = ++this.loadToken;
+    this.pendingPushes = [];
     this.setState({ isLoading: true, error: null });
     /**
      * Kẹp theo `LOG_PAGE_SIZE_MAX`: `maxLogs` là kích thước bộ đệm TRÊN MÀN HÌNH
@@ -137,16 +157,45 @@ export class LogsController {
     if (this.lastQuery.email !== undefined) request.email = this.lastQuery.email;
 
     const response = await this.bridge.logs.list(request);
+    if (token !== this.loadToken) return;
 
     if (!response.success) {
       this.setState({ isLoading: false, error: 'Không tải được nhật ký runtime.' });
       return;
     }
 
+    let historyItems = response.data.items;
+    if (this.clearedThrough !== null) {
+      historyItems = historyItems.filter((entry) =>
+        entry.streamSequence === undefined || entry.streamSequence > this.clearedThrough!
+      );
+    }
+
+    const seenIds = new Set<string>();
+    const merged: CanonicalRuntimeLog[] = [];
+
+    for (const item of this.pendingPushes) {
+      if (this.clearedThrough !== null && item.streamSequence !== undefined && item.streamSequence <= this.clearedThrough) {
+        continue;
+      }
+      if (!seenIds.has(item.id)) {
+        seenIds.add(item.id);
+        merged.push(item);
+      }
+    }
+
+    for (const item of historyItems) {
+      if (!seenIds.has(item.id)) {
+        seenIds.add(item.id);
+        merged.push(item);
+      }
+    }
+
+    this.pendingPushes = [];
     this.setState({
       isLoading: false,
       error: null,
-      logs: response.data.items.map(toViewLog)
+      logs: merged.map(toViewLog).slice(0, this.maxLogs)
     });
   }
 
@@ -154,6 +203,16 @@ export class LogsController {
     if (this.detach) return;
     this.detach = this.bridge.logs.onEntry((entry) => {
       if (this.state.isPaused) return;
+      if (this.clearedThrough !== null && entry.streamSequence !== undefined && entry.streamSequence <= this.clearedThrough) {
+        return;
+      }
+      if (!this.matchesFilter(entry)) return;
+      if (this.state.isLoading) {
+        this.pendingPushes.unshift(entry);
+        if (this.pendingPushes.length > this.maxLogs) {
+          this.pendingPushes.length = this.maxLogs;
+        }
+      }
       const next = [toViewLog(entry), ...this.state.logs].slice(0, this.maxLogs);
       this.setState({ logs: next });
     });
@@ -164,12 +223,26 @@ export class LogsController {
   }
 
   async clear(): Promise<boolean> {
+    const token = ++this.loadToken;
+    const previousLogs = this.state.logs;
+    this.pendingPushes = [];
+    this.setState({ logs: [], isLoading: false, error: null });
+
     const response = await this.bridge.logs.clear();
+    if (token !== this.loadToken) return false;
+
     if (!response.success) {
-      this.setState({ error: response.error.message });
+      this.setState({ logs: previousLogs, error: response.error.message });
       return false;
     }
-    this.setState({ logs: [] });
+
+    if (response.data?.clearedThrough !== undefined) {
+      this.clearedThrough = response.data.clearedThrough;
+      const filtered = this.state.logs.filter((l) =>
+        l.streamSequence === undefined || l.streamSequence > this.clearedThrough!
+      );
+      this.setState({ logs: filtered });
+    }
     return true;
   }
 

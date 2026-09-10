@@ -251,8 +251,8 @@ export class DongVanFBProvider {
     const mails = rows.flatMap((entry) => this.toPurchasedMail(entry));
     if (mails.length === 0) {
       throw new ProviderError(
-        'OUT_OF_STOCK',
-        'DongVanFB mua email không trả về tài khoản nào.',
+        'NETWORK_ERROR',
+        'Kết quả mua không có mailbox hợp lệ; cần đối soát đơn mua.',
         DONGVANFB_SERVICE_NAME
       );
     }

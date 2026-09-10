@@ -68,7 +68,11 @@ export interface AcquisitionIdentity {
 }
 
 export interface DiagnosticMutationContext {
-  repository: AccountMutationPort & { bindMailbox(ownerRef: string, mailboxRef: string): void };
+  repository: AccountMutationPort & {
+    bindMailbox(ownerRef: string, mailboxRef: string): void;
+    getOwnerByMailbox(mailboxRef: string): string | null;
+    getBinding(ownerRef: string): { ownerRef: string; mailboxRef: string | null; accountId: string | null } | null;
+  };
   authorityRef: string;
   budgetOwnerRef: string;
 }
@@ -462,7 +466,43 @@ export class EmailPurchaseService {
             reservationId,
             gmailServiceSlug
           );
-          if (reusable) return { purchasedEmail: reusable, reservationId };
+          if (reusable) {
+            try {
+              const originalOwner = this.mutationContext && mutationIdentity
+                ? this.mutationContext.repository.getOwnerByMailbox(reusable.id)
+                : null;
+              if (this.mutationContext && mutationIdentity) {
+                this.mutationContext.repository.assertNoUnknown({
+                  authorityRef: this.mutationContext.authorityRef,
+                  budgetOwnerRef: this.mutationContext.budgetOwnerRef,
+                  ownerRef: originalOwner ?? mutationIdentity.ownerRef,
+                  mailboxRef: reusable.id,
+                  operation: 'purchase'
+                });
+                if (originalOwner) {
+                  const binding = this.mutationContext.repository.getBinding(originalOwner);
+                  if (binding?.accountId) {
+                    throw new AutomationTerminalError(
+                      'blocked',
+                      {
+                        code: 'PROVIDER_CONFIG_ERROR',
+                        details: { accountId: binding.accountId }
+                      },
+                      `Mailbox đã được liên kết với account ${binding.accountId}. Vui lòng kiểm tra lại.`
+                    );
+                  }
+                }
+              }
+              return {
+                purchasedEmail: reusable,
+                reservationId,
+                ...((originalOwner || mutationIdentity) ? { ownerRef: originalOwner ?? mutationIdentity!.ownerRef } : {})
+              };
+            } catch (err) {
+              this.purchasedRepo.releaseReservation(reusable.id, reservationId);
+              throw err;
+            }
+          }
 
           if (gmailToken === null) {
             throw new Error('Gmail94 acquisition session lost its credential.');
@@ -577,7 +617,73 @@ export class EmailPurchaseService {
             'dongvanfb',
             reservationId
           );
-          if (reusable) return { purchasedEmail: reusable, reservationId };
+          if (reusable) {
+            try {
+              const originalOwner = this.mutationContext && mutationIdentity
+                ? this.mutationContext.repository.getOwnerByMailbox(reusable.id)
+                : null;
+              if (this.mutationContext && mutationIdentity) {
+                this.mutationContext.repository.assertNoUnknown({
+                  authorityRef: this.mutationContext.authorityRef,
+                  budgetOwnerRef: this.mutationContext.budgetOwnerRef,
+                  ownerRef: originalOwner ?? mutationIdentity.ownerRef,
+                  mailboxRef: reusable.id,
+                  operation: 'purchase'
+                });
+                if (originalOwner) {
+                  const binding = this.mutationContext.repository.getBinding(originalOwner);
+                  if (binding?.accountId) {
+                    throw new AutomationTerminalError(
+                      'blocked',
+                      {
+                        code: 'PROVIDER_CONFIG_ERROR',
+                        details: { accountId: binding.accountId }
+                      },
+                      `Mailbox đã được liên kết với account ${binding.accountId}. Vui lòng kiểm tra lại.`
+                    );
+                  }
+                }
+              }
+
+              let deliveryEmail = reusable;
+              if (!reusable.hasOauth) {
+                const secrets = this.purchasedRepo.getSecretsById(reusable.id);
+                if (secrets?.passwordEncrypted) {
+                  const password = this.vault.decrypt(secrets.passwordEncrypted);
+                  const apiKey = this.readApiKey('dongvanfb');
+                  workerSignal.throwIfAborted();
+                  const pair = await this.observe(
+                    { provider: 'dongvanfb', operation: 'oauth-exchange' },
+                    () => this.apis.dongvanfb.getOauth2(apiKey, reusable.email, password)
+                  );
+                  workerSignal.throwIfAborted();
+                  const updated = this.purchasedRepo.updateReservedOauth(
+                    reusable.id,
+                    reservationId,
+                    this.vault.encrypt(pair.refreshToken),
+                    pair.clientId
+                  );
+                  if (!updated) {
+                    throw new AutomationTerminalError(
+                      'failed',
+                      { code: 'INTERNAL_ERROR' },
+                      'Quyền sở hữu mailbox đã thay đổi; chưa cấp mailbox cho worker.'
+                    );
+                  }
+                  deliveryEmail = this.purchasedRepo.getDtoById(reusable.id) ?? { ...reusable, hasOauth: true };
+                }
+              }
+
+              return {
+                purchasedEmail: deliveryEmail,
+                reservationId,
+                ...((originalOwner || mutationIdentity) ? { ownerRef: originalOwner ?? mutationIdentity!.ownerRef } : {})
+              };
+            } catch (err) {
+              this.purchasedRepo.releaseReservation(reusable.id, reservationId);
+              throw err;
+            }
+          }
 
           workerSignal.throwIfAborted();
           const apiKey = this.readApiKey('dongvanfb');
@@ -641,33 +747,46 @@ export class EmailPurchaseService {
           }
           confirmPurchase();
 
-          let refreshToken = mail.refreshToken;
-          let clientId = mail.clientId;
-          if ((!refreshToken || !clientId) && mail.password) {
-            workerSignal.throwIfAborted();
-            const pair = await this.observe(
-              { provider: 'dongvanfb', operation: 'oauth-exchange' },
-              () => this.apis.dongvanfb.getOauth2(apiKey, mail.email, mail.password!)
-            );
-            refreshToken = pair.refreshToken;
-            clientId = pair.clientId;
-          }
-
           const id = this.nextId();
-          const purchasedEmail = this.purchasedRepo.insertReserved({
+          let purchasedEmail = this.purchasedRepo.insertReserved({
             id,
             provider: 'dongvanfb',
             email: mail.email,
             passwordEncrypted: mail.password ? this.vault.encrypt(mail.password) : null,
-            refreshTokenEncrypted: refreshToken ? this.vault.encrypt(refreshToken) : null,
-            clientId: clientId ?? null,
+            refreshTokenEncrypted: mail.refreshToken ? this.vault.encrypt(mail.refreshToken) : null,
+            clientId: mail.clientId ?? null,
             rawPayloadEncrypted: this.vault.encrypt(
-              [mail.email, mail.password ?? '', refreshToken ?? '', clientId ?? ''].join('|')
+              [mail.email, mail.password ?? '', mail.refreshToken ?? '', mail.clientId ?? ''].join('|')
             )
           }, reservationId);
           settlePurchase(purchasedEmail.id);
+
+          if ((!mail.refreshToken || !mail.clientId) && mail.password) {
+            try {
+              workerSignal.throwIfAborted();
+              const pair = await this.observe(
+                { provider: 'dongvanfb', operation: 'oauth-exchange' },
+                () => this.apis.dongvanfb.getOauth2(apiKey, mail.email, mail.password!)
+              );
+              workerSignal.throwIfAborted();
+              const updated = this.purchasedRepo.updateReservedOauth(
+                id,
+                reservationId,
+                this.vault.encrypt(pair.refreshToken),
+                pair.clientId
+              );
+              if (updated) {
+                purchasedEmail = this.purchasedRepo.getDtoById(id) ?? { ...purchasedEmail, hasOauth: true };
+              }
+            } catch (err) {
+              this.purchasedRepo.releaseReservation(id, reservationId);
+              throw err;
+            }
+          }
+
           return { purchasedEmail, reservationId, ...(mutationIdentity ? { ownerRef: mutationIdentity.ownerRef } : {}) };
         }
+
 
         if (provider === 'customdomain') {
           const reusable = this.purchasedRepo.reserveOldestAvailable(

@@ -14,9 +14,9 @@ describe('CapcutHttpClient', () => {
     expect(evaluate).toHaveBeenCalledOnce();
   });
 
-  it('rejects non-relative or unapproved origins', () => {
+  it('rejects non-relative or unapproved origins', async () => {
     expect(() => new CapcutHttpClient({} as never, 'https://evil.example')).toThrow('CAPCUT_HTTP_ORIGIN_NOT_ALLOWED');
     const client = new CapcutHttpClient({} as never);
-    expect(client.requestJson({ path: 'https://evil.example/x' })).rejects.toThrow('CAPCUT_HTTP_PATH_INVALID');
+    await expect(client.requestJson({ path: 'https://evil.example/x' })).rejects.toThrow('CAPCUT_HTTP_PATH_INVALID');
   });
 });

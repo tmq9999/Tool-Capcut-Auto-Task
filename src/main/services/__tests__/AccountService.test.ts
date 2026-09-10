@@ -152,6 +152,18 @@ describe('AccountService.remove', () => {
     expect(service.remove(['acc-1', 'acc-2'])).toEqual({ deletedCount: 2 });
     expect(service.list({ page: 1, pageSize: 50 }).total).toBe(0);
   });
+
+  it('UI-03 guards removing an owned account while run is active', () => {
+    const active = new Set(['acc-1']);
+    const service = new AccountService(repo, vault, {
+      nextId: () => 'acc-1',
+      isAccountActive: (id) => active.has(id),
+    });
+    service.create({ email: 'owned@example.test', emailProvider: 'manual', credit: 0, status: 'active' });
+
+    expect(() => service.remove(['acc-1'])).toThrow(/ACCOUNT_IN_USE/);
+    expect(repo.getAccountById('acc-1')).not.toBeNull();
+  });
 });
 
 describe('AccountService.getAutomationCredential', () => {

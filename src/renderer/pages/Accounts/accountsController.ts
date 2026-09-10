@@ -25,6 +25,7 @@ export interface AccountsQuery {
   query?: string;
   status?: string;
   emailProvider?: string;
+  browserProvider?: string;
   createdFrom?: string;
 }
 
@@ -52,7 +53,7 @@ export function dateFilterToCreatedFrom(value: string, now: Date = new Date()): 
  */
 function cleanFilter(filter: AccountsQuery): AccountsQuery {
   const out: AccountsQuery = {};
-  for (const key of ['query', 'status', 'emailProvider', 'createdFrom'] as const) {
+  for (const key of ['query', 'status', 'emailProvider', 'browserProvider', 'createdFrom'] as const) {
     const value = filter[key]?.trim();
     if (value && value !== 'all') out[key] = value;
   }
@@ -67,6 +68,7 @@ export interface IAccountsBridge {
       query?: string;
       status?: string;
       emailProvider?: string;
+      browserProvider?: string;
       createdFrom?: string;
     }):
       Promise<IpcEnvelope<{ items: AccountListItemDTO[]; total: number }>>;
@@ -89,7 +91,10 @@ export interface AccountsState {
   error: string | null;
   accounts: Account[];
   total: number;
+  globalTotal: number;
+  page: number;
 }
+
 
 /**
  * Maps a persisted account into the grid view model. Secrets stay in the main
@@ -161,12 +166,16 @@ export class AccountsController {
     isLoading: true,
     error: null,
     accounts: [],
-    total: 0
+    total: 0,
+    globalTotal: 0,
+    page: 1
   };
 
   private readonly listeners = new Set<(state: AccountsState) => void>();
   /** Bộ lọc gần nhất, để `load()` sau khi sửa/xoá không nhảy về danh sách đầy. */
   private filter: AccountsQuery = {};
+  private currentPage = 1;
+  private requestToken = 0;
 
   constructor(
     private readonly bridge: IAccountsBridge,
@@ -191,7 +200,7 @@ export class AccountsController {
     }
   }
 
-  async load(filter?: AccountsQuery): Promise<void> {
+  async load(filter?: AccountsQuery, page?: number): Promise<void> {
     /**
      * Lọc chạy Ở SERVER. SQL đã viết đủ từ đầu (`AccountRepository.queryAccounts`)
      * nhưng bản cũ không gửi gì và lọc phía client trên 500 dòng đầu — có 2000
@@ -202,25 +211,68 @@ export class AccountsController {
      * xuống thì thành `LIKE '%%'` vô nghĩa.
      */
     if (filter) this.filter = filter;
+    if (page !== undefined) this.currentPage = Math.max(1, page);
+
+    const token = ++this.requestToken;
+    const requestedPage = this.currentPage;
+    const clean = cleanFilter(this.filter);
+    const hasFilter = Object.keys(clean).length > 0;
 
     this.setState({ isLoading: true, error: null });
-    const response = await this.bridge.accounts.list({
-      page: 1,
-      pageSize: this.pageSize,
-      ...cleanFilter(this.filter)
-    });
 
-    if (!response.success) {
-      this.setState({ isLoading: false, error: 'Không tải được danh sách tài khoản.' });
-      return;
+    try {
+      let globalTotal = this.state.globalTotal;
+      if (hasFilter) {
+        const globalResponse = await this.bridge.accounts.list({ page: 1, pageSize: 1 });
+        if (token !== this.requestToken) return;
+        if (globalResponse.success) {
+          globalTotal = globalResponse.data.total;
+        }
+      }
+
+      const response = await this.bridge.accounts.list({
+        page: requestedPage,
+        pageSize: this.pageSize,
+        ...clean
+      });
+
+      if (token !== this.requestToken) {
+        return;
+      }
+
+      if (!response.success) {
+        this.setState({ isLoading: false, error: 'Không tải được danh sách tài khoản.' });
+        return;
+      }
+
+      const total = response.data.total;
+      if (!hasFilter) {
+        globalTotal = total;
+      }
+
+      const maxPage = Math.max(1, Math.ceil(total / this.pageSize));
+      if (total > 0 && requestedPage > maxPage) {
+        await this.load(undefined, maxPage);
+        return;
+      }
+
+      this.currentPage = requestedPage;
+      this.setState({
+        isLoading: false,
+        error: null,
+        accounts: response.data.items.map(toViewAccount),
+        total,
+        globalTotal,
+        page: requestedPage
+      });
+    } catch (err: unknown) {
+      if (token === this.requestToken) {
+        this.setState({
+          isLoading: false,
+          error: err instanceof Error ? err.message : 'Không tải được danh sách tài khoản.'
+        });
+      }
     }
-
-    this.setState({
-      isLoading: false,
-      error: null,
-      accounts: response.data.items.map(toViewAccount),
-      total: response.data.total
-    });
   }
 
   async create(input: Omit<Account, 'id' | 'stt'>): Promise<boolean> {
@@ -246,8 +298,8 @@ export class AccountsController {
     };
 
     const response = await this.bridge.accounts.create(payload);
-    if (!response.success) {
-      this.setState({ error: response.error.message });
+    if (!response.success || !response.data?.id) {
+      this.setState({ error: !response.success ? response.error.message : 'Thêm tài khoản thất bại.' });
       return false;
     }
 
@@ -273,14 +325,15 @@ export class AccountsController {
     };
 
     const response = await this.bridge.accounts.update(id, payload);
-    if (!response.success) {
-      this.setState({ error: response.error.message });
+    if (!response.success || !response.data?.success) {
+      this.setState({ error: !response.success ? response.error.message : 'Cập nhật thất bại.' });
       return false;
     }
 
     await this.load();
     return true;
   }
+
 
   async remove(ids: string[]): Promise<boolean> {
     if (ids.length === 0) return false;

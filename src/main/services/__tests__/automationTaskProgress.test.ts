@@ -28,6 +28,7 @@ import type { TaskSnapshotSummary } from '../capcut/runTasks';
 import type { TaskOutcome, CapcutVerificationReceipt } from '../capcut/types';
 import { LogBus, type ILogSink } from '../LogBus';
 import { AutomationTerminalError } from '../AutomationTerminalError';
+import { TaskEvidenceError } from '../capcut/TaskEvidenceError';
 import { createTaskProgressSink } from '../../runtime/providerStack';
 import {
   AutomationRunConfigSchema,
@@ -1175,5 +1176,35 @@ describe('Task 8: Recovery state machine and single-recycle resume', () => {
     expect(summary.accountsCompleted).toBe(1);
     expect(customLauncher.launched).toHaveLength(2);
     expect(customLauncher.stopped).toEqual(['profile-1', 'profile-2']);
+  });
+
+  it('B07 persists unsettled proofs via recordUnsettled when runner throws TaskEvidenceError', async () => {
+    const proofs = [{
+      key: 'capcut_web_pwa_install',
+      proof: {
+        actionKey: 'capcut_web_pwa_install',
+        opId: 'op-b07',
+        errNo: 0 as const,
+        errTips: '',
+        at: 1700000000000
+      }
+    }];
+    const runner: CapcutTaskRunner = {
+      runAccount: async () => {
+        throw new TaskEvidenceError('Snapshot failed', proofs);
+      }
+    };
+    let recordedUnsettled: unknown = null;
+    const progressSink: ICapcutTaskProgressSink = {
+      record: async () => {},
+      recordUnsettled: async (_accountId, _runId, p) => {
+        recordedUnsettled = p;
+      }
+    };
+    const service = createService(runner, progressSink);
+    await service.start(baseConfig());
+    const summary = await service.waitForCompletion();
+    expect(summary.accountsFailed).toBe(1);
+    expect(recordedUnsettled).toEqual(proofs);
   });
 });

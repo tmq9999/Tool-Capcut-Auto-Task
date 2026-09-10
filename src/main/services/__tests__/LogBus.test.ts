@@ -86,7 +86,8 @@ describe('LogBus.emit', () => {
       step: 'Proxy',
       status: 'ERROR',
       message: 'Proxy connection timeout',
-      createdAt: '2026-09-01T03:32:31.000Z'
+      createdAt: '2026-09-01T03:32:31.000Z',
+      streamSequence: 1
     });
   });
 
@@ -198,5 +199,23 @@ describe('LogBus resilience and shutdown', () => {
     bus.flush();
 
     expect(sink.attempts).toBe(0);
+  });
+
+  it('UI-02 clear discards queued old logs, not later logs', () => {
+    const bus = createBus();
+    bus.emit({ email: 'system', step: 'test', status: 'INFO', message: 'old' });
+    bus.clear(() => logRepo.clearAllLogs());
+    bus.emit({ email: 'system', step: 'test', status: 'INFO', message: 'new' });
+    bus.flush();
+    expect(logRepo.queryLogs({ page: 1, pageSize: 50 }).items.map((x) => x.message)).toEqual(['new']);
+  });
+
+  it('UI-03 a stale account ID does not poison an entire batch', () => {
+    const bus = createBus();
+    bus.emit({ accountId: 'deleted', email: 'old@example.test', step: 'test', status: 'INFO', message: 'old' });
+    bus.emit({ email: 'system', step: 'test', status: 'INFO', message: 'other' });
+    bus.flush();
+    expect(bus.pendingCount()).toBe(0);
+    expect(logRepo.queryLogs({ page: 1, pageSize: 50 }).items).toHaveLength(2);
   });
 });

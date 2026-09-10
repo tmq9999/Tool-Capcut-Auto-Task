@@ -401,4 +401,18 @@ describe('ProxyLeaseManager chỉ dùng đúng danh sách key được chỉ đ�
     expect(sleepCalls).toEqual([100]);
     await manager.release(first);
   });
+
+  it('B03 ignores completed lease when the key has a successor', async () => {
+    const api = new StubProxyApi(['K1']);
+    api.setIps('K1', ['80.0.0.1', '80.0.0.2', '80.0.0.3']);
+    const manager = createManager(api, { keys: ['K1'], acquireTimeoutMs: 200 });
+    const first = await manager.acquire();
+    await manager.release(first);
+    const second = await manager.acquire();
+    await manager.release(first);
+    expect(api.released).toEqual(['K1']);
+    expect(manager.activeLeaseCount()).toBe(1);
+    await expect(manager.acquire()).rejects.toMatchObject({ code: 'CONFIG_ERROR' });
+    await manager.release(second);
+  });
 });

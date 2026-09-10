@@ -62,10 +62,31 @@ it('records redirect, failed and incomplete requests, and stops idempotently', a
   expect(h.context.eventNames()).toEqual([]);
 });
 it('writes response headers and a later body timeout without waiting for the raw promise to settle', async () => {
-  const h = setup({ bodyTimeoutMs: 20 }); const req = request(); let release!: (b: Buffer) => void;
+  let onResponseWritten: (() => void) | undefined;
+  const responseWritten = new Promise<void>(r => { onResponseWritten = r; });
+  const h = setup({
+    bodyTimeoutMs: 20,
+    createOutputStream: (filePath, fd) => {
+      const fileStream = fs.createWriteStream(filePath, { fd, autoClose: true });
+      return new Writable({
+        write(chunk, encoding, callback) {
+          fileStream.write(chunk, encoding, (err) => {
+            callback(err);
+            if (chunk.toString().includes('"type":"response"')) {
+              onResponseWritten?.();
+            }
+          });
+        },
+        final(callback) {
+          fileStream.end(callback);
+        }
+      });
+    }
+  });
+  const req = request(); let release!: (b: Buffer) => void;
   h.context.emit('request', req);
   h.context.emit('response', { ...response(req,''), body: () => new Promise<Buffer>(r => { release = r; }) });
-  await new Promise(r => setImmediate(r));
+  await responseWritten;
   expect(h.rows().find(r => r.type === 'response')).toMatchObject({ status: 200 });
   await h.capture.stop();
   expect(h.rows().find(r => r.type === 'response-body').body.state).toBe('timeout');

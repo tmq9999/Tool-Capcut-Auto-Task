@@ -1,6 +1,6 @@
 # CapCut Automation v3.0.2 — CapCut Free Credits Automation Desktop Client
 
-> Hệ thống tự động hóa Desktop chuyên nghiệp trên Windows: Tự động hóa đăng ký, đăng nhập tài khoản CapCut Web và cày trọn bộ 12 nhiệm vụ Free Credits (lên tới 2.060 credits/tài khoản) thông qua kiến trúc kép **CycleTLS Native Direct HTTP Execution** kết hợp Playwright Browser Session, kiểm tra và kích hoạt dùng thử 7 ngày VIP, quản lý lease proxy xoay vòng KiotProxy và cấp phát email Just-In-Time (JIT) qua Gmail94/DongVanFB với **cơ chế đa luồng song song hoàn toàn cách ly** và **tự động polling chờ nạp lại kho mail khi hết hàng (chỉ dừng khi hết tiền)**.
+> Hệ thống tự động hóa Desktop chuyên nghiệp trên Windows: Tự động hóa đăng ký, đăng nhập tài khoản CapCut Web và cày trọn bộ 12 nhiệm vụ Free Credits (lên tới 2.060 credits/tài khoản) thông qua kiến trúc kép **CycleTLS Native Direct HTTP Execution** kết hợp Playwright Browser Session, kiểm tra ưu đãi dùng thử 7 ngày VIP, quản lý lease proxy xoay vòng KiotProxy và cấp phát email Just-In-Time (JIT) qua Gmail94/DongVanFB với **cơ chế đa luồng song song hoàn toàn cách ly** và **tự động polling chờ nạp lại kho mail khi hết hàng (chỉ dừng khi hết tiền)**.
 
 [![Electron](https://img.shields.io/badge/Electron-35.0.0-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-19.1.0-61DAFB?logo=react&logoColor=black)](https://react.dev/)
@@ -54,7 +54,7 @@ Release v3.0.2 (Polling chờ nạp lại kho email & Đa luồng song song) đ�
 - **Vòng đời nạp mới liên tục (Continuous Worker Renew Cycle):** Luồng nào hoàn thành nhiệm vụ trước sẽ tự động thu hồi tài nguyên và nạp ngay tài khoản mới mà không cần chờ các luồng còn lại, chạy liên tục tới khi đạt giới hạn email đã đặt.
 - **Đồng bộ Dashboard thời gian thực (Real-time UI Sync):** Khắc phục triệt để lỗi đóng băng hiển thị luồng cuối cùng; toàn bộ thông tin IP Proxy, Profile ID và bước làm nhiệm vụ được cập nhật tức thì.
 - **Động cơ HTTP Direct Tasks & CycleTLS Native Transport:** Gọi trực tiếp các API endpoints của CapCut qua cầu nối CycleTLS (Go native) chạy loopback, hoàn tất 12 nhiệm vụ chỉ trong vài giây.
-- **Tự động Claim Credits & Kích hoạt Trial 7 ngày:** Tự động gửi lệnh nhận thưởng (`claim`) ngay sau khi hoàn thành nhiệm vụ và kiểm tra kích hoạt gói dùng thử VIP 7 ngày nếu tài khoản đủ điều kiện.
+- **Tự động Claim Credits & Kiểm tra điều kiện Trial 7 ngày:** Tự động gửi lệnh nhận thưởng (`claim`) ngay sau khi hoàn thành nhiệm vụ và kiểm tra điều kiện dùng thử VIP 7 ngày (trial reader) trên trang nếu tài khoản đủ điều kiện.
 - **Hỗ trợ đầy đủ Direct Proxy & Trích xuất lỗi chi tiết:** Hỗ trợ đầy đủ scheme `http://` và `socks5://` (có/không có user:pass), phân tích chi tiết thông điệp lỗi từ nhà cung cấp email.
 
 ---
@@ -110,7 +110,7 @@ Phiên bản 3.0.0 loại bỏ hoàn toàn các bước click giao diện phức
 - **CycleTLS Go Bridge:** Chạy tiến trình nền Go native độc quyền qua loopback `127.0.0.1`. Nhận yêu cầu từ Node process và thực hiện request ra ngoài với chữ ký TLS Fingerprint (JA3, HTTP/2, Akamai fingerprint) giả lập trình duyệt Chrome thật 100%, vượt qua hoàn toàn Cloudflare & ByteDance WAF.
 - **Thực thi 12 nhiệm vụ qua API (`taskApi.ts`, `taskMutation.ts`):** Kích hoạt trực tiếp payload `do_action` cho từng loại nhiệm vụ (Newbie register, PWA, Notifications, Design Studio, Video Studio).
 - **Tự động Claim Credits tức thì:** Ngay sau khi hoàn thành nhiệm vụ, hệ thống gửi lệnh claim và lưu biên lai (`proof`) vào CSDL.
-- **Kiểm tra Trial VIP 7 ngày (`trialApi.ts`):** Tự động phát hiện ưu đãi và kích hoạt gói dùng thử 7 ngày Pro/VIP.
+- **Kiểm tra Trial VIP 7 ngày (`trial.ts`):** Đọc điều kiện ưu đãi dùng thử 7 ngày Pro/VIP qua DOM reader trên trang (không kích hoạt thanh toán).
 - **Chế độ Headed / Headless:**
   - *Headed:* Sử dụng khi cần quan sát trực quan màn hình đăng nhập hoặc kiểm tra giao diện.
   - *Headless:* Chạy hoàn toàn ngầm, tiết kiệm 90% CPU/RAM, thích hợp vận hành số lượng luồng lớn.

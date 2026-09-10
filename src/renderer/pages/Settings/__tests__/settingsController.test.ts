@@ -319,4 +319,49 @@ describe('Pure SettingsController Unit Tests (Task 2.1.4 RED)', () => {
       expect(typeof status.metadata.maskedHint).toBe('string');
     }
   });
+
+  it('B14 preserves edits made while an earlier save is pending', async () => {
+    const { bridge, saveSpy } = createMockBridge();
+    let finish!: (v: IpcEnvelope<{ success: boolean }>) => void;
+    saveSpy.mockImplementationOnce(() => new Promise((r) => { finish = r; }));
+    const c = new SettingsController(bridge);
+    await c.load();
+    const saving = c.save();
+    c.updateSettings((s) => ({
+      ...s,
+      browser: {
+        ...s.browser,
+        multilogin: { ...s.browser.multilogin, port: 54321 },
+      },
+    }));
+    c.setSimpleDraft('gmail94', { action: 'replace', value: 'KEY-NEW-DEMO' });
+    finish({ success: true, data: { success: true } });
+    await saving;
+    expect(c.getState().settings.browser.multilogin.port).toBe(54321);
+    expect(c.getState().drafts.gmail94).toEqual({ action: 'replace', value: 'KEY-NEW-DEMO' });
+    expect(c.getState().isSaved).toBe(false);
+
+    // Saving again with the new edits
+    const secondSave = await c.save();
+    expect(secondSave).toBe(true);
+    expect(c.getState().isSaved).toBe(true);
+    expect(c.getState().drafts.gmail94).toEqual({ action: 'keep' });
+  });
+
+  it('B14 preserves edits made while an earlier save fails', async () => {
+    const { bridge, saveSpy } = createMockBridge();
+    let finish!: (v: IpcEnvelope<{ success: boolean }>) => void;
+    saveSpy.mockImplementationOnce(() => new Promise((r) => { finish = r; }));
+    const c = new SettingsController(bridge);
+    await c.load();
+    const saving = c.save();
+    c.setSimpleDraft('gmail94', { action: 'replace', value: 'KEY-NEW-DEMO' });
+    finish({
+      success: false,
+      error: { code: 'ERR_PERSISTENCE_FAILED', message: 'disk failure' }
+    });
+    await saving;
+    expect(c.getState().drafts.gmail94).toEqual({ action: 'replace', value: 'KEY-NEW-DEMO' });
+    expect(c.getState().isSaved).toBe(false);
+  });
 });

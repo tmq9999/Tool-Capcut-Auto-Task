@@ -56,6 +56,7 @@ import type {
   AccountCreateInputDTO,
   AccountUpdateInputDTO
 } from '../../shared/schemas/account.schema';
+import { TaskEvidenceError } from './capcut/TaskEvidenceError';
 
 /**
  * Hạn chờ mã xác minh của một luồng. Giữ nguyên 90 giây của bản đầu vì CHƯA có
@@ -230,6 +231,7 @@ export interface ICapcutTaskProgressSink {
     unsettledProofs: readonly UnsettledTaskProof[];
   }): Promise<void>;
   recordLegacy?(accountId: string, rows: CapcutAccountResult['tasks']): void;
+  recordUnsettled?(accountId: string, runId: string, proofs: readonly UnsettledTaskProof[]): Promise<void>;
 }
 
 export interface AutomationRunCollaborators {
@@ -511,6 +513,7 @@ export class AutomationRunService {
   private terminalIntent: AutomationTerminalReasonDTO | null = null;
   private terminalState: 'blocked' | 'failed' | 'stopped' | null = null;
   private readonly iterationAbort = new Map<string, AbortController>();
+  private readonly iterationOwners = new Map<string, object>();
   private cleanupFailures = 0;
   private skippedAccounts = 0;
   private mailboxAcquisitions = 0;
@@ -1307,9 +1310,16 @@ export class AutomationRunService {
     const threadController = new AbortController();
     this.iterationAbort.set(accountId, threadController);
 
+    const token = {};
+    this.iterationOwners.set(accountId, token);
     let notifyDone: () => void = () => {};
     const completionPromise = new Promise<void>((resolve) => {
-      notifyDone = resolve;
+      notifyDone = () => {
+        if (this.iterationOwners.get(accountId) === token) {
+          this.iterationOwners.delete(accountId);
+        }
+        resolve();
+      };
     });
 
     const runtime: ThreadRuntime = {
@@ -1881,6 +1891,49 @@ export class AutomationRunService {
               step: 'Không lưu được checkpoint nhiệm vụ'
             };
           }
+          if (error instanceof TaskEvidenceError) {
+            if (
+              this.activeThreads.get(thread.accountId) === thread &&
+              thread.session === currentSession &&
+              !iterationSignal.aborted &&
+              error.unsettledProofs.length > 0 &&
+              this.deps.taskProgress?.recordUnsettled
+            ) {
+              try {
+                await this.deps.taskProgress.recordUnsettled(
+                  thread.accountId,
+                  thread.runId,
+                  error.unsettledProofs
+                );
+              } catch (persistErr: unknown) {
+                if (
+                  persistErr instanceof AutomationTerminalError &&
+                  persistErr.reason.code === 'TASK_CHECKPOINT_PERSISTENCE_FAILED'
+                ) {
+                  this.recordEvidence({
+                    schemaVersion: 1,
+                    runId: thread.runId,
+                    workerAlias: thread.workerAlias,
+                    sessionAlias: currentSession.alias,
+                    at: new Date().toISOString(),
+                    type: 'persistence-failure',
+                    code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED'
+                  });
+                  const stopped = await this.stopSession(thread, currentSession);
+                  if (stopped) {
+                    this.acceptTerminalError(persistErr);
+                  }
+                  return {
+                    kind: 'failed',
+                    status: 'error',
+                    step: 'Không lưu được checkpoint nhiệm vụ'
+                  };
+                }
+                throw persistErr;
+              }
+            }
+            throw error;
+          }
           throw error;
         }
 
@@ -2383,6 +2436,10 @@ export class AutomationRunService {
       }));
   }
 
+  isAccountActive(accountId: string): boolean {
+    return this.iterationOwners.has(accountId) || this.activeThreads.has(accountId) || this.iterationAbort.has(accountId);
+  }
+
   async stopThread(accountId: string): Promise<boolean> {
     const thread = this.activeThreads.get(accountId);
     const controller = this.iterationAbort.get(accountId);
@@ -2403,7 +2460,7 @@ export class AutomationRunService {
   }
 
   start(config: AutomationRunConfigDTO): Promise<{ runId: string; artifactBasename?: string }> {
-    if (this.isRunning() || this.activeThreads.size > 0) {
+    if (this.isRunning() || this.activeThreads.size > 0 || this.iterationOwners.size > 0) {
       return Promise.reject(new ProviderError('CONFIG_ERROR', 'Đang có phiên hoặc profile chưa dừng, hãy dừng trước khi bắt đầu.'));
     }
     if (this.uiSchedulers.size > 0) {

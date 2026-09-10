@@ -1644,5 +1644,251 @@ describe('EmailPurchaseService acquisition session with Gmail94', () => {
         ambiguous: 0
       });
     });
+
+    it('OP-02 retains paid mailbox after OAuth failure', async () => {
+      storeKey('dongvanfb', 'DV-TEST');
+      dongvan.rows = [[{
+        email: 'a@example.test',
+        password: 'fake',
+        refreshToken: null,
+        clientId: null,
+        raw: 'a@example.test|fake'
+      }]];
+      vi.spyOn(dongvan, 'getOauth2').mockRejectedValueOnce(new Error('oauth fixture'));
+      const signal = new AbortController().signal;
+      const session = await createService().openAcquisitionSession(
+        'dongvanfb',
+        1,
+        { maxBillablePurchases: 1 },
+        signal
+      );
+      await expect(session.acquireOne('w1', signal)).rejects.toThrow('oauth fixture');
+      expect(purchasedRepo.countAvailable('dongvanfb')).toBe(1);
+      const reused = await session.acquireOne('w2', signal);
+      expect(reused.purchasedEmail.hasOauth).toBe(true);
+      expect(dongvan.buyCalls).toBe(1);
+    });
+
+    it('OP-02 post-purchase abort releases reservation and preserves mailbox in DB', async () => {
+      storeKey('dongvanfb', 'DV-TEST');
+      dongvan.rows = [[{
+        email: 'abort@example.test',
+        password: 'pass',
+        refreshToken: null,
+        clientId: null,
+        raw: 'abort@example.test|pass'
+      }]];
+      const controller = new AbortController();
+      vi.spyOn(dongvan, 'getOauth2').mockImplementation(async () => {
+        controller.abort(new Error('aborted-during-oauth'));
+        throw new Error('aborted-during-oauth');
+      });
+      const session = await createService().openAcquisitionSession(
+        'dongvanfb',
+        1,
+        { maxBillablePurchases: 1 },
+        controller.signal
+      );
+      await expect(session.acquireOne('w1', controller.signal)).rejects.toThrow('aborted-during-oauth');
+      expect(purchasedRepo.countAvailable('dongvanfb')).toBe(1);
+    });
+
+    it('OP-02 post-OAuth abort before update releases reservation', async () => {
+      storeKey('dongvanfb', 'DV-TEST');
+      dongvan.rows = [[{
+        email: 'post-oauth@example.test',
+        password: 'pass',
+        refreshToken: null,
+        clientId: null,
+        raw: 'post-oauth@example.test|pass'
+      }]];
+      const controller = new AbortController();
+      vi.spyOn(dongvan, 'getOauth2').mockImplementation(async () => {
+        controller.abort(new Error('post-oauth-abort'));
+        return { refreshToken: 'rt', clientId: 'cid' };
+      });
+      const session = await createService().openAcquisitionSession(
+        'dongvanfb',
+        1,
+        { maxBillablePurchases: 1 },
+        controller.signal
+      );
+      await expect(session.acquireOne('w1', controller.signal)).rejects.toThrow('post-oauth-abort');
+      expect(purchasedRepo.countAvailable('dongvanfb')).toBe(1);
+    });
+
+    it('OP-02 fenced reuse looks up original owner and asserts no unknown', async () => {
+      storeKey('dongvanfb', 'DV-TEST');
+      const mutationRepo = new AccountMutationRepository(db);
+      mutationRepo.registerApproval({
+        authorityRef: 'auth-test',
+        budgetOwnerRef: 'budget-test',
+        provider: 'dongvanfb',
+        approvedUnits: 2
+      });
+      const service = new EmailPurchaseService(
+        credRepo,
+        purchasedRepo,
+        vault,
+        { gmail94: gmail, dongvanfb: dongvan, customdomain: customDomain },
+        {
+          nextId: () => 'pe-' + ++idCounter,
+          mutationContext: {
+            repository: mutationRepo,
+            authorityRef: 'auth-test',
+            budgetOwnerRef: 'budget-test'
+          }
+        }
+      );
+
+      dongvan.rows = [[{
+        email: 'fenced@example.test',
+        password: 'pass',
+        refreshToken: 'rt',
+        clientId: 'cid',
+        raw: 'fenced@example.test|pass|rt|cid'
+      }]];
+      const signal = new AbortController().signal;
+      const session = await service.openAcquisitionSession('dongvanfb', 1, { maxBillablePurchases: 1 }, signal);
+      const first = await session.acquireOne('w1', signal, {
+        ownerRef: 'owner-1',
+        runId: 'run-1',
+        stepAttemptId: 'att-1'
+      });
+      expect(first.ownerRef).toBe('owner-1');
+      session.release(first);
+
+      // Now reuse in another worker with a different ownerRef
+      const second = await session.acquireOne('w2', signal, {
+        ownerRef: 'owner-2',
+        runId: 'run-2',
+        stepAttemptId: 'att-2'
+      });
+      // Ownership continuity preserves original owner
+      expect(second.ownerRef).toBe('owner-1');
+      expect(dongvan.buyCalls).toBe(1);
+    });
+
+    it('B01 stops malformed success without order_code after one dispatch', async () => {
+      storeKey('dongvanfb', 'DV-DEMO');
+      let calls = 0;
+      const realProvider = new DongVanFBProvider({
+        async send(): Promise<HttpResponse> {
+          calls++;
+          if (calls > 1) throw new Error('fixture retry detected');
+          return {
+            ok: true,
+            status: 200,
+            rawText: '',
+            body: { status: true, data: { list_data: [] } }
+          };
+        }
+      });
+      const service = new EmailPurchaseService(credRepo, purchasedRepo, vault, {
+        gmail94: gmail,
+        dongvanfb: realProvider,
+        customdomain: customDomain
+      });
+      const signal = new AbortController().signal;
+      const session = await service.openAcquisitionSession(
+        'dongvanfb',
+        1,
+        { maxBillablePurchases: 1, emailRetryIntervalMs: 0 },
+        signal
+      );
+      await expect(session.acquireOne('w1', signal)).rejects.toMatchObject({
+        reason: { code: 'PURCHASE_OUTCOME_UNKNOWN' }
+      });
+      expect(calls).toBe(1);
+      expect(session.purchaseStats()).toEqual({
+        budget: 1,
+        attempted: 1,
+        confirmed: 0,
+        ambiguous: 1
+      });
+    });
+
+    it('B05 releases the reservation when reusable OAuth setup fails', async () => {
+      purchasedRepo.insert({
+        id: 'mail-reuse',
+        provider: 'dongvanfb',
+        email: 'reuse@example.test',
+        passwordEncrypted: vault.encrypt('PASS-DEMO')
+      });
+      const signal = new AbortController().signal;
+      const session = await createService().openAcquisitionSession(
+        'dongvanfb',
+        1,
+        { maxBillablePurchases: 0 },
+        signal
+      );
+      await expect(session.acquireOne('w1', signal)).rejects.toMatchObject({
+        code: 'CONFIG_ERROR'
+      });
+      expect(purchasedRepo.countAvailable('dongvanfb')).toBe(1);
+      expect(dongvan.buyCalls).toBe(0);
+    });
+
+    it('B06 refuses a mailbox already bound to another account before delivery', async () => {
+      const ledger = new AccountMutationRepository(db);
+      ledger.registerApproval({
+        authorityRef: 'auth-r',
+        budgetOwnerRef: 'budget-r',
+        provider: 'dongvanfb',
+        approvedUnits: 2
+      });
+      const service = new EmailPurchaseService(
+        credRepo,
+        purchasedRepo,
+        vault,
+        { gmail94: gmail, dongvanfb: dongvan, customdomain: customDomain },
+        {
+          nextId: () => 'pe-' + ++idCounter,
+          mutationContext: {
+            repository: ledger,
+            authorityRef: 'auth-r',
+            budgetOwnerRef: 'budget-r'
+          }
+        }
+      );
+      storeKey('dongvanfb', 'DV-DEMO');
+      dongvan.rows = [[{
+        email: 'a@example.test',
+        password: 'p',
+        refreshToken: 'r',
+        clientId: 'c',
+        raw: 'fixture'
+      }]];
+      const signal = new AbortController().signal;
+      const session = await service.openAcquisitionSession(
+        'dongvanfb',
+        1,
+        { maxBillablePurchases: 1 },
+        signal
+      );
+      const first = await session.acquireOne('w1', signal, {
+        ownerRef: 'owner-A',
+        runId: 'run-A',
+        stepAttemptId: 'attempt-A'
+      });
+      session.bindAccount!(first, 'account-A');
+      session.release(first);
+      await expect(
+        session.acquireOne('w2', signal, {
+          ownerRef: 'owner-B',
+          runId: 'run-B',
+          stepAttemptId: 'attempt-B'
+        })
+      ).rejects.toMatchObject({
+        reason: {
+          code: 'PROVIDER_CONFIG_ERROR',
+          details: { accountId: 'account-A' }
+        }
+      });
+      expect(dongvan.buyCalls).toBe(1);
+      expect(ledger.getBinding('owner-A')?.accountId).toBe('account-A');
+      expect(purchasedRepo.countAvailable('dongvanfb')).toBe(1);
+    });
+
   });
 });

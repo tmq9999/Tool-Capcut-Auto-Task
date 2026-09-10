@@ -7,6 +7,7 @@ export interface RuntimeLog {
   step: string;
   status: LogStatus;
   message: string;
+  streamSequence?: number;
 }
 
 export interface LogFilterState {

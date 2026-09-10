@@ -406,4 +406,29 @@ describe('AccountTaskRepository.recordCheckpoint', () => {
     const itemCount = db.prepare('SELECT COUNT(*) as count FROM account_task_receipt_items').get() as { count: number };
     expect(itemCount.count).toBe(0);
   });
+
+  it('B07 records pending proofs without a receipt and asserts receipt is null', () => {
+    const repo = new AccountTaskRepository(db);
+    repo.recordUnsettledProofs('acc-no-receipt', 'run-test', [
+      {
+        key: 'capcut_web_pwa_install',
+        proof: {
+          actionKey: 'capcut_web_pwa_install',
+          opId: 'op-123',
+          errNo: 0,
+          at: 1700000000000
+        }
+      }
+    ]);
+    const unsettled = repo.listUnsettledProofs('acc-no-receipt', 'run-test');
+    expect(unsettled).toEqual([
+      {
+        key: 'capcut_web_pwa_install',
+        opId: 'op-123',
+        provedAt: new Date(1700000000000).toISOString()
+      }
+    ]);
+    expect(repo.getLatestReceipt('acc-no-receipt')).toBeNull();
+    expect(repo.listByAccount('acc-no-receipt')).toHaveLength(0);
+  });
 });

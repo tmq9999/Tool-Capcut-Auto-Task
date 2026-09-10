@@ -15,6 +15,7 @@ import type {
 
 export interface AccountServiceDeps {
   nextId?: () => string;
+  isAccountActive?: (accountId: string) => boolean;
 }
 
 /**
@@ -24,6 +25,7 @@ export interface AccountServiceDeps {
  */
 export class AccountService {
   private readonly nextId: () => string;
+  private readonly isAccountActive?: (accountId: string) => boolean;
 
   constructor(
     private readonly repo: AccountRepository,
@@ -31,6 +33,7 @@ export class AccountService {
     deps: AccountServiceDeps = {}
   ) {
     this.nextId = deps.nextId ?? (() => crypto.randomUUID());
+    this.isAccountActive = deps.isAccountActive;
   }
 
   private encryptOptional(value: string | undefined | null): Buffer | null {
@@ -90,6 +93,13 @@ export class AccountService {
   }
 
   remove(ids: string[]): { deletedCount: number } {
+    if (this.isAccountActive) {
+      for (const id of ids) {
+        if (this.isAccountActive(id)) {
+          throw new Error(`ACCOUNT_IN_USE: Tài khoản ${id} đang được sử dụng trong lượt chạy.`);
+        }
+      }
+    }
     return { deletedCount: this.repo.deleteAccounts(ids) };
   }
 

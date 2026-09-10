@@ -145,7 +145,7 @@ export const IpcContractRegistry = {
     },
     clear: {
       request: z.void(),
-      response: z.object({ success: z.boolean() }).strict()
+      response: z.object({ success: z.boolean(), clearedThrough: z.number().int().safe().optional() }).strict()
     }
   },
   run: {

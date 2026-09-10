@@ -4,8 +4,12 @@ import electron from 'vite-plugin-electron';
 import { notBundle } from 'vite-plugin-electron/plugin';
 import renderer from 'vite-plugin-electron-renderer';
 import path from 'node:path';
+import pkg from './package.json';
 
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   plugins: [
     react(),
     electron([
@@ -44,6 +48,9 @@ export default defineConfig({
           args.reload();
         },
         vite: {
+          define: {
+            __APP_VERSION__: JSON.stringify(pkg.version),
+          },
           build: {
             outDir: 'dist-electron',
             minify: false,

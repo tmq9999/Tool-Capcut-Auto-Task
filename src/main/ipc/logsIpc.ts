@@ -6,9 +6,12 @@ import type { LogRepository } from '../repositories/LogRepository';
 import type { IpcEnvelope } from '../../shared/schemas/ipc-envelope.schema';
 import type { CanonicalRuntimeLog } from '../../shared/schemas/log.schema';
 
+import type { LogBus } from '../services/LogBus';
+
 export function registerLogsIpc(
   registrar: IpcRegistrar,
-  logRepo: Pick<LogRepository, 'queryLogs' | 'clearAllLogs'>
+  logRepo: Pick<LogRepository, 'queryLogs' | 'clearAllLogs'>,
+  logBus?: Pick<LogBus, 'clear'>
 ): () => void {
   registrar.handle(
     IPC_CHANNELS.LOGS_LIST,
@@ -25,10 +28,15 @@ export function registerLogsIpc(
 
   registrar.handle(
     IPC_CHANNELS.LOGS_CLEAR,
-    async (): Promise<IpcEnvelope<{ success: boolean }>> => {
+    async (): Promise<IpcEnvelope<{ success: boolean; clearedThrough?: number }>> => {
       try {
-        logRepo.clearAllLogs();
-        return ok({ success: true });
+        let clearedThrough: number | undefined;
+        if (logBus) {
+          clearedThrough = logBus.clear(() => logRepo.clearAllLogs());
+        } else {
+          logRepo.clearAllLogs();
+        }
+        return ok({ success: true, ...(clearedThrough !== undefined ? { clearedThrough } : {}) });
       } catch (err: unknown) {
         return toErrorEnvelope(err);
       }

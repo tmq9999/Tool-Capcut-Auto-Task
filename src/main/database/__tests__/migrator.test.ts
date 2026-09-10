@@ -320,7 +320,7 @@ describe('Migration Engine & Schema Integrity (Task 5 RED)', () => {
         (account_id,run_id,session_alias,observed_at,required_after,server_total,server_done,is_fresh,is_final,updated_at)
         VALUES ('acc-old','run-old','worker-1-session-1','2026-09-08T01:00:00.000Z','2026-09-08T00:00:00.000Z',1,1,1,1,'old')`).run();
       db.prepare("INSERT INTO account_task_receipt_items VALUES ('acc-old','task-old',4,0)").run();
-      expect(runMigrations(db).appliedCount).toBe(2);
+      expect(runMigrations(db).appliedCount).toBe(MIGRATIONS.length - 6);
       expect(db.prepare('SELECT task_key,status,ordinal FROM account_task_receipt_items').all()).toEqual([
         { task_key: 'task-old', status: 4, ordinal: 0 }
       ]);
@@ -338,7 +338,7 @@ describe('Migration Engine & Schema Integrity (Task 5 RED)', () => {
         (account_id,run_id,task_key,op_id,proved_at)
         VALUES ('acc-old','run-old','task-old','op-old','2026-09-09T00:00:00.000Z')`).run();
 
-      expect(runMigrations(db).appliedCount).toBe(1);
+      expect(runMigrations(db).appliedCount).toBe(MIGRATIONS.length - 7);
       expect(db.prepare('SELECT account_id,op_id FROM account_unsettled_proofs').all()).toEqual([
         { account_id: 'acc-old', op_id: 'op-old' }
       ]);
@@ -346,6 +346,28 @@ describe('Migration Engine & Schema Integrity (Task 5 RED)', () => {
       expect(tables.map((row) => row.name)).toEqual(expect.arrayContaining([
         'diagnostic_approvals', 'account_mutation_bindings', 'account_mutation_intents'
       ]));
+      expect(runMigrations(db).appliedCount).toBe(0);
+    });
+
+    it('migration 009 removes foreign key constraint on account_unsettled_proofs while preserving rows', () => {
+      if (!db) throw new Error('DB is not initialized');
+      runMigrations(db, MIGRATIONS.slice(0, 8));
+      db.prepare(`INSERT INTO account_task_receipts
+        (account_id,run_id,session_alias,observed_at,required_after,server_total,server_done,is_fresh,is_final,updated_at)
+        VALUES ('acc-old','run-old','session-old','2026-09-09T00:00:00.000Z','2026-09-08T23:00:00.000Z',1,1,1,1,'old')`).run();
+      db.prepare(`INSERT INTO account_unsettled_proofs
+        (account_id,run_id,task_key,op_id,proved_at)
+        VALUES ('acc-old','run-old','task-old','op-old','2026-09-09T00:00:00.000Z')`).run();
+
+      expect(runMigrations(db).appliedCount).toBe(1);
+      expect(db.prepare('SELECT account_id,op_id FROM account_unsettled_proofs').all()).toEqual([
+        { account_id: 'acc-old', op_id: 'op-old' }
+      ]);
+      // Now insert without receipt works because foreign key was removed
+      db.prepare(`INSERT INTO account_unsettled_proofs
+        (account_id,run_id,task_key,op_id,proved_at)
+        VALUES ('acc-no-receipt','run-new','task-new','op-new','2026-09-10T00:00:00.000Z')`).run();
+      expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
       expect(runMigrations(db).appliedCount).toBe(0);
     });
   });

@@ -12,7 +12,8 @@ export const CanonicalRuntimeLogSchema = z.object({
   step: z.string(),
   status: CanonicalLogStatusSchema,
   message: z.string(),
-  createdAt: z.string().datetime()
+  createdAt: z.string().datetime(),
+  streamSequence: z.number().int().safe().optional()
 }).strict();
 
 export type CanonicalRuntimeLog = z.infer<typeof CanonicalRuntimeLogSchema>;

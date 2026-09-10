@@ -6,6 +6,7 @@ import { migration005 } from './005_purchased_email_reservations';
 import { migration006 } from './006_account_task_receipts';
 import { migration007 } from './007_account_unsettled_proofs';
 import { migration008 } from './008_account_mutation_intents';
+import { migration009 } from './009_unsettled_proofs_without_receipt';
 
 export interface MigrationItem {
   version: number;
@@ -53,5 +54,10 @@ export const MIGRATIONS: MigrationItem[] = [
     version: 8,
     name: '008_account_mutation_intents',
     sql: migration008
+  },
+  {
+    version: 9,
+    name: '009_unsettled_proofs_without_receipt',
+    sql: migration009
   }
 ];

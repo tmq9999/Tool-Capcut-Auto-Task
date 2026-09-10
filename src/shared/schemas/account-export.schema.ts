@@ -18,8 +18,10 @@ export const AccountExportFilterSchema = z.object({
   query: z.string().optional(),
   status: z.string().optional(),
   emailProvider: z.string().optional(),
+  browserProvider: z.string().optional(),
   createdFrom: z.string().datetime().optional()
 }).strict();
+
 export type AccountExportFilterDTO = z.infer<typeof AccountExportFilterSchema>;
 
 export const AccountExportScopeSchema = z.discriminatedUnion('kind', [

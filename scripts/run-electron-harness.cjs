@@ -2,6 +2,7 @@ const { app, BrowserWindow, safeStorage, ipcMain } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
+const pkg = require('../package.json');
 
 const HARNESS_CODES = {
   SUCCESS: 'HARNESS_SUCCESS',
@@ -238,8 +239,8 @@ async function runHarness() {
     }
 
     if (typeof isolationCheck.platform !== 'string' || isolationCheck.platform.length === 0 ||
-        typeof isolationCheck.version !== 'string' || isolationCheck.version.length === 0) {
-      console.error(`[FAIL] ${HARNESS_CODES.ERR_METADATA_EMPTY}: Platform or version empty.`);
+        typeof isolationCheck.version !== 'string' || isolationCheck.version !== pkg.version) {
+      console.error(`[FAIL] ${HARNESS_CODES.ERR_METADATA_EMPTY}: Platform empty or version mismatch (expected ${pkg.version}, got ${isolationCheck.version}).`);
       process.exitCode = 1;
       return;
     }

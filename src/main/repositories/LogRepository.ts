@@ -24,13 +24,14 @@ export class LogRepository {
 
     const insertStmt = this.db.prepare(`
       INSERT INTO runtime_logs (id, account_id, email, step, status, message, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, CASE WHEN EXISTS(SELECT 1 FROM accounts WHERE id = ?) THEN ? ELSE NULL END, ?, ?, ?, ?, ?)
     `);
 
     const transaction = this.db.transaction((items: CanonicalRuntimeLog[]) => {
       for (const log of items) {
         insertStmt.run(
           log.id,
+          log.accountId ?? null,
           log.accountId ?? null,
           log.email,
           log.step,

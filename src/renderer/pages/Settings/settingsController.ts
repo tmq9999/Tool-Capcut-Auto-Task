@@ -123,6 +123,7 @@ function cloneDefaultSettings(): AppSettingsDTO {
 export class SettingsController {
   private state: SettingsState;
   private readonly listeners = new Set<(state: SettingsState) => void>();
+  private editRevision = 0;
 
   constructor(private readonly bridge: ISettingsBridge) {
     this.state = {
@@ -189,6 +190,7 @@ export class SettingsController {
         }
       }
 
+      this.editRevision += 1;
       this.state = {
         ...this.state,
         isLoading: false,
@@ -212,6 +214,7 @@ export class SettingsController {
   }
 
   updateSettings(updater: (prev: AppSettingsDTO) => AppSettingsDTO): void {
+    this.editRevision += 1;
     this.state = {
       ...this.state,
       settings: updater(this.state.settings),
@@ -221,6 +224,7 @@ export class SettingsController {
   }
 
   setSimpleDraft(service: SimpleServiceName, draft: SimpleDraft): void {
+    this.editRevision += 1;
     this.state = {
       ...this.state,
       drafts: {
@@ -233,6 +237,7 @@ export class SettingsController {
   }
 
   setMultiloginDraft(draft: MultiloginDraft): void {
+    this.editRevision += 1;
     this.state = {
       ...this.state,
       drafts: {
@@ -248,6 +253,8 @@ export class SettingsController {
     if (this.state.isSaving) {
       return false;
     }
+
+    const savedRevision = this.editRevision;
 
     this.state = {
       ...this.state,
@@ -271,11 +278,12 @@ export class SettingsController {
     try {
       SettingsSaveRequestSchema.parse(savePayload);
     } catch {
+      const hasNewEdits = this.editRevision !== savedRevision;
       this.state = {
         ...this.state,
         isSaving: false,
         isSaved: false,
-        drafts: createInitialDrafts(),
+        ...(hasNewEdits ? {} : { drafts: createInitialDrafts() }),
         error: {
           code: 'ERR_VALIDATION_FAILED',
           message: 'Invalid settings save payload.',
@@ -296,11 +304,12 @@ export class SettingsController {
       const response = await this.bridge.settings.save(savePayload);
 
       if (!response.success) {
+        const hasNewEdits = this.editRevision !== savedRevision;
         this.state = {
           ...this.state,
           isSaving: false,
           isSaved: false,
-          drafts: createInitialDrafts(),
+          ...(hasNewEdits ? {} : { drafts: createInitialDrafts() }),
           error: {
             code: response.error.code || 'ERR_PERSISTENCE_FAILED',
             message: 'Failed to persist application settings or credentials.',
@@ -328,23 +337,26 @@ export class SettingsController {
         }
       }
 
+      const hasNewEdits = this.editRevision !== savedRevision;
+
       this.state = {
         ...this.state,
-        settings: nextSettings,
+        settings: hasNewEdits ? this.state.settings : nextSettings,
         credentialStatuses: nextStatuses,
         isSaving: false,
-        isSaved: true,
-        drafts: createInitialDrafts(),
+        isSaved: !hasNewEdits,
+        drafts: hasNewEdits ? this.state.drafts : createInitialDrafts(),
         error: null,
       };
       this.notify();
       return true;
     } catch {
+      const hasNewEdits = this.editRevision !== savedRevision;
       this.state = {
         ...this.state,
         isSaving: false,
         isSaved: false,
-        drafts: createInitialDrafts(),
+        ...(hasNewEdits ? {} : { drafts: createInitialDrafts() }),
         error: {
           code: 'ERR_PERSISTENCE_FAILED',
           message: 'Failed to persist application settings or credentials.',

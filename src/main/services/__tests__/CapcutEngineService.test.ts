@@ -508,4 +508,31 @@ describe('CapcutEngineService.runAccount', () => {
     const result = await new CapcutEngineService({ userDataDir: 'C:/tmp/userData' }).runAccount(runInput());
     expect(result.verification?.complete).toBe(false);
   });
+
+  it('B07 carries proofs through an invalid-snapshot failure', async () => {
+    const proofs = [{
+      key: 'capcut_web_pwa_install',
+      proof: {
+        actionKey: 'capcut_web_pwa_install',
+        opId: 'accepted-op',
+        errNo: 0 as const,
+        errTips: '',
+        at: 2000
+      }
+    }];
+    runAllTasks.mockResolvedValueOnce({
+      outcomes: [],
+      snapshot: null,
+      fatalError: new Error('TASK_LIST_RESPONSE_INVALID'),
+      unsettledProofs: proofs
+    });
+    const onTaskCheckpoint = vi.fn();
+    await expect(
+      new CapcutEngineService({ userDataDir: 'C:/tmp/fixture' }).runAccount(runInput({ onTaskCheckpoint }))
+    ).rejects.toMatchObject({
+      name: 'TaskEvidenceError',
+      unsettledProofs: proofs
+    });
+    expect(onTaskCheckpoint).not.toHaveBeenCalled();
+  });
 });

@@ -90,7 +90,7 @@ export function createProviderStackRepositories(db: Database.Database): Provider
 }
 
 export function createTaskProgressSink(
-  repo: Pick<AccountTaskRepository, 'recordCheckpoint' | 'upsertMany'>
+  repo: Pick<AccountTaskRepository, 'recordCheckpoint' | 'upsertMany'> & Partial<Pick<AccountTaskRepository, 'recordUnsettledProofs'>>
 ): ICapcutTaskProgressSink {
   return {
     record: async (accountId, checkpoint) => {
@@ -109,6 +109,17 @@ export function createTaskProgressSink(
             isFinal: checkpoint.receipt.final
           }
         });
+      } catch {
+        throw new AutomationTerminalError(
+          'failed',
+          { code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED' },
+          'Không lưu được checkpoint nhiệm vụ.'
+        );
+      }
+    },
+    recordUnsettled: async (accountId, runId, proofs) => {
+      try {
+        repo.recordUnsettledProofs?.(accountId, runId, proofs);
       } catch {
         throw new AutomationTerminalError(
           'failed',
@@ -183,7 +194,10 @@ export function createProviderStack(
   );
 
   const logBus = new LogBus(repositories.logRepo);
-  const accountService = new AccountService(repositories.accountRepo, vault);
+  const activeServiceHolder: { current: AutomationRunService | null } = { current: null };
+  const accountService = new AccountService(repositories.accountRepo, vault, {
+    isAccountActive: (accountId) => activeServiceHolder.current?.isAccountActive(accountId) ?? false
+  });
 
   const emailPurchaseService = new EmailPurchaseService(
     repositories.credentialRepo,
@@ -257,6 +271,7 @@ export function createProviderStack(
     observation,
     mutationContext: options.mutationContext
   }, { userDataDir: options.userDataDir });
+  activeServiceHolder.current = automationRunService;
 
   const providerRegistry = new ProviderRegistry(
     new Map<string, () => ConnectivityProvider>([

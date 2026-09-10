@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Drawer } from '@renderer/components/ui/Drawer';
 import { Button } from '@renderer/components/ui/Button';
 import { Input } from '@renderer/components/ui/Input';
@@ -9,7 +9,7 @@ import { Account } from '@shared/types/account';
 export interface AddAccountDrawerProps {
   isOpen: boolean;
   onClose: () => void;
-  onAddAccount: (account: Omit<Account, 'id' | 'stt'>) => void;
+  onAddAccount: (account: Omit<Account, 'id' | 'stt'>) => Promise<boolean> | void;
 }
 
 export const AddAccountDrawer: React.FC<AddAccountDrawerProps> = ({
@@ -25,44 +25,69 @@ export const AddAccountDrawer: React.FC<AddAccountDrawerProps> = ({
   const [browserProfile, setBrowserProfile] = useState('Multilogin / Auto');
   const [fullData, setFullData] = useState('');
   const [notes, setNotes] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!email) return;
-
-    onAddAccount({
-      email,
-      password,
-      emailPassword,
-      provider,
-      proxy,
-      browserProfile,
-      fullData,
-      notes,
-      status: 'active',
-      createdAt: new Date().toISOString().split('T')[0],
-      updatedAt: 'Just now',
-      credit: 0,
-      subscription: 'Free',
-    });
-
-    // Reset and close
+  const resetForm = () => {
     setEmail('');
     setPassword('');
     setEmailPassword('');
+    setProvider('Gmail');
     setProxy('');
+    setBrowserProfile('Multilogin / Auto');
     setFullData('');
     setNotes('');
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      resetForm();
+    }
+  }, [isOpen]);
+
+  const handleClose = () => {
+    if (isSubmitting) return;
+    resetForm();
     onClose();
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email || isSubmitting) return;
+
+    setIsSubmitting(true);
+    try {
+      const outcome = await onAddAccount({
+        email,
+        password,
+        emailPassword,
+        provider,
+        proxy,
+        browserProfile,
+        fullData,
+        notes,
+        status: 'active',
+        createdAt: new Date().toISOString().split('T')[0],
+        updatedAt: 'Just now',
+        credit: 0,
+        subscription: 'Free',
+      });
+
+      if (outcome !== false) {
+        resetForm();
+        onClose();
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const footer = (
     <>
-      <Button variant="secondary" size="md" onClick={onClose} type="button">
+      <Button variant="secondary" size="md" onClick={handleClose} type="button" disabled={isSubmitting}>
         Hủy
       </Button>
-      <Button variant="primary" size="md" onClick={handleSubmit} type="button">
-        Thêm tài khoản
+      <Button variant="primary" size="md" onClick={handleSubmit} type="button" disabled={isSubmitting}>
+        {isSubmitting ? 'Đang thêm...' : 'Thêm tài khoản'}
       </Button>
     </>
   );
@@ -70,7 +95,7 @@ export const AddAccountDrawer: React.FC<AddAccountDrawerProps> = ({
   return (
     <Drawer
       isOpen={isOpen}
-      onClose={onClose}
+      onClose={handleClose}
       title="Thêm tài khoản mới"
       subtitle="Nhập thông tin tài khoản và cấu hình proxy/browser"
       footer={footer}

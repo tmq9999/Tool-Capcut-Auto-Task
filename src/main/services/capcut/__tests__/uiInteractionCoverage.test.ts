@@ -19,6 +19,7 @@ const PRODUCTION_FILES = [
   'src/main/services/capcut/missions/simple.ts',
   'src/main/services/capcut/missions/designStudio.ts',
   'src/main/services/capcut/missions/videoStudio.ts',
+  'src/main/services/capcut/httpTasks.ts',
   'src/main/services/capcut/runTasks.ts',
   'src/main/services/CapcutEngineService.ts',
   'src/main/services/capcut/launcher/BrowserLauncher.ts',

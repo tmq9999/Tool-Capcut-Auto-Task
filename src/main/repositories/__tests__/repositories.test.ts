@@ -257,7 +257,51 @@ describe('Repository Layer Behavior Suite (Task 6 RED)', () => {
       expect(rows.map((r) => r.id)).toEqual(['new']);
     });
 
+    it('UI-01 filters export and list by browserProvider', () => {
+      if (!db) throw new Error('DB is not initialized');
+      const repo = new AccountRepository(db);
+
+      repo.createAccount({ id: 'ml', email: 'ml@x.com', emailProvider: 'gmail94', browserProvider: 'multilogin' });
+      repo.createAccount({ id: 'gpm', email: 'gpm@x.com', emailProvider: 'gmail94', browserProvider: 'gpm' });
+
+      const exported = repo.queryAccountsForExport({ browserProvider: 'multilogin' });
+      expect(exported.map((r) => r.id)).toEqual(['ml']);
+
+      const listed = repo.listAccounts({ page: 1, pageSize: 50, browserProvider: 'multilogin' });
+      expect(listed.total).toBe(1);
+      expect(listed.items.map((r) => r.id)).toEqual(['ml']);
+    });
+
+    it('UI-01 iterates 1201 accounts without omission or duplication', () => {
+      if (!db) throw new Error('DB is not initialized');
+      const repo = new AccountRepository(db);
+
+      db.transaction(() => {
+        for (let i = 1; i <= 1201; i++) {
+          repo.createAccount({
+            id: `acc-${i}`,
+            email: `worker-${i}@example.com`,
+            emailProvider: 'gmail94'
+          });
+        }
+      })();
+
+      const collected: string[] = [];
+      let page = 1;
+      const pageSize = 500;
+      while (true) {
+        const result = repo.listAccounts({ page, pageSize });
+        collected.push(...result.items.map((item) => item.id));
+        if (collected.length >= result.total || result.items.length === 0) break;
+        page++;
+      }
+
+      expect(collected).toHaveLength(1201);
+      expect(new Set(collected).size).toBe(1201);
+    });
+
     it('creates, gets, and maps AccountListItemDTO with boolean indicators and zero plaintext secrets', () => {
+
       if (!db) throw new Error('DB is not initialized');
       const repo = new AccountRepository(db);
 

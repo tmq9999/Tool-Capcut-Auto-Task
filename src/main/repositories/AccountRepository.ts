@@ -252,6 +252,7 @@ export class AccountRepository {
     query?: string;
     status?: string;
     emailProvider?: string;
+    browserProvider?: string;
     createdFrom?: string;
   }): { whereClause: string; values: SqliteBindValue[] } {
     const conditions: string[] = [];
@@ -268,6 +269,10 @@ export class AccountRepository {
     if (filter.emailProvider && filter.emailProvider !== 'all') {
       conditions.push('email_provider = ?');
       values.push(filter.emailProvider);
+    }
+    if (filter.browserProvider && filter.browserProvider !== 'all') {
+      conditions.push('browser_provider = ?');
+      values.push(filter.browserProvider);
     }
     /**
      * `created_at` là TEXT `YYYY-MM-DD HH:MM:SS` theo UTC (`datetime('now')` ở
@@ -297,8 +302,10 @@ export class AccountRepository {
     query?: string;
     status?: string;
     emailProvider?: string;
+    browserProvider?: string;
     createdFrom?: string;
   }): AccountDbRecord[] {
+
     let whereClause: string;
     let values: SqliteBindValue[];
 

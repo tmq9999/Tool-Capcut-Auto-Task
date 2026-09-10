@@ -63,7 +63,7 @@ function toDto(row: PurchasedEmailRow): PurchasedEmailDTO {
 export class PurchasedEmailRepository {
   constructor(private readonly db: Database.Database) {}
 
-  private getDtoById(id: string): PurchasedEmailDTO | null {
+  getDtoById(id: string): PurchasedEmailDTO | null {
     const row = this.db.prepare('SELECT * FROM purchased_emails WHERE id = ?')
       .get(id) as PurchasedEmailRow | undefined;
     return row ? toDto(row) : null;
@@ -155,6 +155,19 @@ export class PurchasedEmailRepository {
       'UPDATE purchased_emails SET reserved_by = NULL, reserved_at = NULL' +
       ' WHERE id = ? AND consumed_at IS NULL AND reserved_by = ?'
     ).run(id, reservationId);
+    return changed.changes === 1;
+  }
+
+  updateReservedOauth(
+    id: string,
+    reservationId: string,
+    encryptedRefresh: Buffer,
+    clientId: string
+  ): boolean {
+    const changed = this.db.prepare(
+      'UPDATE purchased_emails SET refresh_token_encrypted = ?, client_id = ?' +
+      ' WHERE id = ? AND reserved_by = ? AND consumed_at IS NULL'
+    ).run(encryptedRefresh, clientId, id, reservationId);
     return changed.changes === 1;
   }
 

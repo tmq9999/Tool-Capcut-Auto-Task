@@ -240,7 +240,7 @@ function initializePrimaryInstance(): void {
       accountExportService,
       new AccountTaskService(providerStack.repositories.accountTaskRepo)
     );
-    const cleanupLogsIpc = registerLogsIpc(ipcMain, logRepo);
+    const cleanupLogsIpc = registerLogsIpc(ipcMain, logRepo, providerStack.logBus);
     const cleanupAutomationIpc = registerAutomationIpc(
       ipcMain,
       providerStack.automationRunService,

@@ -625,10 +625,15 @@ describe('AutomationRunService.start with an API email source', () => {
       purchasedEmailId: 'mailbox-1', ownerRef: 'owner-1',
       email: 'fenced@example.com', emailProvider: 'gmail94'
     };
+    const items: AutomationWorkItem[] = [item];
+    let nextCalls = 0;
     const source: AutomationWorkSource = {
       kind: 'finite',
       prepare: async () => ({ workerTarget: 1 }),
-      next: async () => item,
+      next: async () => {
+        nextCalls++;
+        return items.shift() ?? null;
+      },
       bind: () => { order.push('bind'); },
       commit: () => { order.push('commit'); },
       release: () => {},
@@ -667,6 +672,8 @@ describe('AutomationRunService.start with an API email source', () => {
     await service.waitForCompletion();
 
     expect(order.slice(0, 3)).toEqual(['bind', 'launch', 'commit']);
+    expect(launcher.launch).toHaveBeenCalledTimes(1);
+    expect(nextCalls).toBe(2);
   });
   it('buys one mailbox per configured thread', async () => {
     emailSource.available = 2;
@@ -1371,11 +1378,14 @@ describe('AutomationRunService chặn tổ hợp xcli + proxy user/pass', () => 
             release: () => {}
           };
         }
+        const items: AutomationWorkItem[] = [
+          { kind: 'new' as const, sourceId: 's-1', email: 'a@x.com', emailProvider: 'gmail94' }
+        ];
         return {
-          kind: 'continuous',
-      purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
-          prepare: async (c) => ({ workerTarget: c }),
-          next: async () => ({ kind: 'new' as const, sourceId: 's-1', email: 'a@x.com', emailProvider: 'gmail94' }),
+          kind: 'finite',
+          purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
+          prepare: async (c) => ({ workerTarget: Math.min(c, items.length) }),
+          next: async () => items.shift() ?? null,
           commit: () => {},
           release: () => {}
         };
@@ -1824,6 +1834,28 @@ describe('AutomationRunService.stopThread', () => {
 
     await service.stop();
     await service.waitForCompletion();
+  });
+
+  it('B02 keeps account owned during delayed proxy cleanup', async () => {
+    emailSource.available = 1;
+    const service = createService();
+    await service.start(baseConfig({ threadCount: 1, testDurationMs: 600000, mailLimit: 1 }));
+    await service.waitUntilRunning();
+    let enter!: () => void, finish!: () => void;
+    const entered = new Promise<void>((r) => { enter = r; });
+    const gate = new Promise<void>((r) => { finish = r; });
+    const release = proxySource.release.bind(proxySource);
+    proxySource.release = async (lease) => { enter(); await gate; await release(lease); };
+    const stopping = service.stopThread('acc-1');
+    try {
+      await entered;
+      expect(service.isAccountActive('acc-1')).toBe(true);
+    } finally {
+      finish();
+      await stopping;
+      await service.waitForCompletion();
+    }
+    expect(service.isAccountActive('acc-1')).toBe(false);
   });
 });
 

@@ -30,9 +30,13 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
   };
 }
 
+declare const __APP_VERSION__: string | undefined;
+
+const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '3.0.2';
+
 const bridge: ElectronBridge = {
   platform: process.platform,
-  version: '3.0.1',
+  version: APP_VERSION,
   ping: () => ipcRenderer.invoke(IPC_CHANNELS.PING),
   settings: {
     get: () => ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET),

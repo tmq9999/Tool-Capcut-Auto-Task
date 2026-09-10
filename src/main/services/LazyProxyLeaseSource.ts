@@ -21,6 +21,11 @@ export class LazyProxyLeaseSource implements IProxyLeaseSource {
    */
   private region: string | undefined;
 
+  private readonly ownedLeases = new Set<string>();
+  private acquisitionsInFlight = 0;
+  private cleanupState: 'idle' | 'releasing' | 'failed' = 'idle';
+  private releaseAllPromise: Promise<void> | null = null;
+
   constructor(
     private readonly secrets: SecretSource,
     private readonly factory: ProxyLeaseManagerFactory
@@ -32,6 +37,9 @@ export class LazyProxyLeaseSource implements IProxyLeaseSource {
    * run's key selection — cùng lý do đó cho `region`.
    */
   configure(options: { keys?: string[]; region?: string }): void {
+    if (this.cleanupState === 'releasing' || this.cleanupState === 'failed') {
+      throw new Error('CANNOT_CONFIGURE_WHILE_CLEANUP_PENDING');
+    }
     const next = (options.keys ?? []).map((key) => key.trim()).filter((key) => key.length > 0);
     const nextRegion = options.region?.trim() || undefined;
     const changed =
@@ -39,11 +47,15 @@ export class LazyProxyLeaseSource implements IProxyLeaseSource {
       next.some((key, index) => key !== this.keys[index]) ||
       nextRegion !== this.region;
 
+    if (!changed) return;
+
+    if (this.ownedLeases.size > 0 || this.acquisitionsInFlight > 0) {
+      throw new Error('CANNOT_CONFIGURE_WHILE_LEASES_ACTIVE');
+    }
+
     this.keys = next;
     this.region = nextRegion;
-    if (changed) {
-      this.manager = null;
-    }
+    this.manager = null;
   }
 
   private ensureManager(): IProxyLeaseSource {
@@ -55,7 +67,18 @@ export class LazyProxyLeaseSource implements IProxyLeaseSource {
   }
 
   async acquire(signal?: AbortSignal): Promise<AcquiredProxyLease> {
-    return this.ensureManager().acquire(signal);
+    if (this.cleanupState === 'releasing' || this.cleanupState === 'failed') {
+      throw new Error('CANNOT_ACQUIRE_WHILE_CLEANUP_PENDING');
+    }
+    const manager = this.ensureManager();
+    this.acquisitionsInFlight += 1;
+    try {
+      const lease = await manager.acquire(signal);
+      this.ownedLeases.add(lease.leaseId);
+      return lease;
+    } finally {
+      this.acquisitionsInFlight -= 1;
+    }
   }
 
   async availableSlots(): Promise<number | null> {
@@ -66,12 +89,36 @@ export class LazyProxyLeaseSource implements IProxyLeaseSource {
   async release(lease: AcquiredProxyLease): Promise<void> {
     if (!this.manager) return;
     await this.manager.release(lease);
+    this.ownedLeases.delete(lease.leaseId);
   }
 
   async releaseAll(): Promise<void> {
-    if (!this.manager) return;
+    if (this.acquisitionsInFlight > 0) {
+      throw new Error('CANNOT_RELEASE_ALL_WHILE_ACQUISITIONS_IN_FLIGHT');
+    }
+    if (!this.manager) {
+      this.cleanupState = 'idle';
+      this.ownedLeases.clear();
+      return;
+    }
+    if (this.releaseAllPromise) {
+      return this.releaseAllPromise;
+    }
     const current = this.manager;
-    this.manager = null;
-    await current.releaseAll();
+    this.cleanupState = 'releasing';
+    this.releaseAllPromise = (async () => {
+      try {
+        await current.releaseAll();
+        this.manager = null;
+        this.ownedLeases.clear();
+        this.cleanupState = 'idle';
+      } catch (error) {
+        this.cleanupState = 'failed';
+        throw error;
+      } finally {
+        this.releaseAllPromise = null;
+      }
+    })();
+    return this.releaseAllPromise;
   }
 }

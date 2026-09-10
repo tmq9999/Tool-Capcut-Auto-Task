@@ -54,7 +54,10 @@ export interface AccountMutationPort {
     state: Exclude<IntentState, 'outcome-unknown'>,
     evidenceRef: string
   ): void;
+  getOwnerByMailbox?(mailboxRef: string): string | null;
+  getBinding?(ownerRef: string): { ownerRef: string; mailboxRef: string | null; accountId: string | null } | null;
 }
+
 
 interface ApprovalRow {
   authority_ref: string;
@@ -399,6 +402,15 @@ export class AccountMutationRepository implements AccountMutationPort {
     requireRef(ownerRef, 'ownerRef');
     return this.readBinding(ownerRef);
   }
+
+  getOwnerByMailbox(mailboxRef: string): string | null {
+    requireRef(mailboxRef, 'mailboxRef');
+    const row = this.db.prepare(
+      'SELECT owner_ref FROM account_mutation_bindings WHERE mailbox_ref = ?'
+    ).get(mailboxRef) as { owner_ref: string } | undefined;
+    return row ? row.owner_ref : null;
+  }
+
 
   private readBinding(ownerRef: string): { ownerRef: string; mailboxRef: string | null; accountId: string | null } | null {
     const row = this.db.prepare(`SELECT owner_ref,mailbox_ref,account_id

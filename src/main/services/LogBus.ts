@@ -51,6 +51,7 @@ export class LogBus {
   private queue: CanonicalRuntimeLog[] = [];
   private readonly listeners = new Set<(log: CanonicalRuntimeLog) => void>();
   private timerHandle: number | null = null;
+  private sequence = 0;
 
   private readonly now: () => number;
   private readonly nextId: () => string;
@@ -71,13 +72,18 @@ export class LogBus {
   }
 
   emit(input: LogEntryInput): CanonicalRuntimeLog {
+    if (this.sequence >= Number.MAX_SAFE_INTEGER) {
+      throw new Error('LOG_STREAM_SEQUENCE_OVERFLOW');
+    }
+    this.sequence += 1;
     const entry: CanonicalRuntimeLog = {
       id: this.nextId(),
       email: input.email,
       step: input.step,
       status: input.status,
       message: input.message,
-      createdAt: new Date(this.now()).toISOString()
+      createdAt: new Date(this.now()).toISOString(),
+      streamSequence: this.sequence
     };
     if (input.accountId) {
       entry.accountId = input.accountId;
@@ -111,6 +117,12 @@ export class LogBus {
     } catch {
       // Keep the batch queued; the next flush retries it.
     }
+  }
+
+  clear(clearPersisted: () => void): number {
+    clearPersisted();
+    this.queue = [];
+    return this.sequence;
   }
 
   start(): void {

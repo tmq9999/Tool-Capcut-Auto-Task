@@ -63,6 +63,7 @@ export const AccountFilterSchema = z.object({
   query: z.string().optional(),
   status: z.string().optional(),
   emailProvider: z.string().optional(),
+  browserProvider: z.string().optional(),
   /**
    * Mốc "tạo từ ngày" dạng ISO. Bộ lọc "Ngày tạo" của toolbar trước đây không có
    * khoá nào để gửi nên chỉ đổi state rồi bật chip "Active Filters" — repo đổi
@@ -72,6 +73,7 @@ export const AccountFilterSchema = z.object({
   page: z.number().int().min(1).default(1),
   pageSize: z.number().int().min(1).max(ACCOUNT_PAGE_SIZE_MAX).default(50)
 }).strict();
+
 
 export type AccountFilterDTO = z.infer<typeof AccountFilterSchema>;
 

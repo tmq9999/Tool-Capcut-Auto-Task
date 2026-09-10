@@ -47,6 +47,14 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({
   const [isExporting, setIsExporting] = useState(false);
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
 
+  React.useEffect(() => {
+    if (isOpen) {
+      setScope(checkedCount > 0 ? 'checked' : 'all');
+      setFormat(defaultFormat);
+      setStatus(null);
+    }
+  }, [isOpen, checkedCount, defaultFormat]);
+
   /** Thứ tự cột do §21 chốt, Cài đặt xuất chỉ chọn cột nào được xuất. */
   const orderedFields = CANONICAL_EXPORT_FIELD_ORDER.filter((f) => exportFields.includes(f));
 
@@ -192,7 +200,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({
                 scope === 'filtered'
                   ? 'border-primary bg-primary/10'
                   : 'border-panel-border hover:border-outline bg-surface'
-              }`}
+              } ${filteredCount === 0 ? 'opacity-40 pointer-events-none' : ''}`}
             >
               <div className="flex items-center justify-between">
                 <input
@@ -200,6 +208,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({
                   name="export_scope"
                   checked={scope === 'filtered'}
                   onChange={() => setScope('filtered')}
+                  disabled={filteredCount === 0}
                   className="text-primary focus:ring-primary border-panel-border bg-surface"
                 />
                 <span className="font-code text-xs text-on-surface-variant">

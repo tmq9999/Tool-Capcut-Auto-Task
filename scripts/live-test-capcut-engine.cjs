@@ -87,20 +87,55 @@ app.whenReady().then(async () => {
 
     // 3. Khởi chạy Profile Multilogin (Headed hoặc Headless)
     console.log(`\n💻 [3/5] Khởi chạy Multilogin profile (Headless: ${isHeadless})...`);
-    const credRow = db.prepare("SELECT encrypted_credentials FROM service_credentials WHERE service_name = 'multilogin'").get();
-    if (!credRow) throw new Error('MULTILOGIN_CREDENTIALS_NOT_FOUND');
-    const decryptedCreds = JSON.parse(safeStorage.decryptString(Buffer.from(credRow.encrypted_credentials)));
+    let mlxEmail = process.env.MULTILOGIN_EMAIL;
+    let mlxPassword = process.env.MULTILOGIN_PASSWORD;
+    let mlxAutoToken = process.env.MULTILOGIN_AUTOMATION_TOKEN;
+
+    const { CredentialRepository } = require('../src/main/repositories/CredentialRepository.ts');
+    const { insertMultiloginIfMissing } = require('./liveCredentials.cjs');
+    const credRepo = new CredentialRepository(db);
+
+    if (!mlxEmail || !mlxPassword) {
+      const cred = credRepo.getCredential('multilogin');
+      if (cred) {
+        const decryptedCreds = JSON.parse(safeStorage.decryptString(Buffer.from(cred.encryptedCredentials)));
+        mlxEmail = decryptedCreds.email;
+        mlxPassword = decryptedCreds.password;
+      }
+    } else {
+      try {
+        if (safeStorage.isEncryptionAvailable()) {
+          const enc = safeStorage.encryptString(JSON.stringify({ email: mlxEmail, password: mlxPassword }));
+          const inserted = insertMultiloginIfMissing(credRepo, Buffer.from(enc));
+          if (inserted) {
+            console.log('   ✅ Đã lưu cấu hình Multilogin vào service_credentials.');
+          }
+        }
+      } catch (err) {
+        console.warn('   ⚠️ Không thể lưu credentials vào SQLite:', err.message);
+      }
+    }
+
     const mlxApi = new MultiloginProvider(fetchHttp);
-    const signinResult = await mlxApi.signIn(decryptedCreds.email, decryptedCreds.password);
-    const tokenSource = { getAccessToken: async () => signinResult.token };
+    let tokenSource;
+    if (mlxEmail && mlxPassword) {
+      console.log(`   🔑 Đang đăng nhập Multilogin: ${mlxEmail}...`);
+      const signinResult = await mlxApi.signIn(mlxEmail, mlxPassword);
+      tokenSource = { getAccessToken: async () => signinResult.token };
+      console.log('   ✅ Đăng nhập Multilogin thành công!');
+    } else if (mlxAutoToken) {
+      console.log('   🔑 Dùng MULTILOGIN_AUTOMATION_TOKEN...');
+      tokenSource = { getAccessToken: async () => mlxAutoToken };
+    } else {
+      throw new Error('MULTILOGIN_CREDENTIALS_NOT_FOUND');
+    }
 
     launcher = new ApiV3Launcher(tokenSource, mlxApi, {
-      http: fetchHttp,
-      ports: { isPortFree: async () => true, pickFreePort: async () => 35123 },
+      portTimeoutMs: 60_000,
       log: (msg) => console.log(`   [Launcher] ${msg}`)
     });
 
-    const signal = AbortSignal.timeout(400_000);
+    const signal = AbortSignal.timeout(600_000);
     const ui = createDirectUiInteraction(signal, 'native');
 
     profile = await launcher.launch({
@@ -125,7 +160,7 @@ app.whenReady().then(async () => {
 
     const getOtp = async () => {
       console.log('   ⏳ Đang chờ mã OTP xác minh từ Gmail94...');
-      const deadline = Date.now() + 90000;
+      const deadline = Date.now() + 120_000;
       while (Date.now() < deadline) {
         const otp = await gmailProvider.readOtp(gmailApiKey, order.orderId, 'capcut');
         if (otp) {

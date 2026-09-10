@@ -157,8 +157,12 @@ function toTxt(headers: string[], rows: string[][]): string {
 
 /** CSV theo RFC 4180: bọc ngoặc kép khi cần, ngoặc kép bên trong thì nhân đôi. */
 function toCsv(headers: string[], rows: string[][]): string {
-  const escape = (cell: string) =>
-    /[",\r\n]/.test(cell) ? '"' + cell.replace(/"/g, '""') + '"' : cell;
+  const sanitize = (cell: string) =>
+    /^[\t\r\n]/.test(cell) || /^\s*[=+\-@]/.test(cell) ? "'" + cell : cell;
+  const escape = (cell: string) => {
+    const safe = sanitize(cell);
+    return /[",\r\n]/.test(safe) ? '"' + safe.replace(/"/g, '""') + '"' : safe;
+  };
   const lines = [headers.map(escape).join(','), ...rows.map((row) => row.map(escape).join(','))];
   return lines.join('\r\n') + '\r\n';
 }
