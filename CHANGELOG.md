@@ -6,6 +6,42 @@ theo [SemVer](https://semver.org/lang/vi/).
 Lịch sử trước `2.4.0` không được dựng lại ở đây vì repo không có git history —
 chỉ ghi những gì có bằng chứng trong mã nguồn, log chạy thật và báo cáo nghiệm thu.
 
+## [3.0.3] — 2026-09-11
+
+Bản phát hành chuyên sâu nâng cấp **Độ ổn định và Khả năng phục hồi (Resilience & Evidence Reconciliation)** của hệ thống tự động hóa đa luồng, giải quyết triệt để các vấn đề rò rỉ hoặc mất mát bằng chứng nhiệm vụ khi dừng luồng, tách biệt rõ ràng phân cấp lỗi lưu trữ CSDL, kiểm soát an toàn tuyệt đối trạng thái đóng profile trình duyệt và chuẩn hóa thời gian đối soát dữ liệu theo chuẩn ISO UTC.
+
+### Added
+
+- **Cơ chế thu hồi và xả bằng chứng khi hủy luồng (Proof-bearing Cancellation Drain — V02):**
+  - Khi luồng bị dừng đột ngột hoặc người dùng bấm "Dừng lại" trong lúc các nhiệm vụ CapCut đang được thực thi (`TaskEvidenceError`), hệ thống tự động gom toàn bộ các bằng chứng nhiệm vụ đã ghi nhận (`unsettledProofs`) và xả (drain) an toàn xuống cơ sở dữ liệu SQLite trước khi chuyển giao lỗi kết thúc luồng.
+  - Ngăn ngừa tình trạng mất mát công sức cày credits hoặc trùng lặp làm lại các nhiệm vụ đã hoàn thành.
+- **Kiến trúc Single Proof Writer & Quản lý Iteration Owner (V03):**
+  - Giới thiệu cơ chế `IterationProofState` với token định danh cho từng phiên chạy nhằm ngăn chặn race-condition giữa các callback streaming từ engine và các luồng ghi SQLite.
+  - Tự động từ chối (`STALE_ACK_PROOF_OWNER` / `INVOCATION_CLOSED`) các callback gửi muộn sau khi phiên làm việc đã đóng.
+  - Loại trừ trùng lặp (deduplication) tức thì các bằng chứng đồng thời dựa trên bộ ba khóa `[key, opId, at]`.
+  - Tự động ghi nhớ và đưa các bằng chứng đã commit tại checkpoint vào bộ nhớ memo (`committedProofs`) để đảm bảo tính nhất quán dữ liệu.
+- **Hệ thống kiểm thử kịch bản tích hợp đa luồng thực tế (Real Runtime & SQLite Test Harness — V08):**
+  - Xây dựng kịch bản kiểm thử toàn diện `lateRunScenario.test.ts` vận hành trực tiếp trên SQLite `better-sqlite3` thực tế và sandbox `vm` evaluate từng trang, xác thực khả năng thu thập chính xác 13 bằng chứng nhiệm vụ, 0 hóa đơn giả, giải phóng trọn vẹn 3 profile Multilogin và proxy lease khi xảy ra timeout hoặc treo luồng.
+
+### Fixed
+
+- **Khắc phục lỗi xác nhận đóng profile Multilogin từ dữ liệu không hợp lệ (V01):**
+  - `MultiloginProvider.getQuickProfileStatuses` thực hiện kiểm tra nghiêm ngặt cấu trúc phản hồi từ Multilogin API: từ chối dữ liệu dạng mảng, dòng trống hoặc sai lệch `profile_id`.
+  - Ngăn chặn hệ thống nhầm lẫn và vội vàng đánh dấu profile đã dừng khi dịch vụ Multilogin trả về dữ liệu rỗng.
+- **Tách biệt phân cấp lỗi lưu bằng chứng và bảo toàn chuỗi lỗi gốc (V04):**
+  - Bổ sung trường `proofPersistenceFailure` trên state machine của `AutomationRunService` độc lập với lỗi kết thúc luồng chính (`terminalPersistenceFailure`).
+  - Đảm bảo khi lưu bằng chứng vào SQLite gặp trục trặc, lỗi gốc (`cause`) được bảo tồn trọn vẹn và không ghi đè mã lỗi của luồng chính.
+- **Khắc phục lỗi đóng modal tính năng mơ hồ hoặc che khuất (V05):**
+  - Cải tiến `dismissOperationFeatureModal` kiểm tra trạng thái hiển thị (`isVisible`) thực tế của wrapper modal.
+  - Ném lỗi rõ ràng `FEATURE_MODAL_OWNER_AMBIGUOUS` hoặc `FEATURE_MODAL_CLOSE_AMBIGUOUS` khi gặp nhiều modal hoặc nút đóng cùng lúc, ngăn chặn hành vi click mù có thể làm hỏng luồng giao diện.
+- **Cách ly vòng đời dừng profile trình duyệt và bảo toàn CDP handle (V06):**
+  - Phân định rõ ràng giữa lệnh đóng CDP handle cục bộ và xác nhận từ remote API (`remoteConfirmed` bảo đảm tính đơn điệu tăng dần).
+  - Định nghĩa chuẩn `ProfileStopError`; bảo vệ logger và observer bên ngoài không làm gãy chu trình giải phóng tài nguyên.
+- **Chuẩn hóa mốc thời gian ISO UTC trước khi đối soát SQL (V07):**
+  - `AccountTaskRepository.recordCheckpoint` tự động chuẩn hóa tất cả timestamp đầu vào thành chuỗi canonical ISO UTC trước khi thực thi truy vấn đối soát CSDL, khắc phục triệt để lỗi chênh lệch múi giờ hoặc định dạng ngày tháng hệ điều hành.
+
+---
+
 ## [3.0.2] — 2026-09-09
 
 Bản phát hành bổ sung cơ chế **Polling chờ nạp lại kho email (Chỉ dừng khi hết tiền mua mail)** và cho phép tùy biến chu kỳ chờ trực tiếp trên giao diện Dashboard, ngăn chặn triệt để việc phiên chạy bị gián đoạn oan uổng khi các nhà cung cấp email tạm thời hết hàng hoặc phản hồi HTTP 400.

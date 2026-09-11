@@ -5,7 +5,13 @@ import { AutomationTerminalError } from './AutomationTerminalError';
 import { DirectProxyPool, getDirectProxyRouteKey } from './DirectProxyPool';
 import { generateCapcutPassword } from './passwordGenerator';
 import { measureStage } from './stageTiming';
-import type { BrowserLauncher, LauncherProxy } from './capcut/launcher';
+import {
+  type BrowserLauncher,
+  type LauncherProxy,
+  ProfileStopError,
+  type ProfileStopDiagnostic,
+  type ProfileStopObservation
+} from './capcut/launcher';
 import { abortableDelay, withinDeadline } from './capcut/cancellation';
 import {
   RunUiInteractionScheduler,
@@ -70,6 +76,19 @@ export function headlessWorkerStaggerMs(headless: boolean, workerId: string): nu
   if (!headless) return 0;
   const match = /^worker-(\d+)$/.exec(workerId);
   return match ? Math.max(0, Number(match[1]) - 1) * HEADLESS_WORKER_STAGGER_MS : 0;
+}
+
+export function systemStopMessage(code: string | undefined): string {
+  if (code === 'RESOURCE_CLEANUP_FAILED') {
+    return 'Đã dừng vì lỗi thu hồi browser của phiên chạy';
+  }
+  if (code === 'APP_SHUTDOWN') {
+    return 'Đã dừng khi đóng ứng dụng';
+  }
+  if (code === 'USER_STOP') {
+    return 'Đã dừng theo yêu cầu';
+  }
+  return 'Đã dừng vì lỗi của phiên chạy';
 }
 
 export interface StartedProfile {
@@ -182,11 +201,13 @@ export interface CapcutTaskRunner {
     pace?: { stepMinMs: number; stepMaxMs: number; typeMinMs: number; typeMaxMs: number };
     skipWithoutTrial: boolean;
     unsettledProofs: readonly UnsettledTaskProof[];
+    onAcceptedProof?: (proof: UnsettledTaskProof) => Promise<void>;
     onTaskCheckpoint: (checkpoint: {
       rows: CapcutAccountResult['tasks'];
       receipt: CapcutVerificationReceipt;
       unsettledProofs: readonly UnsettledTaskProof[];
     }) => Promise<void>;
+    isExpectedClose?: () => boolean;
     log: (status: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR', step: string, message: string) => void;
   }): Promise<CapcutUiAccountResult>;
 }
@@ -308,9 +329,18 @@ export interface BrowserSessionRuntime {
   stopFailed?: boolean;
   stopOutcomeLocked?: boolean;
   profileStartRecorded?: boolean;
+  stopDiagnostic?: ProfileStopDiagnostic;
+  stopCause?: unknown;
+  stopPhase?: ProfileStopObservation['phase'] | 'unknown';
+  remoteConfirmed?: boolean;
 }
 
-interface ThreadRuntime {
+export interface IterationProofState {
+  readonly ownerToken: object;
+  readonly acceptedProofWrites: Map<string, Promise<void>>;
+}
+
+interface ThreadRuntime extends IterationProofState {
   runId: string;
   workerAlias: string;
   accountAlias: string;
@@ -522,6 +552,7 @@ export class AutomationRunService {
   private terminalIntent: AutomationTerminalReasonDTO | null = null;
   private terminalState: 'blocked' | 'failed' | 'stopped' | null = null;
   private terminalPersistenceFailure: AutomationTerminalError | null = null;
+  private proofPersistenceFailure: AutomationTerminalError | null = null;
   private readonly iterationAbort = new Map<string, AbortController>();
   private readonly iterationOwners = new Map<string, object>();
   private cleanupFailures = 0;
@@ -851,7 +882,13 @@ export class AutomationRunService {
       state,
       message
     };
-    for (const listener of this.listeners) listener(this.progress);
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(this.progress);
+      } catch {
+        // Guard each observer separately; no recursive LogBus warning
+      }
+    }
   }
 
   private increment(
@@ -1003,6 +1040,15 @@ export class AutomationRunService {
     });
   }
 
+  private promotePersistenceFailure(error: AutomationTerminalError): void {
+    this.terminalIntent = error.reason;
+    this.terminalState = 'failed';
+    this.acquisitionAbort?.abort(error);
+    this.shutdownAllUiSchedulers({ code: 'RUN_ABORTED', message: error.message });
+    for (const controller of this.iterationAbort.values()) controller.abort(error);
+    this.publish('failed', error.message, { terminalReason: error.reason });
+  }
+
   private recordOutcome(thread: ThreadRuntime, outcome: ThreadOutcome): void {
     if (thread.outcome) return;
 
@@ -1013,10 +1059,10 @@ export class AutomationRunService {
         status: outcome.status,
         automationStep: outcome.step
       });
-      if (updateResult && updateResult.success === false) {
-        writeError = new Error('Database returned success: false');
-      } else {
+      if (updateResult && updateResult.success === true) {
         writeSucceeded = true;
+      } else {
+        writeError = new Error('Database returned success: false');
       }
     } catch (err) {
       writeError = err;
@@ -1029,7 +1075,6 @@ export class AutomationRunService {
         status: 'error',
         step: outcome.step
       };
-      this.commitOutcome(thread, failureOutcome, false);
 
       const termErr = new AutomationTerminalError(
         'failed',
@@ -1037,15 +1082,36 @@ export class AutomationRunService {
           code: 'INTERNAL_ERROR',
           details: { failure: 'ACCOUNT_TERMINAL_PERSISTENCE_FAILED', persisted: false }
         },
-        `Không thể lưu trạng thái kết thúc của tài khoản vào database: ${cause.message}`,
+        'Không thể lưu trạng thái kết thúc của tài khoản vào database.',
         cause
       );
-      this.terminalPersistenceFailure = termErr;
-      this.acceptTerminalError(termErr);
+      this.terminalPersistenceFailure ??= termErr;
+      this.promotePersistenceFailure(this.terminalPersistenceFailure);
+      this.commitOutcome(thread, failureOutcome, false);
       return;
     }
 
     this.commitOutcome(thread, outcome, true);
+  }
+
+  private acceptProofPersistenceFailure(error: unknown): AutomationTerminalError {
+    const originalCause = error instanceof AutomationTerminalError && error.cause
+      ? error.cause
+      : error instanceof Error
+        ? error
+        : new Error('UNKNOWN_PROOF_PERSISTENCE_CAUSE');
+
+    const failure = new AutomationTerminalError(
+      'failed',
+      {
+        code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED',
+        details: { failure: 'ACK_PROOF_PERSISTENCE_FAILED' }
+      },
+      'Không lưu được bằng chứng nhiệm vụ đã được xác nhận.',
+      originalCause
+    );
+    this.proofPersistenceFailure ??= failure;
+    return this.proofPersistenceFailure;
   }
 
   private acceptTerminalError(error: unknown): void {
@@ -1109,12 +1175,36 @@ export class AutomationRunService {
           provider: session.provider ?? 'multilogin',
           operation: 'profile-stop'
         }, () => session.launcher
-          ? session.launcher.stop(profileId)
+          ? session.launcher.stop(profileId, {
+              onPhase: (obs) => {
+                if (session.stopOutcomeLocked) return;
+                session.stopPhase = obs.phase;
+                if (obs.remoteConfirmed) session.remoteConfirmed = true;
+              }
+            })
           : this.deps.browser.stopProfile(profileId));
         if (!session.stopOutcomeLocked) session.stopFailed = false;
         return true;
-      } catch {
+      } catch (error: unknown) {
         session.stopFailed = true;
+        session.stopCause = error;
+        if (error instanceof ProfileStopError) {
+          session.stopDiagnostic = error.diagnostic;
+          const { phase, kind, providerCode, httpStatus } = error.diagnostic;
+          this.log(
+            'WARNING',
+            thread.workerAlias,
+            thread.accountAlias,
+            `Dừng profile thất bại ở phase "${phase}" (${kind}${providerCode ? `, code=${providerCode}` : ''}${httpStatus !== undefined ? `, status=${httpStatus}` : ''}).`
+          );
+        } else {
+          this.log(
+            'WARNING',
+            thread.workerAlias,
+            thread.accountAlias,
+            `Dừng profile thất bại: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
         return false;
       }
     })();
@@ -1173,8 +1263,18 @@ export class AutomationRunService {
         this.profileStopTimeoutMs,
         new Error('Profile stop timeout')
       );
-    } catch {
+    } catch (timeoutError) {
       stopSuccess = false;
+      if (!session.stopCause) {
+        session.stopCause = timeoutError;
+      }
+      if (!session.stopDiagnostic) {
+        session.stopDiagnostic = {
+          phase: session.stopPhase ?? 'unknown',
+          kind: 'deadline',
+          remoteConfirmed: session.remoteConfirmed === true
+        };
+      }
     }
 
     if (stopSuccess) {
@@ -1305,6 +1405,9 @@ export class AutomationRunService {
     if (thread?.routeReleased) {
       return;
     }
+    if (thread) {
+      thread.routeReleased = true;
+    }
 
     if (lease) {
       try {
@@ -1426,7 +1529,9 @@ export class AutomationRunService {
       sessionSequence: 0,
       sessionRecycleCount: 0,
       completionPromise,
-      notifyDone
+      notifyDone,
+      ownerToken: token,
+      acceptedProofWrites: new Map<string, Promise<void>>()
     };
     return runtime;
   }
@@ -1716,6 +1821,50 @@ export class AutomationRunService {
     return session;
   }
 
+  private async persistAcceptedProofs(
+    thread: ThreadRuntime,
+    proofs: readonly UnsettledTaskProof[]
+  ): Promise<void> {
+    const sink = this.deps.taskProgress;
+    if (!sink || typeof sink.recordUnsettled !== 'function') {
+      const err = new AutomationTerminalError(
+        'failed',
+        {
+          code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED',
+          details: { failure: 'ACK_PROOF_PERSISTENCE_FAILED' }
+        },
+        'Không lưu được bằng chứng nhiệm vụ đã được xác nhận.'
+      );
+      this.acceptProofPersistenceFailure(err);
+      throw err;
+    }
+
+    const writes: Promise<void>[] = [];
+    for (const item of proofs) {
+      const key = JSON.stringify([item.key, item.proof.opId, item.proof.at]);
+      let write = thread.acceptedProofWrites.get(key);
+      if (!write) {
+        const copy = structuredClone(item);
+        write = Promise.resolve().then(async () => {
+          if (this.iterationOwners.get(thread.accountId) !== thread.ownerToken) {
+            throw new Error('STALE_ACK_PROOF_OWNER');
+          }
+          try {
+            if (sink?.recordUnsettled) {
+              await sink.recordUnsettled(thread.accountId, thread.runId, [copy]);
+            }
+          } catch (error: unknown) {
+            const terminalErr = this.acceptProofPersistenceFailure(error);
+            throw terminalErr;
+          }
+        });
+        thread.acceptedProofWrites.set(key, write);
+      }
+      writes.push(write);
+    }
+    await Promise.all(writes);
+  }
+
   private async runUiSessionAttempt(
     thread: ThreadRuntime,
     session: BrowserSessionRuntime,
@@ -1733,72 +1882,137 @@ export class AutomationRunService {
       throw new Error('CapCut password is not available');
     }
 
-    return await uiRunner.runAccount({
-      page: session.page,
-      context: session.context,
-      email: thread.email,
-      password,
-      accountId: thread.accountId,
-      isNewAccount: (authAttempt === 'existing-only' || thread.isExistingAccount) ? false : thread.purchasedEmailId !== undefined,
-      authAttempt,
-      runId: thread.runId,
-      sessionAlias: session.alias,
-      sessionStartedAt: session.startedAt,
-      signal,
-      ui: session.ui,
-      getOtp: (authAttempt === 'existing-only' || thread.isExistingAccount) ? undefined : this.buildOtpReader(thread, signal),
-      maxRounds: Math.max(1, Math.min(1 + config.retryCount, 4)),
-      pace: {
-        stepMinMs: config.stepDelayMinMs,
-        stepMaxMs: config.stepDelayMaxMs,
-        typeMinMs: config.typeDelayMinMs,
-        typeMaxMs: config.typeDelayMaxMs
-      },
-      skipWithoutTrial: config.skipWithoutTrial,
-      unsettledProofs,
-      onTaskCheckpoint: async (checkpoint: {
-        rows: CapcutAccountResult['tasks'];
-        receipt: CapcutVerificationReceipt;
-        unsettledProofs: readonly UnsettledTaskProof[];
-      }) => {
-        if (thread.session !== session) {
-          this.log(
-            'WARNING',
-            thread.email,
-            'Nhiệm vụ',
-            `Bỏ qua checkpoint muộn từ session cũ ${session.alias} (hiện tại: ${thread.session?.alias ?? 'none'}).`,
-            thread.accountId
-          );
-          return;
-        }
+    const accountId = thread.accountId;
+    let invocationOpen = true;
 
-        if (this.deps.taskProgress) {
-          await this.deps.taskProgress.record(thread.accountId, checkpoint);
-        }
+    const onAcceptedProof = async (proof: UnsettledTaskProof): Promise<void> => {
+      if (!invocationOpen) {
+        throw new Error('INVOCATION_CLOSED');
+      }
+      if (this.iterationOwners.get(accountId) !== thread.ownerToken) {
+        throw new Error('STALE_ACK_PROOF_OWNER');
+      }
+      await this.persistAcceptedProofs(thread, [proof]);
+    };
 
-        if (this.telemetry) this.recordEvidence({
-            schemaVersion: 1,
-            runId: thread.runId,
-            workerAlias: thread.workerAlias,
-            sessionAlias: session.alias,
-            accountAlias: thread.accountAlias,
-            at: new Date().toISOString(),
-            type: 'task-checkpoint',
-            fresh: checkpoint.receipt.fresh,
-            final: checkpoint.receipt.final,
-            observedAt: checkpoint.receipt.observedAt,
-            requiredAfter: checkpoint.receipt.requiredAfter,
-            serverTotal: checkpoint.receipt.serverTotal,
-            serverDone: checkpoint.receipt.serverDone,
-            tasks: checkpoint.rows.map((row) => ({
-              key: EvidenceTaskKeySchema.parse(row.key),
-              status: row.status
-            }))
-          });
-      },
-      log: (status: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR', step: string, message: string) =>
-        this.log(status, thread.email, step, message, thread.accountId)
-    });
+    try {
+      return await uiRunner.runAccount({
+        page: session.page,
+        context: session.context,
+        email: thread.email,
+        password,
+        accountId: thread.accountId,
+        isNewAccount: (authAttempt === 'existing-only' || thread.isExistingAccount) ? false : thread.purchasedEmailId !== undefined,
+        authAttempt,
+        runId: thread.runId,
+        sessionAlias: session.alias,
+        sessionStartedAt: session.startedAt,
+        signal,
+        ui: session.ui,
+        getOtp: (authAttempt === 'existing-only' || thread.isExistingAccount) ? undefined : this.buildOtpReader(thread, signal),
+        maxRounds: Math.max(1, Math.min(1 + config.retryCount, 4)),
+        pace: {
+          stepMinMs: config.stepDelayMinMs,
+          stepMaxMs: config.stepDelayMaxMs,
+          typeMinMs: config.typeDelayMinMs,
+          typeMaxMs: config.typeDelayMaxMs
+        },
+        skipWithoutTrial: config.skipWithoutTrial,
+        unsettledProofs,
+        onAcceptedProof,
+        onTaskCheckpoint: async (checkpoint: {
+          rows: CapcutAccountResult['tasks'];
+          receipt: CapcutVerificationReceipt;
+          unsettledProofs: readonly UnsettledTaskProof[];
+        }) => {
+          if (thread.session !== session) {
+            this.log(
+              'WARNING',
+              thread.email,
+              'Nhiệm vụ',
+              `Bỏ qua checkpoint muộn từ session cũ ${session.alias} (hiện tại: ${thread.session?.alias ?? 'none'}).`,
+              thread.accountId
+            );
+            return;
+          }
+
+          if (this.deps.taskProgress) {
+            await this.deps.taskProgress.record(thread.accountId, checkpoint);
+            if (checkpoint.unsettledProofs) {
+              for (const item of checkpoint.unsettledProofs) {
+                const key = JSON.stringify([item.key, item.proof.opId, item.proof.at]);
+                thread.acceptedProofWrites.set(key, Promise.resolve());
+              }
+            }
+          }
+
+          if (this.telemetry) this.recordEvidence({
+              schemaVersion: 1,
+              runId: thread.runId,
+              workerAlias: thread.workerAlias,
+              sessionAlias: session.alias,
+              accountAlias: thread.accountAlias,
+              at: new Date().toISOString(),
+              type: 'task-checkpoint',
+              fresh: checkpoint.receipt.fresh,
+              final: checkpoint.receipt.final,
+              observedAt: checkpoint.receipt.observedAt,
+              requiredAfter: checkpoint.receipt.requiredAfter,
+              serverTotal: checkpoint.receipt.serverTotal,
+              serverDone: checkpoint.receipt.serverDone,
+              tasks: checkpoint.rows.map((row) => ({
+                key: EvidenceTaskKeySchema.parse(row.key),
+                status: row.status
+              }))
+            });
+        },
+        isExpectedClose: () => session.stopRequested,
+        log: (status: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR', step: string, message: string) =>
+          this.log(status, thread.email, step, message, thread.accountId)
+      });
+    } finally {
+      invocationOpen = false;
+    }
+  }
+
+  private deriveStopMessage(signal?: AbortSignal, err?: unknown): string {
+    const rawReason = signal?.reason ?? (err instanceof AutomationTerminalError ? err.reason : (err instanceof Error ? err : undefined));
+    let code: string | undefined;
+
+    if (rawReason instanceof AutomationTerminalError) {
+      code = rawReason.reason.code;
+    } else if (rawReason && typeof rawReason === 'object' && 'code' in rawReason && typeof (rawReason as { code?: unknown }).code === 'string') {
+      code = (rawReason as { code: string }).code;
+    } else if (rawReason instanceof Error) {
+      if (rawReason.message === 'USER_STOP' || rawReason.message === 'stopThread requested') {
+        code = 'USER_STOP';
+      } else if (rawReason.message === 'APP_SHUTDOWN') {
+        code = 'APP_SHUTDOWN';
+      } else if (rawReason.message === 'RESOURCE_CLEANUP_FAILED') {
+        code = 'RESOURCE_CLEANUP_FAILED';
+      } else if ('code' in rawReason && typeof (rawReason as { code?: unknown }).code === 'string') {
+        code = (rawReason as { code: string }).code;
+      }
+    }
+
+    if (!code && this.runAbort?.signal.reason) {
+      const runReason = this.runAbort.signal.reason;
+      if (runReason instanceof AutomationTerminalError) {
+        code = runReason.reason.code;
+      } else if (runReason instanceof Error) {
+        if (runReason.message === 'USER_STOP') code = 'USER_STOP';
+        else if (runReason.message === 'APP_SHUTDOWN') code = 'APP_SHUTDOWN';
+        else if ('code' in runReason && typeof (runReason as { code?: unknown }).code === 'string') {
+          code = (runReason as { code: string }).code;
+        }
+      }
+    }
+
+    if (!code && this.terminalIntent?.code) {
+      code = this.terminalIntent.code;
+    }
+
+    return systemStopMessage(code);
   }
 
   private classifyUiResult(
@@ -1981,6 +2195,7 @@ export class AutomationRunService {
             error instanceof AutomationTerminalError &&
             error.reason.code === 'TASK_CHECKPOINT_PERSISTENCE_FAILED'
           ) {
+            const proofErr = this.acceptProofPersistenceFailure(error);
             this.recordEvidence({
                 schemaVersion: 1,
                 runId: thread.runId,
@@ -1990,10 +2205,8 @@ export class AutomationRunService {
                 type: 'persistence-failure',
                 code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED'
               });
-            const stopped = await this.stopSession(thread, currentSession);
-            if (stopped) {
-              this.acceptTerminalError(error);
-            }
+            await this.stopSession(thread, currentSession);
+            this.acceptTerminalError(this.proofPersistenceFailure ?? proofErr);
             return {
               kind: 'failed',
               status: 'error',
@@ -2001,45 +2214,8 @@ export class AutomationRunService {
             };
           }
           if (error instanceof TaskEvidenceError) {
-            if (
-              this.activeThreads.get(thread.accountId) === thread &&
-              thread.session === currentSession &&
-              !iterationSignal.aborted &&
-              error.unsettledProofs.length > 0 &&
-              this.deps.taskProgress?.recordUnsettled
-            ) {
-              try {
-                await this.deps.taskProgress.recordUnsettled(
-                  thread.accountId,
-                  thread.runId,
-                  error.unsettledProofs
-                );
-              } catch (persistErr: unknown) {
-                if (
-                  persistErr instanceof AutomationTerminalError &&
-                  persistErr.reason.code === 'TASK_CHECKPOINT_PERSISTENCE_FAILED'
-                ) {
-                  this.recordEvidence({
-                    schemaVersion: 1,
-                    runId: thread.runId,
-                    workerAlias: thread.workerAlias,
-                    sessionAlias: currentSession.alias,
-                    at: new Date().toISOString(),
-                    type: 'persistence-failure',
-                    code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED'
-                  });
-                  const stopped = await this.stopSession(thread, currentSession);
-                  if (stopped) {
-                    this.acceptTerminalError(persistErr);
-                  }
-                  return {
-                    kind: 'failed',
-                    status: 'error',
-                    step: 'Không lưu được checkpoint nhiệm vụ'
-                  };
-                }
-                throw persistErr;
-              }
+            if (error.unsettledProofs.length > 0) {
+              await this.persistAcceptedProofs(thread, error.unsettledProofs);
             }
             throw error;
           }
@@ -2070,7 +2246,7 @@ export class AutomationRunService {
               return {
                 kind: 'stopped',
                 status: 'stopped',
-                step: 'Đã dừng theo yêu cầu'
+                step: this.deriveStopMessage(iterationSignal)
               };
             }
 
@@ -2084,11 +2260,14 @@ export class AutomationRunService {
         return this.classifyUiResult(thread, result, config);
       }
     } catch (err: unknown) {
-      if (iterationSignal.aborted || this.runAbort?.signal.aborted) {
+      const isCleanupSafetyAbort = (err instanceof AutomationTerminalError && err.reason.code === 'RESOURCE_CLEANUP_FAILED') ||
+        (iterationSignal.reason instanceof AutomationTerminalError && iterationSignal.reason.reason.code === 'RESOURCE_CLEANUP_FAILED');
+      const isTerminalFailure = err instanceof AutomationTerminalError && err.state === 'failed' && !isCleanupSafetyAbort;
+      if (!isTerminalFailure && (iterationSignal.aborted || this.runAbort?.signal.aborted)) {
         return {
           kind: 'stopped',
           status: 'stopped',
-          step: 'Đã dừng theo yêu cầu'
+          step: this.deriveStopMessage(iterationSignal, err)
         };
       }
       if (err instanceof AutomationTerminalError) {
@@ -2293,13 +2472,15 @@ export class AutomationRunService {
                 this.releaseRunningWaiters();
               }
               if (!thread.outcome) {
-                const terminalFailure = err instanceof AutomationTerminalError && err.state === 'failed';
+                const iterationSig = this.iterationAbort.get(thread.accountId)?.signal;
+                const isCleanupSafetyAbort = (err instanceof AutomationTerminalError && err.reason.code === 'RESOURCE_CLEANUP_FAILED') ||
+                  (iterationSig?.reason instanceof AutomationTerminalError && iterationSig.reason.reason.code === 'RESOURCE_CLEANUP_FAILED');
+                const terminalFailure = err instanceof AutomationTerminalError && err.state === 'failed' && !isCleanupSafetyAbort;
+                const wasAborted = this.runAbort?.signal.aborted === true || iterationSig?.aborted === true;
                 this.recordOutcome(
                   thread,
-                  !terminalFailure && (this.runAbort?.signal.aborted === true ||
-                      this.iterationAbort.get(thread.accountId)?.signal.aborted === true
-                  )
-                    ? { kind: 'stopped', status: 'stopped', step: 'Đã dừng theo yêu cầu' }
+                  !terminalFailure && wasAborted
+                    ? { kind: 'stopped', status: 'stopped', step: this.deriveStopMessage(iterationSig, err) }
                     : { kind: 'failed', status: 'error', step: 'Lỗi khi khởi chạy hoặc xử lý' }
                 );
               }
@@ -2331,14 +2512,19 @@ export class AutomationRunService {
               });
             }
           },
-          (message) =>
+          (message) => {
+            const timing =
+              message.replace(' outcome=', ' operationOutcome=') +
+              ' accountOutcome=' + (thread?.outcome?.kind ?? 'unrecorded') +
+              ' persisted=' + String(thread?.outcomePersisted === true);
             this.log(
               'INFO',
               thread?.email ?? item?.email ?? 'system',
               'Timing',
-              message,
+              timing,
               thread?.accountId
-            )
+            );
+          }
         );
       } catch (error: unknown) {
         if (firstIteration) {
@@ -2424,7 +2610,25 @@ export class AutomationRunService {
 
       let finalReason: AutomationTerminalReasonDTO | undefined = this.terminalIntent ?? undefined;
       if (this.terminalPersistenceFailure) {
-        finalReason = this.terminalPersistenceFailure.reason;
+        finalReason = {
+          ...this.terminalPersistenceFailure.reason,
+          details: {
+            ...(this.terminalPersistenceFailure.reason.details ?? {}),
+            ...(this.cleanupFailures > 0 ? { cleanupFailures: this.cleanupFailures } : {}),
+            ...(this.activeThreads.size > 0 ? { pendingProfiles: this.activeThreads.size } : {})
+          }
+        };
+        this.terminalIntent = finalReason;
+        this.terminalState = 'failed';
+      } else if (this.proofPersistenceFailure) {
+        finalReason = {
+          ...this.proofPersistenceFailure.reason,
+          details: {
+            ...(this.proofPersistenceFailure.reason.details ?? {}),
+            ...(this.cleanupFailures > 0 ? { cleanupFailures: this.cleanupFailures } : {}),
+            ...(this.activeThreads.size > 0 ? { pendingProfiles: this.activeThreads.size } : {})
+          }
+        };
         this.terminalIntent = finalReason;
         this.terminalState = 'failed';
       } else if (!finalReason) {
@@ -2438,28 +2642,34 @@ export class AutomationRunService {
       }
 
       const hasCleanupFailure = this.cleanupFailures > 0 || this.activeThreads.size > 0;
-      if (hasCleanupFailure && this.terminalIntent?.code !== 'USER_STOP' && this.terminalIntent?.code !== 'APP_SHUTDOWN') {
-        finalReason = {
-          code: 'RESOURCE_CLEANUP_FAILED',
-          details: {
-            cleanupFailures: this.cleanupFailures,
-            ...(this.activeThreads.size > 0 ? { pendingProfiles: this.activeThreads.size } : {})
-          }
-        };
-      } else if (this.cleanupFailures > 0) {
-        finalReason = {
-          ...finalReason,
-          details: {
-            ...(finalReason.details ?? {}),
-            cleanupFailures: this.cleanupFailures
-          }
-        };
+      if (!this.terminalPersistenceFailure && !this.proofPersistenceFailure) {
+        if (hasCleanupFailure && this.terminalIntent?.code !== 'USER_STOP' && this.terminalIntent?.code !== 'APP_SHUTDOWN') {
+          finalReason = {
+            code: 'RESOURCE_CLEANUP_FAILED',
+            details: {
+              cleanupFailures: this.cleanupFailures,
+              ...(this.activeThreads.size > 0 ? { pendingProfiles: this.activeThreads.size } : {})
+            }
+          };
+        } else if (this.cleanupFailures > 0) {
+          finalReason = {
+            ...finalReason,
+            details: {
+              ...(finalReason.details ?? {}),
+              cleanupFailures: this.cleanupFailures
+            }
+          };
+        }
       }
 
       if (this.terminalPersistenceFailure) {
         this.terminalIntent = finalReason;
         this.terminalState = 'failed';
         this.publish('failed', this.terminalPersistenceFailure.message, { terminalReason: finalReason });
+      } else if (this.proofPersistenceFailure) {
+        this.terminalIntent = finalReason;
+        this.terminalState = 'failed';
+        this.publish('failed', this.proofPersistenceFailure.message, { terminalReason: finalReason });
       } else if (this.terminalIntent?.code === 'USER_STOP' || this.terminalIntent?.code === 'APP_SHUTDOWN') {
         this.publish('stopped', 'Phiên chạy đã dừng.', { terminalReason: finalReason });
       } else if (hasCleanupFailure) {
@@ -2589,17 +2799,24 @@ export class AutomationRunService {
       ));
     }
     const runId = this.nextId();
-    const logResetTicket = this.deps.logReset?.capture(runId);
-    const headedRollout = config.headless === false && (config.missionTransport ?? 'ui') === 'ui' && config.rolloutStage !== undefined;
-    this.telemetry = headedRollout
-      ? this.runtime.createTelemetry?.(runId) ?? createRunTelemetry({ userDataDir: this.getUserDataDir(), runId })
-      : null;
-    const artifactBasename = this.telemetry?.artifactBasename();
+    this.lastSummary = null;
+    const workerTarget = (config.mailLimit ?? 0) > 0 ? Math.min(config.threadCount, config.mailLimit!) : config.threadCount;
+    this.publish('preparing', 'Đang chuẩn bị dữ liệu cho phiên chạy...', {
+      runId,
+      workerTarget,
+      workersActive: 0,
+      accountsAccepted: 0,
+      accountsCompleted: 0,
+      accountsFailed: 0,
+      accountsStopped: 0,
+      terminalReason: undefined
+    });
     this.runAbort = new AbortController();
     this.acquisitionAbort = new AbortController();
     this.terminalIntent = null;
     this.terminalState = null;
     this.terminalPersistenceFailure = null;
+    this.proofPersistenceFailure = null;
     this.iterationAbort.clear();
     this.cleanupFailures = 0;
     this.skippedAccounts = 0;
@@ -2615,53 +2832,87 @@ export class AutomationRunService {
     this.startedProfiles = [];
     this.firstWaveDone = false;
     const runSignal = this.runAbort.signal;
+    let artifactBasename: string | undefined;
     const operation = Promise.resolve().then(async () => {
       try {
+        const logResetTicket = this.deps.logReset?.capture(runId);
+        const headedRollout = config.headless === false && (config.missionTransport ?? 'ui') === 'ui' && config.rolloutStage !== undefined;
+        this.telemetry = headedRollout
+          ? this.runtime.createTelemetry?.(runId) ?? createRunTelemetry({ userDataDir: this.getUserDataDir(), runId })
+          : null;
+        artifactBasename = this.telemetry?.artifactBasename();
         return await this.prepareRun(config, runId, runSignal, logResetTicket);
       } catch (error: unknown) {
-        if (!runSignal.aborted) {
-          if (this.telemetry) {
+        if (runSignal.aborted) {
+          const stopReason = this.terminalIntent ?? { code: 'USER_STOP' };
+          if (this.progress.state !== 'stopped') {
+            this.publish('stopped', 'Đã dừng trước khi khởi chạy.', { terminalReason: stopReason });
+          }
+        } else if (error instanceof AutomationTerminalError) {
+          if (this.progress.state !== error.state || !this.progress.terminalReason) {
+            this.publish(error.state, error.message, { terminalReason: error.reason });
+          }
+        } else if (error instanceof ProviderError) {
+          let code: AutomationTerminalCode = 'PROVIDER_CONFIG_ERROR';
+          if (error.code === 'AUTH_ERROR') {
+            code = 'PROVIDER_AUTH_REQUIRED';
+          } else if (error.code === 'INSUFFICIENT_FUNDS') {
+            code = 'INSUFFICIENT_FUNDS';
+          }
+          const terminalReason = {
+            code,
+            ...(error.serviceName ? { provider: error.serviceName } : {})
+          };
+          if (this.progress.state !== 'blocked' || !this.progress.terminalReason) {
+            this.publish('blocked', error.message, { terminalReason });
+          }
+        } else {
+          if (this.progress.state !== 'failed' && this.progress.state !== 'blocked' && this.progress.state !== 'stopped') {
+            this.publish('failed', error instanceof Error ? error.message : String(error), {
+              terminalReason: { code: 'INTERNAL_ERROR' }
+            });
+          }
+        }
+
+        this.lastSummary = { ...this.progress, startedProfiles: [...this.startedProfiles] };
+
+        if (this.telemetry) {
+          try {
             await this.telemetry.close({
-              schemaVersion: 1, runId, at: new Date().toISOString(), type: 'terminal',
-              mode: this.evidenceMode, stage: this.evidenceStage, mailboxAcquisitions: this.mailboxAcquisitions,
-              state: 'failed', code: 'INTERNAL_ERROR', accepted: this.progress.accountsAccepted,
-              completed: this.progress.accountsCompleted, failed: this.progress.accountsFailed,
-              stopped: this.progress.accountsStopped, skipped: this.skippedAccounts,
+              schemaVersion: 1,
+              runId,
+              at: new Date().toISOString(),
+              type: 'terminal',
+              mode: this.evidenceMode,
+              stage: this.evidenceStage,
+              mailboxAcquisitions: this.mailboxAcquisitions,
+              state: (this.progress.state === 'completed' || this.progress.state === 'failed' || this.progress.state === 'stopped' || this.progress.state === 'blocked')
+                ? this.progress.state
+                : 'failed',
+              code: this.progress.terminalReason?.code ?? (this.progress.state === 'stopped' ? 'USER_STOP' : 'INTERNAL_ERROR'),
+              accepted: this.progress.accountsAccepted,
+              completed: this.progress.accountsCompleted,
+              failed: this.progress.accountsFailed,
+              stopped: this.progress.accountsStopped,
+              skipped: this.skippedAccounts,
               cleanupFailures: this.cleanupFailures,
               purchaseAttempted: this.sourceForEvidence?.purchaseStats().attempted ?? 0,
               purchaseConfirmed: this.sourceForEvidence?.purchaseStats().confirmed ?? 0,
               purchaseAmbiguous: this.sourceForEvidence?.purchaseStats().ambiguous ?? 0
             });
+          } catch (telemetryErr: unknown) {
+            this.log('WARNING', 'system', 'Run', 'Lỗi đóng telemetry phiên chạy: ' + (telemetryErr instanceof Error ? telemetryErr.message : String(telemetryErr)));
           }
-          throw error;
         }
-        this.publish('stopped', 'Đã dừng trước khi khởi chạy.', { terminalReason: this.terminalIntent ?? { code: 'USER_STOP' } });
-        this.lastSummary = { ...this.progress, startedProfiles: [...this.startedProfiles] };
-        if (this.telemetry) {
-          await this.telemetry.close({
-            schemaVersion: 1,
-            runId,
-            at: new Date().toISOString(),
-            type: 'terminal',
-            mode: this.evidenceMode,
-            stage: this.evidenceStage,
-            mailboxAcquisitions: this.mailboxAcquisitions,
-            state: 'stopped',
-            code: 'USER_STOP',
-            accepted: 0,
-            completed: 0,
-            failed: 0,
-            stopped: 0,
-            skipped: 0,
-            cleanupFailures: 0,
-            purchaseAttempted: 0,
-            purchaseConfirmed: 0,
-            purchaseAmbiguous: 0
-          });
+
+        if (runSignal.aborted) {
+          return { runId, ...(artifactBasename ? { artifactBasename } : {}) };
         }
-        return { runId, ...(artifactBasename ? { artifactBasename } : {}) };
+        throw error;
       } finally {
-        this.starting = null;
+        if (this.starting === operation) {
+          this.starting = null;
+        }
       }
     });
     this.starting = operation;
@@ -2679,11 +2930,6 @@ export class AutomationRunService {
     logResetTicket?: StartLogResetTicket
   ): Promise<{ runId: string; clearedThrough?: number }> {
     const workerTarget = (config.mailLimit ?? 0) > 0 ? Math.min(config.threadCount, config.mailLimit!) : config.threadCount;
-    this.publish('preparing', 'Đang chuẩn bị dữ liệu cho phiên chạy...', {
-      runId, workerTarget, workersActive: 0,
-      accountsAccepted: 0, accountsCompleted: 0, accountsFailed: 0, accountsStopped: 0,
-      terminalReason: undefined
-    });
     runSignal.throwIfAborted();
 
     if (config.missionTransport === 'http-only') {
@@ -2942,12 +3188,39 @@ export class AutomationRunService {
       if (this.starting) await this.starting.catch(() => undefined);
       if (this.activeRun) await this.activeRun;
       if (this.healthRun) await this.healthRun.catch(() => undefined);
-      if (this.activeThreads.size > 0 || this.terminalState === 'failed' || this.terminalPersistenceFailure) {
+      if (this.activeThreads.size > 0 || this.terminalState === 'failed' || this.terminalPersistenceFailure || this.proofPersistenceFailure) {
         if (this.terminalPersistenceFailure) {
-          const reason = this.terminalPersistenceFailure.reason;
+          const reason: AutomationTerminalReasonDTO = {
+            ...this.terminalPersistenceFailure.reason,
+            details: {
+              ...(this.terminalPersistenceFailure.reason.details ?? {}),
+              ...(this.cleanupFailures > 0 ? { cleanupFailures: this.cleanupFailures } : {}),
+              ...(this.activeThreads.size > 0 ? { pendingProfiles: this.activeThreads.size } : {})
+            }
+          };
           this.terminalIntent = reason;
           this.terminalState = 'failed';
           this.publish('failed', this.terminalPersistenceFailure.message, { terminalReason: reason });
+          this.lastSummary = {
+            ...this.progress,
+            state: 'failed',
+            terminalReason: reason,
+            startedProfiles: [...this.startedProfiles]
+          };
+          return;
+        }
+        if (this.proofPersistenceFailure) {
+          const reason: AutomationTerminalReasonDTO = {
+            ...this.proofPersistenceFailure.reason,
+            details: {
+              ...(this.proofPersistenceFailure.reason.details ?? {}),
+              ...(this.cleanupFailures > 0 ? { cleanupFailures: this.cleanupFailures } : {}),
+              ...(this.activeThreads.size > 0 ? { pendingProfiles: this.activeThreads.size } : {})
+            }
+          };
+          this.terminalIntent = reason;
+          this.terminalState = 'failed';
+          this.publish('failed', this.proofPersistenceFailure.message, { terminalReason: reason });
           this.lastSummary = {
             ...this.progress,
             state: 'failed',

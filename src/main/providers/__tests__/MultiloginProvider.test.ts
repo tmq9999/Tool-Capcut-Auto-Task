@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { MultiloginProvider } from '../MultiloginProvider';
 import { ProviderError } from '../ProviderError';
 import type { HttpClient, HttpRequest, HttpResponse } from '../HttpClient';
+import { ApiV3Launcher } from '../../services/capcut/launcher/ApiV3Launcher';
 
 class FakeHttpClient implements HttpClient {
   public requests: HttpRequest[] = [];
@@ -274,6 +275,72 @@ describe('MultiloginProvider stop and version', () => {
     const provider = new MultiloginProvider(http);
 
     await expect(provider.getQuickProfileStatuses('jwt-1')).resolves.toEqual([]);
+  });
+
+  it('does not confirm stop from missing states', async () => {
+    const http = new FakeHttpClient();
+    http.enqueue({ body: { status: { http_code: 200 }, data: {} } });
+    http.enqueue({ body: { status: { http_code: 200 }, data: {} } });
+    const launcher = new ApiV3Launcher(
+      { getAccessToken: async () => 'DEMO' },
+      new MultiloginProvider(http)
+    );
+    await expect(launcher.stop('profile-DEMO')).rejects.toMatchObject({
+      diagnostic: { phase: 'confirm-status' }
+    });
+    expect(http.requests).toHaveLength(2);
+  });
+
+  it('rejects malformed states payloads with ProviderError NETWORK_ERROR', async () => {
+    const malformedBodies = [
+      { status: { http_code: 200 }, data: {} },
+      { status: { http_code: 200 }, data: { states: null } },
+      { status: { http_code: 200 }, data: { states: [] } },
+      { status: { http_code: 200 }, data: { states: 'running' } },
+      { status: { http_code: 200 }, data: { states: { 'p-1': null } } },
+      { status: { http_code: 200 }, data: { states: { 'p-1': 'bad-row' } } },
+      { status: { http_code: 200 }, data: { states: { '': { profile_id: '' } } } },
+      { status: { http_code: 200 }, data: { states: { 'p-1': { profile_id: 'p-2' } } } },
+      { status: { http_code: 200 }, data: { states: { 'p-1': { profile_id: '' } } } },
+      { status: { http_code: 200 }, data: { states: { 'p-1': { status: '' } } } },
+      { status: { http_code: 200 }, data: { states: { 'p-1': { status: 123 } } } }
+    ];
+
+    for (const body of malformedBodies) {
+      const http = new FakeHttpClient();
+      http.enqueue({ body });
+      const provider = new MultiloginProvider(http);
+      await expect(provider.getQuickProfileStatuses('jwt-1')).rejects.toMatchObject({
+        name: 'ProviderError',
+        code: 'NETWORK_ERROR',
+        message: 'Multilogin trả về trạng thái profile không hợp lệ.',
+        serviceName: 'multilogin'
+      });
+    }
+  });
+
+  it('allows valid empty states and maps valid entries correctly', async () => {
+    const http = new FakeHttpClient();
+    http.enqueue({
+      body: {
+        status: { http_code: 200 },
+        data: {
+          states: {
+            'p-1': { profile_id: 'p-1', status: 'stopped' },
+            'p-2': { status: 'custom_status', port: 12345, browser_type: 'stealth' },
+            'p-3': {}
+          }
+        }
+      }
+    });
+    const provider = new MultiloginProvider(http);
+
+    const statuses = await provider.getQuickProfileStatuses('jwt-1');
+    expect(statuses).toEqual([
+      { profileId: 'p-1', status: 'stopped', port: null, browserType: 'mimic' },
+      { profileId: 'p-2', status: 'custom_status', port: 12345, browserType: 'stealth' },
+      { profileId: 'p-3', status: 'unknown', port: null, browserType: 'mimic' }
+    ]);
   });
 
   it('reads the launcher version for connectivity checks', async () => {

@@ -98,6 +98,9 @@ async function runWithFakeTimers<T>(fn: () => Promise<T>): Promise<T> {
       await vi.advanceTimersByTimeAsync(2000);
       await Promise.resolve();
     }
+    if (!finished) {
+      throw new Error('RUN_WITH_FAKE_TIMERS_EXHAUSTED');
+    }
     if (error) throw error;
     return result!;
   } finally {
@@ -198,9 +201,12 @@ describe('S01 — Onboarding survey handling before Upgrade (AC S01-A...F)', () 
           filter: (_filterOpts?: { has?: unknown }) => {
             return loc as unknown as Locator;
           },
+          locator: (subSelector: string) => {
+            return (page.locator as unknown as (s: string) => Locator)(subSelector);
+          },
           count: vi.fn(async () => {
             if (isUpgrade) return 1;
-            if (isMask) return surveyVisible ? 1 : 0;
+            if (isMask || isWrapper || isSkip) return surveyVisible ? 1 : 0;
             return 0;
           }),
           isVisible: vi.fn(async () => {
@@ -463,5 +469,37 @@ describe('S01 — Onboarding survey handling before Upgrade (AC S01-A...F)', () 
     expect(trace).not.toContain('upgrade-click');
     expect(result.status).toBe('unknown');
     expect(result.error).toContain('Không xác minh được trạng thái khảo sát onboarding');
+  });
+
+  it('post-Skip outer read rejection fails trial read as unknown without clicking upgrade or evaluating', async () => {
+    const trace: string[] = [];
+    const page = createStatefulTrialPage({
+      surveyInitiallyVisible: true,
+      skipClosesSurvey: true
+    }, trace);
+    const originalLocator = page.locator.bind(page);
+    let reads = 0;
+    const outer = originalLocator('.lv-modal-wrapper:visible');
+    outer.isVisible = vi.fn(async () => {
+      if (++reads === 1) return true;
+      throw new Error('POST_SKIP_READ_FAILED');
+    });
+    page.locator = vi.fn((sel: string) => {
+      if (sel.includes('.lv-modal-wrapper')) return outer as unknown as Locator;
+      return originalLocator(sel);
+    });
+    const signal = new AbortController().signal;
+    const result = await runWithFakeTimers(() => checkProTrial(
+      page,
+      {} as BrowserContext,
+      () => {},
+      createDirectUiInteraction(signal),
+      signal
+    ));
+    expect(reads).toBe(2);
+    expect(trace).toContain('skip-click');
+    expect(trace).not.toContain('upgrade-click');
+    expect(trace).not.toContain('evaluate');
+    expect(result.status).toBe('unknown');
   });
 });

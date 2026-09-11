@@ -96,10 +96,12 @@ export interface LaunchedProfile {
   profileId: string;
 }
 
+import type { StopOptions } from './ProfileStopError';
+
 export interface BrowserLauncher {
   readonly name: BrowserLauncherKind;
   launch(opts: LaunchOptions): Promise<LaunchedProfile>;
-  stop(profileId: string): Promise<void>;
+  stop(profileId: string, options?: StopOptions): Promise<void>;
 }
 
 /* ===========================================================================

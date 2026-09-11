@@ -6,6 +6,7 @@ import {
   isTerminalRunState,
   terminalAccountCount,
   parseHeadlessFlag,
+  parseMissionTransport,
   parseLiveCapcutOptions,
   LiveOptionError,
   LiveTimeoutError,
@@ -13,11 +14,6 @@ import {
   EXIT_CODES,
   resolveExitCode
 } from '../live-capcut-options.mjs';
-
-function parseMissionTransport(argv) {
-  const explicit = argv.find((arg) => arg.startsWith('--mission-transport='));
-  return explicit ? explicit.split('=')[1] : (argv.includes('--http-only') ? 'http-only' : 'ui');
-}
 
 describe('live CapCut harness legacy safety', () => {
   it('allows custom-domain verification without a billable flag', () => {
@@ -99,14 +95,13 @@ describe('live CapCut rollout options controller (Task 13 Step 1)', () => {
     ];
     const env = { VERIFY_GMAIL94_BUY: '1' };
 
+    const executeLiveRun = (argv, environment, onLaunch) => {
+      const options = parseLiveCapcutOptions(argv, environment);
+      return onLaunch(options);
+    };
+
     expect(() => {
-      try {
-        parseLiveCapcutOptions([...validStage1Argv, '--mystery=1'], env);
-      } catch (err) {
-        throw err;
-      } finally {
-        // side effects must not have been executed
-      }
+      executeLiveRun([...validStage1Argv, '--mystery=1'], env, sideEffectSpy);
     }).toThrow(LiveOptionError);
 
     expect(sideEffectSpy).not.toHaveBeenCalled();
@@ -297,7 +292,7 @@ describe('live CapCut rollout options controller (Task 13 Step 1)', () => {
 
   it('resume rejects email and all billable options', () => {
     const secretContent = 'secret-account-id-12345-do-not-leak';
-    const dummyFilePath = 'd:/dummy/account-ids.txt';
+    const dummyFilePath = `d:/dummy/${secretContent}.txt`;
 
     const validResumeArgv = [
       '--mode=resume',

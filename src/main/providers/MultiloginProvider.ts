@@ -97,7 +97,8 @@ export class MultiloginProvider {
       throw new ProviderError(
         statusToProviderCode(response.status),
         'Multilogin ' + action + ' thất bại (HTTP ' + response.status + ').',
-        MULTILOGIN_SERVICE_NAME
+        MULTILOGIN_SERVICE_NAME,
+        response.status
       );
     }
 
@@ -105,7 +106,8 @@ export class MultiloginProvider {
       throw new ProviderError(
         statusToProviderCode(innerCode),
         'Multilogin ' + action + ' thất bại: ' + (vendorMessage ?? 'HTTP ' + innerCode) + '.',
-        MULTILOGIN_SERVICE_NAME
+        MULTILOGIN_SERVICE_NAME,
+        innerCode
       );
     }
 
@@ -236,19 +238,62 @@ export class MultiloginProvider {
 
     const data = this.unwrap(response, 'đọc trạng thái quick profile');
     const states = asRecord(data.states);
-    if (!states) return [];
+    if (!states) {
+      throw new ProviderError(
+        'NETWORK_ERROR',
+        'Multilogin trả về trạng thái profile không hợp lệ.',
+        MULTILOGIN_SERVICE_NAME
+      );
+    }
 
-    return Object.entries(states).flatMap(([profileId, rawState]) => {
+    const result: MultiloginQuickProfileStatus[] = [];
+    for (const [profileId, rawState] of Object.entries(states)) {
+      if (!profileId || typeof profileId !== 'string' || !profileId.trim()) {
+        throw new ProviderError(
+          'NETWORK_ERROR',
+          'Multilogin trả về trạng thái profile không hợp lệ.',
+          MULTILOGIN_SERVICE_NAME
+        );
+      }
       const state = asRecord(rawState);
-      if (!state) return [];
-      return [{
-        profileId: readString(state, 'profile_id') ?? profileId,
-        status: readString(state, 'status') ?? 'unknown',
+      if (!state) {
+        throw new ProviderError(
+          'NETWORK_ERROR',
+          'Multilogin trả về trạng thái profile không hợp lệ.',
+          MULTILOGIN_SERVICE_NAME
+        );
+      }
+      const rawProfileId = state.profile_id;
+      if (rawProfileId !== undefined && rawProfileId !== null) {
+        if (typeof rawProfileId !== 'string' || !rawProfileId.trim() || rawProfileId !== profileId) {
+          throw new ProviderError(
+            'NETWORK_ERROR',
+            'Multilogin trả về trạng thái profile không hợp lệ.',
+            MULTILOGIN_SERVICE_NAME
+          );
+        }
+      }
+      const rawStatus = state.status;
+      if (rawStatus !== undefined && rawStatus !== null) {
+        if (typeof rawStatus !== 'string' || !rawStatus.trim()) {
+          throw new ProviderError(
+            'NETWORK_ERROR',
+            'Multilogin trả về trạng thái profile không hợp lệ.',
+            MULTILOGIN_SERVICE_NAME
+          );
+        }
+      }
+
+      result.push({
+        profileId,
+        status: (rawStatus as string | undefined) ?? 'unknown',
         // Some launcher builds only report the port through "message".
         port: readNumber(state, 'port') ?? readNumber(state, 'message'),
         browserType: readString(state, 'browser_type') ?? 'mimic'
-      }];
-    });
+      });
+    }
+
+    return result;
   }
 
   /** Launcher agent version. Used as the local-agent connectivity probe. */

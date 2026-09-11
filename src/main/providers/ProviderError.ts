@@ -7,13 +7,17 @@ export type ProviderErrorCode = SanitizedDiagnosticResult['code'];
  * credentials, tokens, or raw vendor payloads (AGENTS.md §13, §27).
  */
 export class ProviderError extends Error {
+  public readonly httpStatus?: number;
+
   constructor(
     public readonly code: ProviderErrorCode,
     message: string,
-    public readonly serviceName?: string
+    public readonly serviceName?: string,
+    httpStatus?: number
   ) {
     super(message);
     this.name = 'ProviderError';
+    this.httpStatus = httpStatus;
   }
 
   toDiagnostic(timestamp: string): SanitizedDiagnosticResult {

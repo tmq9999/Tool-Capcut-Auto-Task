@@ -1,6 +1,6 @@
-# CapCut Automation v3.0.2 — CapCut Free Credits Automation Desktop Client
+# CapCut Automation v3.0.3 — CapCut Free Credits Automation Desktop Client
 
-> Hệ thống tự động hóa Desktop chuyên nghiệp trên Windows: Tự động hóa đăng ký, đăng nhập tài khoản CapCut Web và cày trọn bộ 12 nhiệm vụ Free Credits (lên tới 2.060 credits/tài khoản) thông qua kiến trúc kép **CycleTLS Native Direct HTTP Execution** kết hợp Playwright Browser Session, kiểm tra ưu đãi dùng thử 7 ngày VIP, quản lý lease proxy xoay vòng KiotProxy và cấp phát email Just-In-Time (JIT) qua Gmail94/DongVanFB với **cơ chế đa luồng song song hoàn toàn cách ly** và **tự động polling chờ nạp lại kho mail khi hết hàng (chỉ dừng khi hết tiền)**.
+> Hệ thống tự động hóa Desktop chuyên nghiệp trên Windows: Tự động hóa đăng ký, đăng nhập tài khoản CapCut Web và cày trọn bộ 12 nhiệm vụ Free Credits (lên tới 2.060 credits/tài khoản) thông qua kiến trúc kép **CycleTLS Native Direct HTTP Execution** kết hợp Playwright Browser Session, kiểm tra ưu đãi dùng thử 7 ngày VIP, quản lý lease proxy xoay vòng KiotProxy và cấp phát email Just-In-Time (JIT) qua Gmail94/DongVanFB với **cơ chế đa luồng song song hoàn toàn cách ly**, **tự động polling chờ nạp lại kho mail khi hết hàng (chỉ dừng khi hết tiền)** và **bộ đối soát bằng chứng nhiệm vụ bền bỉ (Task Evidence Reconciliation Engine)**.
 
 [![Electron](https://img.shields.io/badge/Electron-35.0.0-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-19.1.0-61DAFB?logo=react&logoColor=black)](https://react.dev/)
@@ -12,9 +12,9 @@
 
 ## Tải bản phát hành live
 
-Release v3.0.2 (Polling chờ nạp lại kho email & Đa luồng song song) đã sẵn sàng trên Windows:
+Release v3.0.3 (Task Evidence Reconciliation & Robust Multi-threading) đã sẵn sàng trên Windows:
 
-- [Tải CapCut Automation-3.0.2-x64.exe](https://github.com/tmq9999/Tool-Capcut-Auto-Task/releases/download/v3.0.2-live/CapCut%20Automation-3.0.2-x64.exe)
+- [Tải CapCut Automation-3.0.3-x64.exe](https://github.com/tmq9999/Tool-Capcut-Auto-Task/releases/download/v3.0.3-live/CapCut%20Automation-3.0.3-x64.exe)
 - [Xem release notes và changelog chi tiết](CHANGELOG.md)
 
 ---
@@ -46,16 +46,20 @@ Release v3.0.2 (Polling chờ nạp lại kho email & Đa luồng song song) đ�
 
 ## 1. Giới thiệu tổng quan
 
-**CapCut Automation v3.0.2** là phiên bản tối ưu hóa cao cấp phát triển chuyên biệt cho môi trường Windows, phục vụ nhu cầu tự động hóa quy trình nuôi, tạo và làm nhiệm vụ nhận Free Credits cho tài khoản CapCut Web số lượng lớn với tốc độ cao, khả năng chạy đa luồng song song độc lập và đồng bộ giao diện thời gian thực.
+**CapCut Automation v3.0.3** là phiên bản tối ưu hóa cao cấp phát triển chuyên biệt cho môi trường Windows, phục vụ nhu cầu tự động hóa quy trình nuôi, tạo và làm nhiệm vụ nhận Free Credits cho tài khoản CapCut Web số lượng lớn với tốc độ cao, khả năng chạy đa luồng song song độc lập và đồng bộ giao diện thời gian thực.
 
-### Điểm đột phá của phiên bản 3.0.2:
+### Điểm đột phá của phiên bản 3.0.3:
+- **Hệ thống Đối soát Bằng chứng Nhiệm vụ Bền bỉ (Task Evidence Reconciliation Engine):** Triển khai kiến trúc Single Shared Proof Writer với cơ chế Iteration Owner (`iterationOwners`). Khi người dùng bấm dừng hoặc luồng bị hủy giữa chừng (`TaskEvidenceError`), toàn bộ các bằng chứng nhiệm vụ hợp lệ đã hoàn thành (`unsettledProofs`) lập tức được xả (drain) an toàn xuống cơ sở dữ liệu SQLite trước khi luồng dừng, đảm bảo không bao giờ mất mát credit hay trùng lặp nhiệm vụ.
+- **Cách ly Phân cấp Lỗi Lưu trữ Bằng chứng (Independent Proof Persistence Errors):** Tách biệt rạch ròi giữa lỗi lưu bằng chứng phụ trợ (`proofPersistenceFailure`) và lỗi kết thúc luồng chính (`terminalPersistenceFailure`), bảo toàn trọn vẹn chuỗi nguyên nhân gốc (`cause`) từ SQLite repository.
+- **Xác thực Trạng thái Profile Multilogin An toàn (Safe Profile Status & Stop Verification):** Kiểm tra chặt chẽ cấu trúc snapshot trạng thái profile từ Multilogin API, kiên quyết từ chối các định dạng sai lệch hoặc thiếu hụt `profile_id`, loại bỏ hoàn toàn rủi ro dừng nhầm profile hoặc báo cáo dừng ảo khi Multilogin agent bị trục trặc.
+- **Chuẩn hóa Thời gian ISO UTC Toàn diện (Canonical UTC Timestamp Settlement):** Chuẩn hóa tất cả mốc thời gian thành ISO UTC trước khi thực thi truy vấn đối soát CSDL, ngăn ngừa lỗi đối soát do sai khác định dạng múi giờ hệ thống.
+- **Bảo vệ Modal Tính năng & Vòng đời Dừng Profile (Feature Modal & Launcher Isolation):** Cơ chế `dismissOperationFeatureModal` tự động phát hiện và xử lý chính xác các modal che khuất giao diện, từ chối click mù khi gặp selector mơ hồ. Tách biệt vòng đời dừng CDP handle cục bộ và xác nhận từ remote API, cô lập observer/logger không làm gián đoạn việc giải phóng tài nguyên.
 - **Tự động Polling chờ nạp lại kho Email (Smart Stock Polling):** Khi nhà cung cấp Gmail94 hoặc DongVanFB tạm thời hết mail (HTTP 400 / OUT_OF_STOCK), hệ thống tự động giữ luồng và polling chờ nạp lại kho theo chu kỳ tùy chọn (10s, 15s, 30s, 60s) thay vì dừng phiên chạy. Hệ thống chỉ dừng phiên (`blocked`) khi thực sự hết số dư (`INSUFFICIENT_FUNDS`) hoặc sai API key.
 - **Đa luồng song song cách ly 100% (Isolated Multi-Threading):** Mỗi luồng chạy độc lập hoàn toàn với 1 Proxy riêng (KiotProxy hoặc Direct IP), 1 Profile Multilogin riêng, 1 Email riêng (JIT qua Gmail94/DongVanFB hoặc danh sách thủ công), 1 Mật khẩu riêng, bộ nhớ bằng chứng độc lập.
 - **Vòng đời nạp mới liên tục (Continuous Worker Renew Cycle):** Luồng nào hoàn thành nhiệm vụ trước sẽ tự động thu hồi tài nguyên và nạp ngay tài khoản mới mà không cần chờ các luồng còn lại, chạy liên tục tới khi đạt giới hạn email đã đặt.
-- **Đồng bộ Dashboard thời gian thực (Real-time UI Sync):** Khắc phục triệt để lỗi đóng băng hiển thị luồng cuối cùng; toàn bộ thông tin IP Proxy, Profile ID và bước làm nhiệm vụ được cập nhật tức thì.
+- **Đồng bộ Dashboard thời gian thực (Real-time UI Sync):** Khắc phục triệt để lỗi đóng băng hiển thị luồng; toàn bộ thông tin IP Proxy, Profile ID và bước làm nhiệm vụ được cập nhật tức thì.
 - **Động cơ HTTP Direct Tasks & CycleTLS Native Transport:** Gọi trực tiếp các API endpoints của CapCut qua cầu nối CycleTLS (Go native) chạy loopback, hoàn tất 12 nhiệm vụ chỉ trong vài giây.
 - **Tự động Claim Credits & Kiểm tra điều kiện Trial 7 ngày:** Tự động gửi lệnh nhận thưởng (`claim`) ngay sau khi hoàn thành nhiệm vụ và kiểm tra điều kiện dùng thử VIP 7 ngày (trial reader) trên trang nếu tài khoản đủ điều kiện.
-- **Hỗ trợ đầy đủ Direct Proxy & Trích xuất lỗi chi tiết:** Hỗ trợ đầy đủ scheme `http://` và `socks5://` (có/không có user:pass), phân tích chi tiết thông điệp lỗi từ nhà cung cấp email.
 
 ---
 

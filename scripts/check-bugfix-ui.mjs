@@ -87,6 +87,15 @@ async function run() {
     await exportBtn.click();
     await page.waitForSelector('text=Đang xuất...');
 
+    // Check that export request was captured and has expected format and fields
+    const exportReq = await page.evaluate(() => {
+      const el = document.querySelector('[data-testid="export-request-json"]');
+      return el ? JSON.parse(el.textContent || 'null') : null;
+    });
+    if (!exportReq || exportReq.format !== 'TXT' || !Array.isArray(exportReq.fields) || !exportReq.fields.includes('email')) {
+      throw new Error(`Export request was not properly captured with format and fields: ${JSON.stringify(exportReq)}`);
+    }
+
     // Reject deferred
     await clickControl('reject-export');
     await page.waitForSelector('text=Export worker failed');
@@ -95,7 +104,7 @@ async function run() {
       const btn = Array.from(document.querySelectorAll('button')).find((b) => b.textContent?.includes('Xuất '));
       return btn && !btn.hasAttribute('disabled');
     });
-    console.log('✓ Sequence 1 passed: Error visible and retry enabled');
+    console.log('✓ Sequence 1 passed: Export request captured and rejection handled with retry enabled');
 
     // Sequence 2: Export pending -> close -> reopen -> export-calls still 1; resolve old -> no old success path in new session
     console.log('Running Sequence 2: Latch and Session Isolation on Export');
@@ -202,7 +211,41 @@ async function run() {
       return document.querySelector('[role="status"]') !== null;
     });
     if (hasErrorOrSuccess) throw new Error('Canceled export should not display error or success status');
-    console.log('✓ Sequence 5 passed: Cancel export is neutral');
+    // Close export dialog
+    await clickControl('close-export');
+    await page.waitForSelector('text=Xuất dữ liệu tài khoản', { state: 'hidden' });
+
+    // Sequence 6: EditAccountDrawer displays legacy provider option and preserves it upon note edit
+    console.log('Running Sequence 6: Edit legacy provider preservation');
+    await clickControl('open-edit-legacy');
+    await page.waitForSelector('text=Chỉnh sửa tài khoản');
+
+    // Verify select contains "legacy-special-provider (legacy)"
+    const hasLegacyOption = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('option')).some((opt) =>
+        opt.textContent?.includes('legacy-special-provider (legacy)')
+      );
+    });
+    if (!hasLegacyOption) throw new Error('Edit drawer did not display legacy provider option');
+
+    // Update notes in input
+    const notesInput = page.locator('div:has(> label:has-text("Ghi chú")) input');
+    await notesInput.fill('updated note via test');
+
+    // Click submit "Lưu thay đổi"
+    const saveBtn = page.locator('button:has-text("Lưu thay đổi")');
+    await saveBtn.click();
+    await page.waitForSelector('text=Chỉnh sửa tài khoản', { state: 'hidden' });
+
+    // Verify saved account JSON has legacy provider preserved
+    const saved = await page.evaluate(() => {
+      const el = document.querySelector('[data-testid="saved-account-json"]');
+      return el ? JSON.parse(el.textContent || 'null') : null;
+    });
+    if (!saved || saved.provider !== 'legacy-special-provider' || saved.notes !== 'updated note via test') {
+      throw new Error(`Saved account did not preserve legacy provider: ${JSON.stringify(saved)}`);
+    }
+    console.log('✓ Sequence 6 passed: Legacy provider preserved on note edit');
 
     if (pageErrors.length > 0) {
       throw new Error(`Captured ${pageErrors.length} page errors during test!`);
@@ -210,14 +253,33 @@ async function run() {
 
     console.log('All mounted bugfix-ui test sequences passed successfully!');
   } finally {
+    const cleanupErrors = [];
     if (electronApp) {
-      await electronApp.close();
+      try {
+        await electronApp.close();
+      } catch (err) {
+        cleanupErrors.push(err);
+      }
     }
-    await server.close();
     try {
-      fs.rmSync(tempUserData, { recursive: true, force: true });
-    } catch {
-      // ignore
+      await server.close();
+    } catch (err) {
+      cleanupErrors.push(err);
+    }
+    try {
+      const resolvedTemp = path.resolve(tempUserData);
+      const tmpDir = path.resolve(os.tmpdir());
+      if (path.isAbsolute(resolvedTemp) && resolvedTemp.startsWith(tmpDir) && resolvedTemp !== tmpDir) {
+        fs.rmSync(resolvedTemp, { recursive: true, force: true });
+      } else {
+        throw new Error(`Invalid temp directory path for cleanup: ${resolvedTemp}`);
+      }
+    } catch (err) {
+      cleanupErrors.push(err);
+    }
+
+    if (cleanupErrors.length > 0) {
+      throw new Error(`Harness cleanup encountered ${cleanupErrors.length} errors: ${cleanupErrors.map(e => (e instanceof Error ? e.message : String(e))).join('; ')}`);
     }
   }
 }

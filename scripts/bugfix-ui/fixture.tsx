@@ -2,10 +2,12 @@ import React, { StrictMode, useState, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ExportDialog } from '@renderer/pages/Accounts/ExportDialog';
 import { TaskProgressDialog } from '@renderer/pages/Accounts/TaskProgressDialog';
+import { EditAccountDrawer } from '@renderer/pages/Accounts/EditAccountDrawer';
 import '@renderer/styles/index.css';
 import type { AccountExportRequestDTO } from '@shared/schemas/account-export.schema';
 import type { ExportOutcome } from '@renderer/pages/Accounts/accountsController';
 import type { AccountTasksResponseDTO } from '@shared/schemas/account-task.schema';
+import type { Account } from '@shared/types/account';
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -26,6 +28,7 @@ function createDeferred<T>(): Deferred<T> {
 export function FixtureApp() {
   const [exportOpen, setExportOpen] = useState(false);
   const [exportCalls, setExportCalls] = useState(0);
+  const [lastExportRequest, setLastExportRequest] = useState<AccountExportRequestDTO | null>(null);
   const currentExportDeferred = useRef<Deferred<ExportOutcome> | null>(null);
 
   const [taskOpen, setTaskOpen] = useState(false);
@@ -35,8 +38,21 @@ export function FixtureApp() {
   const currentTaskDeferred = useRef<Deferred<AccountTasksResponseDTO | null> | null>(null);
   const taskDeferredMap = useRef<Map<string, Deferred<AccountTasksResponseDTO | null>>>(new Map());
 
-  const handleExport = React.useCallback((_req: AccountExportRequestDTO): Promise<ExportOutcome> => {
+  const [editOpen, setEditOpen] = useState(false);
+  const [savedAccount, setSavedAccount] = useState<Account | null>(null);
+  const legacyAccount: Account = {
+    id: 'acc-legacy-1',
+    email: 'legacy@domain.test',
+    provider: 'legacy-special-provider',
+    status: 'active',
+    notes: 'initial note',
+    createdAt: '2026-09-01T00:00:00.000Z',
+    updatedAt: '2026-09-01T00:00:00.000Z'
+  };
+
+  const handleExport = React.useCallback((req: AccountExportRequestDTO): Promise<ExportOutcome> => {
     setExportCalls((c) => c + 1);
+    setLastExportRequest(req);
     const deferred = createDeferred<ExportOutcome>();
     currentExportDeferred.current = deferred;
     return deferred.promise;
@@ -204,10 +220,30 @@ export function FixtureApp() {
         </button>
       </div>
 
+      <div className="flex flex-wrap gap-2">
+        <button
+          data-testid="open-edit-legacy"
+          onClick={() => setEditOpen(true)}
+          className="px-2 py-1 bg-primary text-white rounded"
+        >
+          Open Edit Legacy
+        </button>
+        <button
+          data-testid="close-edit-legacy"
+          onClick={() => setEditOpen(false)}
+          className="px-2 py-1 bg-secondary text-white rounded"
+        >
+          Close Edit Legacy
+        </button>
+      </div>
+
       <div className="flex gap-4">
         <div>Export Calls: <span data-testid="export-calls">{exportCalls}</span></div>
         <div>Task Calls: <span data-testid="task-calls">{taskCalls}</span></div>
       </div>
+
+      <div data-testid="export-request-json" className="hidden">{JSON.stringify(lastExportRequest)}</div>
+      <div data-testid="saved-account-json" className="hidden">{JSON.stringify(savedAccount)}</div>
 
       <ExportDialog
         isOpen={exportOpen}
@@ -228,6 +264,16 @@ export function FixtureApp() {
         accountId={taskAccountId}
         email={taskEmail}
         loadTasks={handleLoadTasks}
+      />
+
+      <EditAccountDrawer
+        isOpen={editOpen}
+        onClose={() => setEditOpen(false)}
+        account={legacyAccount}
+        onSaveAccount={(updated) => {
+          setSavedAccount(updated);
+          setEditOpen(false);
+        }}
       />
     </div>
   );

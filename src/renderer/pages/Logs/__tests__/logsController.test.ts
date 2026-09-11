@@ -815,4 +815,106 @@ describe('T07-B: onReset sync in LogsController', () => {
     expect(bridge.resetListeners).toHaveLength(0);
     expect(bridge.unsubscribed).toBe(2);
   });
+
+  it('does not restore pre-reset SQL history without stream sequence', async () => {
+    type Reply = Awaited<ReturnType<typeof bridge.logs.list>>;
+    let resolve!: (r: Reply) => void;
+    let calls = 0;
+    bridge.logs.list = async () => {
+      if (++calls === 1) return new Promise<Reply>((done) => { resolve = done; });
+      return { success: true, data: { items: [], total: 0 } };
+    };
+    const controller = new LogsController(bridge);
+    controller.attach();
+    const loading = controller.load();
+    bridge.pushReset({ clearedThrough: 5 });
+    resolve({ success: true, data: { items: [log('old-db')], total: 1 } });
+    await loading;
+    await Promise.resolve();
+    expect(controller.getState().logs.map((row) => row.id)).not.toContain('old-db');
+    expect(calls).toBe(2);
+    controller.dispose();
+  });
+
+  it('F05 (AG05): Clear pending -> new reset 10 -> clear rejects: does not restore pre-clear rows and does not overwrite reset error', async () => {
+    let rejectClear!: (err: Error) => void;
+    bridge.logs.clear = () => new Promise((_, reject) => { rejectClear = reject; });
+
+    const controller = new LogsController(bridge);
+    controller.attach();
+    bridge.push(log('preclear-1', { streamSequence: 5 }));
+    expect(controller.getState().logs.map((r) => r.id)).toContain('preclear-1');
+
+    const clearing = controller.clear();
+
+    // Reset arrives while clear is in-flight
+    bridge.pushReset({ clearedThrough: 10 });
+    expect(controller.getState().logs.map((r) => r.id)).not.toContain('preclear-1');
+    expect(controller.getState().error).toBeNull();
+
+    // Clear operation fails
+    rejectClear(new Error('Disk write error'));
+    await clearing;
+
+    // Previous preclear rows MUST NOT be restored, error remains null
+    expect(controller.getState().logs.map((r) => r.id)).not.toContain('preclear-1');
+    expect(controller.getState().error).toBeNull();
+    controller.dispose();
+  });
+
+  it('F05 (AG05): duplicate reset event does not discard fresh post-reset unsequenced SQL', async () => {
+    const controller = new LogsController(bridge);
+    controller.attach();
+    bridge.pushReset({ clearedThrough: 5 });
+
+    bridge.rows = [log('fresh-sql')];
+    await controller.load();
+    expect(controller.getState().logs.map((r) => r.id)).toContain('fresh-sql');
+
+    // Duplicate reset with same or lower cutoff (5)
+    bridge.pushReset({ clearedThrough: 5 });
+    // Fresh unsequenced SQL should not be discarded
+    expect(controller.getState().logs.map((r) => r.id)).toContain('fresh-sql');
+    controller.dispose();
+  });
+
+  it('keeps fresh history between reset event and Clear reply', async () => {
+    let resolveClear!: (r: Awaited<ReturnType<ILogsBridge['logs']['clear']>>) => void;
+    bridge.logs.clear = vi.fn().mockImplementation(() => new Promise((r) => { resolveClear = r; }));
+    const controller = new LogsController(bridge);
+    controller.attach();
+    await controller.load();
+    const clearPromise = controller.clear();
+
+    // While clear is pending, a reset event arrives and database has fresh rows
+    bridge.rows = [log('fresh-sql', { message: 'fresh SQL log' })];
+    bridge.pushReset({ clearedThrough: 50 });
+    await vi.waitFor(() => {
+      expect(controller.getState().logs.map((l) => l.message)).toEqual(['fresh SQL log']);
+    });
+
+    // Clear reply arrives for the older/same epoch
+    resolveClear({ success: true, data: { success: true, clearedThrough: 50 } });
+    await clearPromise;
+    expect(controller.getState().logs.map((l) => l.message)).toEqual(['fresh SQL log']);
+    controller.dispose();
+  });
+
+  it('N07: old Clear failure after reset event does not wipe fresh history or publish old error', async () => {
+    let resolve!: (r: Awaited<ReturnType<ILogsBridge['logs']['clear']>>) => void;
+    bridge.logs.clear = () => new Promise((done) => { resolve = done; });
+    const controller = new LogsController(bridge);
+    controller.attach();
+    await controller.load();
+    const clearing = controller.clear();
+    bridge.rows = [log('fresh-db')];
+    bridge.pushReset({ clearedThrough: 5 });
+    await Promise.resolve();
+    expect(controller.getState().logs.map((row) => row.id)).toContain('fresh-db');
+    resolve({ success: false, error: { code: 'ERR_PERSISTENCE_FAILED', message: 'OLD_CLEAR' } });
+    expect(await clearing).toBe(false);
+    expect(controller.getState().logs.map((row) => row.id)).toContain('fresh-db');
+    expect(controller.getState().error).not.toBe('OLD_CLEAR');
+    controller.dispose();
+  });
 });

@@ -45,7 +45,7 @@ import type { Page } from 'playwright-core';
 
 import { dump, StepError } from './diag';
 import { clickIfVisible, foregroundPage } from './human';
-import { isDomReadTimeout } from './cancellation';
+import { boundedDomRead, isDomReadTimeout } from './cancellation';
 import type { AccountUiInteraction } from './types';
 import type { LogFn } from './login';
 
@@ -79,9 +79,60 @@ function rethrowInterrupted(error: unknown, signal: AbortSignal): void {
   if (isDomReadTimeout(error)) throw error;
 }
 
-/** Còn mask nào đang phủ trang không? */
-async function isSurveyBlocking(page: Page): Promise<boolean> {
-  return (await page.locator(BLOCKING_MASK).count().catch(() => 0)) > 0;
+function getSurveyWrapper(page: Page) {
+  const wrapper = page.locator('.lv-modal-wrapper');
+  if (typeof wrapper.filter === 'function') {
+    return wrapper
+      .filter({ has: page.locator(SURVEY_SKIP) })
+      .filter({ hasNot: page.locator('.operation-features-modal, .subscriptionModal') });
+  }
+  return page.locator('.lv-modal-wrapper');
+}
+
+/** Còn mask khảo sát nào đang phủ trang không? (Chỉ đếm khi có mask và survey skip button thật thuộc survey wrapper) */
+async function isSurveyBlocking(page: Page, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
+  const maskCount = await boundedDomRead(
+    () => page.locator(BLOCKING_MASK).count(),
+    'overlay:survey-mask-count',
+    3000,
+    signal
+  ).catch((error: unknown) => {
+    signal?.throwIfAborted();
+    if (isDomReadTimeout(error)) throw error;
+    return 0;
+  });
+  if (maskCount === 0) return false;
+
+  const surveyWrapper = getSurveyWrapper(page).first();
+  const wrapperCount = await boundedDomRead(
+    () => surveyWrapper.count(),
+    'overlay:survey-wrapper-count',
+    2000,
+    signal
+  ).catch((error: unknown) => {
+    signal?.throwIfAborted();
+    if (isDomReadTimeout(error)) throw error;
+    return 0;
+  });
+  if (wrapperCount === 0) return false;
+
+  const skip = typeof surveyWrapper.locator === 'function'
+    ? surveyWrapper.locator(SURVEY_SKIP).first()
+    : page.locator(SURVEY_SKIP).first();
+
+  const skipVisible = await boundedDomRead(
+    () => skip.isVisible({ timeout: 1000 }),
+    'overlay:survey-skip-visible',
+    1500,
+    signal
+  ).catch((error: unknown) => {
+    signal?.throwIfAborted();
+    if (isDomReadTimeout(error)) throw error;
+    return false;
+  });
+
+  return skipVisible;
 }
 
 /**
@@ -111,10 +162,24 @@ export async function skipOnboardingSurvey(
   };
 
   for (let step = 0; step < maxSteps; step += 1) {
-    if (!(await isSurveyBlocking(page))) return succeed();
+    if (!(await isSurveyBlocking(page, signal))) return succeed();
 
-    const skip = page.locator(SURVEY_SKIP).first();
-    if (!(await skip.isVisible({ timeout: 3000 }).catch(() => false))) break;
+    const surveyWrapper = getSurveyWrapper(page).first();
+    const skip = typeof surveyWrapper.locator === 'function'
+      ? surveyWrapper.locator(SURVEY_SKIP).first()
+      : page.locator(SURVEY_SKIP).first();
+
+    const skipVisible = await boundedDomRead(
+      () => skip.isVisible({ timeout: 3000 }),
+      'overlay:survey-skip-visible',
+      4000,
+      signal
+    ).catch((error: unknown) => {
+      signal.throwIfAborted();
+      if (isDomReadTimeout(error)) throw error;
+      return false;
+    });
+    if (!skipVisible) break;
 
     const clicked = await foregroundPage(
       page,
@@ -131,14 +196,28 @@ export async function skipOnboardingSurvey(
 
     // Bước bản cũ thiếu: chờ mask thật sự biến mất. Mask đổi `display` nên nó
     // rời khỏi selector — `detached` bắt được cả xoá node và đổi style.
-    await page
-      .locator(BLOCKING_MASK)
-      .first()
-      .waitFor({ state: 'detached', timeout: 4000 })
-      .catch((error: unknown) => { rethrowInterrupted(error, signal); });
+    await boundedDomRead(
+      async () => {
+        try {
+          await page.locator(BLOCKING_MASK).first().waitFor({
+            state: 'detached',
+            timeout: 4000,
+          });
+          return true;
+        } catch (error) {
+          signal.throwIfAborted();
+          if (isDomReadTimeout(error)) throw error;
+          if (error instanceof Error && error.name === 'TimeoutError') return false;
+          throw error;
+        }
+      },
+      'overlay:survey-mask-detached',
+      6000,
+      signal
+    );
   }
 
-  if (!(await isSurveyBlocking(page))) return succeed();
+  if (!(await isSurveyBlocking(page, signal))) return succeed();
 
   const shot = await dump(page, 'khao_sat_onboarding_khong_tat');
   log(
@@ -146,6 +225,265 @@ export async function skipOnboardingSurvey(
       (shot ? ` (hiện trường: ${shot})` : '')
   );
   return false;
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * 1.5. MODAL GIỚI THIỆU TÍNH NĂNG ("Got it")
+ * ---------------------------------------------------------------------------
+ * Gặp sau khi vào workspace / homepage: modal `.operation-features-modal`
+ * có nút "Got it", không có Skip. Tách biệt hoàn toàn khỏi khảo sát onboarding
+ * để không ghi nhận nhầm là khảo sát thất bại.
+ */
+const FEATURE_MODAL_CONTAINER = '.operation-features-modal';
+const FEATURE_GOT_IT_BUTTON =
+  'button:has-text("Got it"), div[role="button"]:text-is("Got it"), [class*="gotIt"], button:text-is("Got it")';
+const FEATURE_CLOSE_SELECTOR =
+  '.lv-modal-close-icon, [aria-label="Close"], button[aria-label="Close"], [role="button"][aria-label="Close"]';
+
+function getFeatureModalWrappers(page: Page) {
+  const wrapper = page.locator('.lv-modal-wrapper');
+  if (typeof wrapper.filter === 'function') {
+    return wrapper.filter({ has: page.locator(FEATURE_MODAL_CONTAINER) });
+  }
+  return page.locator(FEATURE_MODAL_CONTAINER);
+}
+
+export async function dismissOperationFeatureModal(
+  page: Page,
+  log: LogFn,
+  ui: AccountUiInteraction,
+  signal: AbortSignal
+): Promise<boolean> {
+  requireInteraction(ui, signal);
+  const wrappers = getFeatureModalWrappers(page);
+  const count = await boundedDomRead(
+    () => wrappers.count(),
+    'overlay:feature-modal-count',
+    2000,
+    signal
+  );
+
+  const visibleOwners: ReturnType<Page['locator']>[] = [];
+
+  if (count > 0) {
+    for (let i = 0; i < count; i += 1) {
+      const candidate = typeof wrappers.nth === 'function' ? wrappers.nth(i) : (i === 0 ? wrappers.first() : null);
+      if (!candidate) break;
+      const visible = await boundedDomRead(
+        () => candidate.isVisible({ timeout: 1000 }),
+        'overlay:feature-modal-present',
+        2000,
+        signal
+      );
+      if (visible) {
+        visibleOwners.push(candidate);
+      }
+    }
+  }
+
+  if (visibleOwners.length === 0) {
+    const directWrappers = page.locator(FEATURE_MODAL_CONTAINER);
+    const directCount = await boundedDomRead(
+      () => directWrappers.count(),
+      'overlay:feature-modal-direct-count',
+      2000,
+      signal
+    );
+
+    if (directCount > 0) {
+      for (let i = 0; i < directCount; i += 1) {
+        const candidate = typeof directWrappers.nth === 'function' ? directWrappers.nth(i) : (i === 0 ? directWrappers.first() : null);
+        if (!candidate) break;
+        const visible = await boundedDomRead(
+          () => candidate.isVisible({ timeout: 1000 }),
+          'overlay:feature-modal-direct-present',
+          2000,
+          signal
+        );
+        if (visible) {
+          visibleOwners.push(candidate);
+        }
+      }
+    }
+  }
+
+  if (visibleOwners.length === 0) return true;
+
+  if (visibleOwners.length > 1) {
+    throw new Error('FEATURE_MODAL_OWNER_AMBIGUOUS: Multiple visible feature modal wrappers found');
+  }
+
+  const targetWrapper = visibleOwners[0];
+
+  // 1. Ưu tiên tìm accessible Close button thuộc chính wrapper
+  let closeBtn: ReturnType<Page['locator']> | null = null;
+  let closeType: 'close' | 'got-it' = 'close';
+
+  if (typeof targetWrapper.getByRole === 'function') {
+    const accessibleClose = targetWrapper.getByRole('button', { name: 'Close', exact: true });
+    let accessibleCount = 0;
+    if (typeof accessibleClose.count === 'function') {
+      accessibleCount = await boundedDomRead(
+        () => accessibleClose.count(),
+        'overlay:feature-modal-close-count',
+        2000,
+        signal
+      );
+    } else {
+      const isVis = await boundedDomRead(
+        () => accessibleClose.isVisible({ timeout: 1000 }),
+        'overlay:feature-modal-close-visible',
+        2000,
+        signal
+      );
+      accessibleCount = isVis ? 1 : 0;
+    }
+
+    if (accessibleCount > 1) {
+      throw new Error('FEATURE_MODAL_CLOSE_AMBIGUOUS: Multiple accessible Close buttons found');
+    }
+
+    if (accessibleCount === 1) {
+      const hasClose = await boundedDomRead(
+        () => accessibleClose.isVisible({ timeout: 1000 }),
+        'overlay:feature-modal-close-visible',
+        2000,
+        signal
+      );
+      if (hasClose) {
+        closeBtn = accessibleClose;
+        closeType = 'close';
+      }
+    }
+  }
+
+  if (!closeBtn && typeof targetWrapper.locator === 'function') {
+    const closeCandidates = targetWrapper.locator(FEATURE_CLOSE_SELECTOR);
+    const candidateCount = typeof closeCandidates.count === 'function'
+      ? await boundedDomRead(
+          () => closeCandidates.count(),
+          'overlay:feature-modal-close-icon-count',
+          2000,
+          signal
+        )
+      : 1;
+
+    const visibleIcons: ReturnType<Page['locator']>[] = [];
+    for (let i = 0; i < candidateCount; i += 1) {
+      const candidate = typeof closeCandidates.nth === 'function' ? closeCandidates.nth(i) : closeCandidates.first();
+      const hasCloseIcon = await boundedDomRead(
+        () => candidate.isVisible({ timeout: 1000 }),
+        'overlay:feature-modal-close-icon-visible',
+        2000,
+        signal
+      );
+      if (hasCloseIcon) {
+        visibleIcons.push(candidate);
+      }
+    }
+
+    if (visibleIcons.length > 1) {
+      throw new Error('FEATURE_MODAL_CLOSE_AMBIGUOUS: Multiple visible close icon controls found');
+    }
+    if (visibleIcons.length === 1) {
+      closeBtn = visibleIcons[0];
+      closeType = 'close';
+    }
+  }
+
+  // 2. Chỉ hỗ trợ biến thể "Got it" nếu chính wrapper này chứa "Got it" (không dùng fallback ra ngoài)
+  if (!closeBtn && typeof targetWrapper.locator === 'function') {
+    const gotItCandidates = targetWrapper.locator(FEATURE_GOT_IT_BUTTON);
+    const candidateCount = typeof gotItCandidates.count === 'function'
+      ? await boundedDomRead(
+          () => gotItCandidates.count(),
+          'overlay:feature-modal-got-it-count',
+          2000,
+          signal
+        )
+      : 1;
+
+    const visibleGotIt: ReturnType<Page['locator']>[] = [];
+    for (let i = 0; i < candidateCount; i += 1) {
+      const candidate = typeof gotItCandidates.nth === 'function' ? gotItCandidates.nth(i) : gotItCandidates.first();
+      const hasGotIt = await boundedDomRead(
+        () => candidate.isVisible({ timeout: 1000 }),
+        'overlay:feature-modal-got-it-visible',
+        2000,
+        signal
+      );
+      if (hasGotIt) {
+        visibleGotIt.push(candidate);
+      }
+    }
+
+    if (visibleGotIt.length > 1) {
+      throw new Error('FEATURE_MODAL_CONTROL_AMBIGUOUS: Multiple visible Got it buttons found');
+    }
+    if (visibleGotIt.length === 1) {
+      closeBtn = visibleGotIt[0];
+      closeType = 'got-it';
+    }
+  }
+
+  if (!closeBtn) {
+    const shot = await dump(page, 'modal_tinh_nang_khong_thay_nut');
+    log('   ⚠️  Modal tính năng đang mở nhưng không thấy nút Close hoặc Got it' + (shot ? ` (hiện trường: ${shot})` : ''));
+    return false;
+  }
+
+  const clicked = await foregroundPage(
+    page,
+    { signal, stage: closeType === 'close' ? 'overlay:feature-modal-close' : 'overlay:feature-modal-got-it', ui },
+    () => closeBtn.click({ timeout: 5000 })
+  )
+    .then(() => true)
+    .catch((error: unknown) => {
+      rethrowInterrupted(error, signal);
+      return false;
+    });
+
+  if (!clicked) return false;
+
+  await boundedDomRead(
+    async () => {
+      try {
+        await targetWrapper.waitFor({
+          state: 'hidden',
+          timeout: 4000,
+        });
+        return true;
+      } catch (error) {
+        signal.throwIfAborted();
+        if (isDomReadTimeout(error)) throw error;
+        if (error instanceof Error && error.name === 'TimeoutError') return false;
+        throw error;
+      }
+    },
+    'overlay:feature-modal-hidden',
+    6000,
+    signal
+  );
+
+  const still = await boundedDomRead(
+    () => targetWrapper.isVisible({ timeout: 500 }),
+    'overlay:feature-modal-still-visible',
+    1500,
+    signal
+  );
+
+  if (still) {
+    const shot = await dump(page, 'modal_tinh_nang_khong_dong');
+    log(
+      `   ⚠️  Modal tính năng ("${closeType === 'close' ? 'Close' : 'Got it'}") VẪN MỞ sau khi bấm — có thể che nhiệm vụ` +
+        (shot ? ` (hiện trường: ${shot})` : '')
+    );
+    return false;
+  }
+
+  log(`   → Đã đóng modal giới thiệu tính năng ("${closeType === 'close' ? 'Close' : 'Got it'}")`);
+  return true;
 }
 
 /**
@@ -289,6 +627,7 @@ export async function ensurePageUsable(
   if ((await page.locator(BLOCKING_MASK).count().catch(() => 0)) === 0) return true;
 
   await skipOnboardingSurvey(page, log, ui, signal);
+  await dismissOperationFeatureModal(page, log, ui, signal);
   await closeBlockingPricingModal(page, log, ui, signal);
   await closePageErrorModal(page, log, ui, signal);
 

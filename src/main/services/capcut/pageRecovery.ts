@@ -1,32 +1,62 @@
 import type { BrowserContext, Page } from 'playwright-core';
 import { URLS } from './urls';
 
+export interface PrimaryPageResolverOptions {
+  isExpectedClose?: () => boolean;
+}
+
 export class PrimaryPageResolver {
   private current: Page;
   private replacementsCreated = 0;
-  private readonly watched = new WeakSet<Page>();
+  private readonly watched = new Set<Page>();
   private readonly unusable = new WeakSet<Page>();
+  private readonly listeners = new Map<Page, { onClose: () => void; onCrash: () => void }>();
+  private disposed = false;
 
   constructor(
     private readonly context: BrowserContext,
     initialPage: Page,
-    private readonly log: (message: string) => void
+    private readonly log: (message: string) => void,
+    private readonly options?: PrimaryPageResolverOptions
   ) {
     this.current = initialPage;
     this.watch(initialPage);
   }
 
   private watch(page: Page): void {
-    if (this.watched.has(page)) return;
+    if (this.disposed || this.watched.has(page)) return;
     this.watched.add(page);
-    page.on('close', () => {
+
+    const onClose = (): void => {
       this.unusable.add(page);
+      if (this.disposed || this.options?.isExpectedClose?.()) {
+        return;
+      }
       this.log('Tab CapCut chính vừa đóng.');
-    });
-    page.on('crash', () => {
+    };
+
+    const onCrash = (): void => {
       this.unusable.add(page);
+      if (this.disposed) return;
       this.log('Tab CapCut chính vừa crash.');
-    });
+    };
+
+    this.listeners.set(page, { onClose, onCrash });
+    page.on('close', onClose);
+    page.on('crash', onCrash);
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    for (const [page, { onClose, onCrash }] of this.listeners.entries()) {
+      try {
+        page.off('close', onClose);
+        page.off('crash', onCrash);
+      } catch {
+        // ignore if page already closed or off not supported
+      }
+    }
+    this.listeners.clear();
   }
 
   private isUsableCapcutPage(page: Page): boolean {

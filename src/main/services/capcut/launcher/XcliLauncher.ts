@@ -41,6 +41,7 @@ import {
   type LaunchedProfile,
   type LaunchOptions
 } from './BrowserLauncher';
+import type { StopOptions } from './ProfileStopError';
 
 const execFileAsync = promisify(execFile);
 
@@ -261,7 +262,7 @@ export class XcliLauncher implements BrowserLauncher {
    *
    * App luôn là "đóng thật": không có nhánh giữ profile cho lượt sau.
    */
-  async stop(profileId: string): Promise<void> {
+  async stop(profileId: string, _options?: StopOptions): Promise<void> {
     const existing = this.stopping.get(profileId);
     if (existing) return existing;
 

@@ -314,4 +314,67 @@ describe('MultiloginAuthService.getAccessToken', () => {
     expect(pendingError).toMatchObject({ code: 'CONFIG_ERROR' });
     expect(api.signInCalls).toHaveLength(0);
   });
+
+  it('CAS (§F14.5): invalidateSession while flight is pending creates new flight, old finally does not clear new inFlight, and old resolved session cannot overwrite new flight', async () => {
+    storeAuth({ mode: 'credentials', email: 'user@example.test', password: 'password-1' });
+
+    let resolveFlight1!: (tokens: MultiloginTokens) => void;
+    let resolveFlight2!: (tokens: MultiloginTokens) => void;
+
+    let signInCallCount = 0;
+    api.signIn = async () => {
+      signInCallCount += 1;
+      if (signInCallCount === 1) {
+        return new Promise<MultiloginTokens>((done) => { resolveFlight1 = done; });
+      }
+      return new Promise<MultiloginTokens>((done) => { resolveFlight2 = done; });
+    };
+
+    const service = createService();
+
+    // Flight 1 starts
+    const flight1Promise = service.getAccessToken();
+    expect(signInCallCount).toBe(1);
+
+    // Invalidate while flight 1 is pending
+    service.invalidateSession();
+
+    // Flight 2 starts
+    const flight2Promise = service.getAccessToken();
+    expect(signInCallCount).toBe(2);
+
+    // Calling getAccessToken again while flight 2 is pending shares flight 2
+    const flight2SharedPromise = service.getAccessToken();
+    expect(signInCallCount).toBe(2);
+
+    // Flight 1 now completes late
+    resolveFlight1({ token: 'jwt-flight-1', refreshToken: 'refresh-flight-1' });
+
+    // Flight 1 should reject because its snapshot generation was invalidated by CAS
+    await expect(flight1Promise).rejects.toMatchObject({
+      code: 'CONFIG_ERROR',
+      message: expect.stringContaining('thay đổi trong khi xử lý')
+    });
+
+    // Old flight 1's finally must NOT have cleared the newer flight 2 inFlight
+    // Calling getAccessToken again should STILL reuse flight 2
+    const flight2StillSharedPromise = service.getAccessToken();
+    expect(signInCallCount).toBe(2);
+
+    // Resolve flight 2
+    resolveFlight2({ token: 'jwt-flight-2', refreshToken: 'refresh-flight-2' });
+
+    await expect(flight2Promise).resolves.toBe('jwt-flight-2');
+    await expect(flight2SharedPromise).resolves.toBe('jwt-flight-2');
+    await expect(flight2StillSharedPromise).resolves.toBe('jwt-flight-2');
+
+    // Verify stored session in DB came from flight 2, NOT flight 1
+    const stored = credRepo.getCredential('multilogin');
+    expect(stored).not.toBeNull();
+    const parsed = JSON.parse(vault.decrypt(stored!.encryptedCredentials));
+    expect(parsed.session).toMatchObject({
+      jwtToken: 'jwt-flight-2',
+      refreshToken: 'refresh-flight-2'
+    });
+  });
 });

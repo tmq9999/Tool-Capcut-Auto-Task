@@ -28,6 +28,11 @@ function fakePage(initialUrl: string, initiallyClosed: boolean): TestPage {
       listeners.set(event, [...(listeners.get(event) ?? []), listener]);
       return page;
     },
+    off: (event: string, listener: () => void) => {
+      const list = listeners.get(event) ?? [];
+      listeners.set(event, list.filter((l) => l !== listener));
+      return page;
+    },
     emitTest: (event: 'close' | 'crash') => {
       for (const listener of listeners.get(event) ?? []) listener();
     },
@@ -94,5 +99,75 @@ describe('PrimaryPageResolver', () => {
     expect(replacement).not.toBe(crashed);
     expect(context.newPageCalls).toBe(1);
     expect(replacement.gotoCalls).toEqual([URLS.main]);
+  });
+
+  it('P04: suppresses close warning when isExpectedClose returns true but still marks page unusable', async () => {
+    const logs: string[] = [];
+    const initial = fakePage('https://www.capcut.com/my-edit', false);
+    const backup = fakePage('https://www.capcut.com/my-edit', false);
+    const context = fakeContext([initial, backup]);
+    const stopRequested = true;
+    const resolver = new PrimaryPageResolver(
+      context,
+      initial,
+      (msg) => logs.push(msg),
+      { isExpectedClose: () => stopRequested }
+    );
+
+    initial.emitTest('close');
+    expect(logs).toEqual([]);
+
+    // Page must still be marked unusable, so resolving gives backup page
+    const next = await resolver.resolve('next');
+    expect(next).toBe(backup);
+  });
+
+  it('P04: logs close warning when isExpectedClose returns false', async () => {
+    const logs: string[] = [];
+    const initial = fakePage('https://www.capcut.com/my-edit', false);
+    const context = fakeContext([initial]);
+    const resolver = new PrimaryPageResolver(
+      context,
+      initial,
+      (msg) => logs.push(msg),
+      { isExpectedClose: () => false }
+    );
+
+    initial.emitTest('close');
+    expect(logs).toEqual(['Tab CapCut chính vừa đóng.']);
+    expect(resolver).toBeDefined();
+  });
+
+  it('P04: always logs crash warning even if isExpectedClose returns true', async () => {
+    const logs: string[] = [];
+    const initial = fakePage('https://www.capcut.com/my-edit', false);
+    const context = fakeContext([initial]);
+    const resolver = new PrimaryPageResolver(
+      context,
+      initial,
+      (msg) => logs.push(msg),
+      { isExpectedClose: () => true }
+    );
+
+    initial.emitTest('crash');
+    expect(logs).toEqual(['Tab CapCut chính vừa crash.']);
+    expect(resolver).toBeDefined();
+  });
+
+  it('P04: dispose detaches listeners and prevents subsequent warnings', async () => {
+    const logs: string[] = [];
+    const initial = fakePage('https://www.capcut.com/my-edit', false);
+    const context = fakeContext([initial]);
+    const resolver = new PrimaryPageResolver(
+      context,
+      initial,
+      (msg) => logs.push(msg),
+      { isExpectedClose: () => false }
+    );
+
+    resolver.dispose();
+    initial.emitTest('close');
+    initial.emitTest('crash');
+    expect(logs).toEqual([]);
   });
 });

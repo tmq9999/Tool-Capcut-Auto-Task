@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Browser } from 'playwright-core';
+import { ProviderError } from '../../../../providers/ProviderError';
 import { ApiV3Launcher } from '../ApiV3Launcher';
 import { XcliLauncher } from '../XcliLauncher';
 import { attachOverCdp } from '../BrowserLauncher';
+import type { ProfileStopObservation } from '../ProfileStopError';
 import { checkRendererHealth } from '../../rendererHealth';
 vi.mock('../../rendererHealth', () => ({ checkRendererHealth: vi.fn(async () => ({})) }));
 
@@ -121,6 +123,28 @@ describe('launcher stop ownership', () => {
     expect(browser.close).toHaveBeenCalledTimes(1);
     expect(logs.join('\n')).not.toContain('must-not-leak');
   });
+
+  it.each(['stop-request', 'confirm-status'] as const)(
+    'retains profile-stop phase %s',
+    async (phase) => {
+      const api = apiFixture();
+      const browser = cdpFixture();
+      const cause = new ProviderError('AUTH_ERROR', 'DEMO auth failure', 'multilogin');
+      const launcher = new ApiV3Launcher(
+        { getAccessToken: async () => 'DEMO' },
+        api
+      );
+      await launcher.launch({});
+      if (phase === 'stop-request') api.stopProfile.mockRejectedValueOnce(cause);
+      else api.getQuickProfileStatuses.mockRejectedValueOnce(cause);
+      await expect(launcher.stop(profileId)).rejects.toMatchObject({
+        diagnostic: { phase, kind: 'provider-error', providerCode: 'AUTH_ERROR' },
+        cause
+      });
+      expect(api.stopProfile).toHaveBeenCalledTimes(1);
+      expect(browser.close).not.toHaveBeenCalled();
+    }
+  );
 
   it('coalesces concurrent stop calls into one vendor request', async () => {
     const api = apiFixture();
@@ -263,5 +287,65 @@ describe('launcher stop ownership', () => {
     await stopping;
     expect(settledBeforeStatus).toBe(false);
     expect(reads).toBe(3);
+  });
+
+  it('V06: preserves original stop failure cause and phase even when log reporter throws', async () => {
+    const api = apiFixture();
+    const cause = new ProviderError('AUTH_ERROR', 'DEMO', 'multilogin', 401);
+    api.stopProfile.mockRejectedValueOnce(cause);
+    const launcher = new ApiV3Launcher(
+      { getAccessToken: async () => 'DEMO' },
+      api,
+      { log: () => { throw new Error('REPORTER_FIXTURE'); } }
+    );
+    await expect(launcher.stop(profileId)).rejects.toMatchObject({
+      cause,
+      diagnostic: { phase: 'stop-request', providerCode: 'AUTH_ERROR', httpStatus: 401 }
+    });
+  });
+
+  it('V06: does not fail confirmed stop when success log reporter throws', async () => {
+    const api = apiFixture();
+    const launcher = new ApiV3Launcher(
+      { getAccessToken: async () => 'DEMO' },
+      api,
+      { log: () => { throw new Error('REPORTER_SUCCESS_FIXTURE'); } }
+    );
+    await expect(launcher.stop(profileId)).resolves.toBeUndefined();
+  });
+
+  it('V06: emits stop observations and marks remoteConfirmed true on CDP failure while retaining attached handle', async () => {
+    const api = apiFixture();
+    const browser = cdpFixture();
+    browser.close.mockRejectedValueOnce(new Error('CDP_CLOSE_FAILED'));
+    const observations: ProfileStopObservation[] = [];
+
+    const launcher = new ApiV3Launcher({ getAccessToken: async () => 'DEMO' }, api);
+    await launcher.launch({ headless: true, onProfileStarted: () => {} });
+
+    await expect(launcher.stop(profileId, {
+      onPhase: (obs) => observations.push({ ...obs })
+    })).rejects.toMatchObject({
+      diagnostic: { phase: 'cdp-close', remoteConfirmed: true }
+    });
+
+    expect(observations.map((o) => o.phase)).toEqual(['token', 'stop-request', 'confirm-status', 'cdp-close']);
+    expect(observations.find((o) => o.phase === 'cdp-close')?.remoteConfirmed).toBe(true);
+    expect((launcher as unknown as { attached: Set<string> }).attached.has(profileId)).toBe(true);
+  });
+
+  it('V06: coalesces concurrent stop calls to 1 vendor call and notifies observer of current phase', async () => {
+    const api = apiFixture();
+    const launcher = new ApiV3Launcher({ getAccessToken: async () => 'DEMO' }, api);
+    const obs1: ProfileStopObservation[] = [];
+    const obs2: ProfileStopObservation[] = [];
+
+    const stop1 = launcher.stop(profileId, { onPhase: (o) => obs1.push({ ...o }) });
+    const stop2 = launcher.stop(profileId, { onPhase: (o) => obs2.push({ ...o }) });
+
+    await Promise.all([stop1, stop2]);
+    expect(api.stopProfile).toHaveBeenCalledTimes(1);
+    expect(obs1.length).toBeGreaterThan(0);
+    expect(obs2.length).toBeGreaterThan(0);
   });
 });

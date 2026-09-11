@@ -535,6 +535,126 @@ describe('Repository Layer Behavior Suite (Task 6 RED)', () => {
       expect(taskCount.count).toBe(1);
       expect(repo.getAccountById('acc-rollback')).not.toBeNull();
     });
+
+    it('T15 / §F14.5: delete accountA cleans all 4 task tables while accountB and purchased email consumed_at/finance remain intact; rollback restores all tables', () => {
+      if (!db) throw new Error('DB is not initialized');
+      const repo = new AccountRepository(db);
+
+      // 1. Create account A and account B
+      repo.createAccount({ id: 'acc-A', email: 'a@test.com', emailProvider: 'gmail94' });
+      repo.createAccount({ id: 'acc-B', email: 'b@test.com', emailProvider: 'gmail94' });
+
+      // Insert all 4 task tables for acc-A
+      db.prepare(`
+        INSERT INTO account_tasks (account_id, task_key, title, reward, status, op_id, proved_at, updated_at)
+        VALUES ('acc-A', 'task_A', 'Task A', 20, 4, 'op-A', '2026-09-10T00:00:00.000Z', datetime('now'))
+      `).run();
+      db.prepare(`
+        INSERT INTO account_task_receipts (account_id, run_id, session_alias, observed_at, required_after, server_total, server_done, is_fresh, is_final, updated_at)
+        VALUES ('acc-A', 'run-A', 'alias-A', '2026-09-10T00:00:00.000Z', '2026-09-10T00:00:00.000Z', 1, 1, 1, 1, datetime('now'))
+      `).run();
+      db.prepare(`
+        INSERT INTO account_task_receipt_items (account_id, task_key, status, ordinal)
+        VALUES ('acc-A', 'task_A', 4, 1)
+      `).run();
+      db.prepare(`
+        INSERT INTO account_unsettled_proofs (account_id, run_id, task_key, op_id, proved_at)
+        VALUES ('acc-A', 'run-A', 'task_A', 'op-A', '2026-09-10T00:00:00.000Z')
+      `).run();
+
+      // Insert all 4 task tables for acc-B
+      db.prepare(`
+        INSERT INTO account_tasks (account_id, task_key, title, reward, status, op_id, proved_at, updated_at)
+        VALUES ('acc-B', 'task_B', 'Task B', 30, 4, 'op-B', '2026-09-10T00:00:00.000Z', datetime('now'))
+      `).run();
+      db.prepare(`
+        INSERT INTO account_task_receipts (account_id, run_id, session_alias, observed_at, required_after, server_total, server_done, is_fresh, is_final, updated_at)
+        VALUES ('acc-B', 'run-B', 'alias-B', '2026-09-10T00:00:00.000Z', '2026-09-10T00:00:00.000Z', 1, 1, 1, 1, datetime('now'))
+      `).run();
+      db.prepare(`
+        INSERT INTO account_task_receipt_items (account_id, task_key, status, ordinal)
+        VALUES ('acc-B', 'task_B', 4, 1)
+      `).run();
+      db.prepare(`
+        INSERT INTO account_unsettled_proofs (account_id, run_id, task_key, op_id, proved_at)
+        VALUES ('acc-B', 'run-B', 'task_B', 'op-B', '2026-09-10T00:00:00.000Z')
+      `).run();
+
+      // Insert purchased_emails records for both acc-A and acc-B
+      db.prepare(`
+        INSERT INTO purchased_emails (id, provider, email, account_id, order_id, service, purchased_at, consumed_at)
+        VALUES ('pe-A', 'gmail94', 'a@test.com', 'acc-A', 'order-A', 'facebook', '2026-09-10T00:00:00.000Z', '2026-09-10T00:05:00.000Z'),
+               ('pe-B', 'gmail94', 'b@test.com', 'acc-B', 'order-B', 'facebook', '2026-09-10T00:00:00.000Z', '2026-09-10T00:10:00.000Z')
+      `).run();
+
+      // Delete only acc-A
+      const deletedCount = repo.deleteAccounts(['acc-A']);
+      expect(deletedCount).toBe(1);
+
+      // Verify acc-A is deleted, acc-B is intact
+      expect(repo.getAccountById('acc-A')).toBeNull();
+      expect(repo.getAccountById('acc-B')).not.toBeNull();
+
+      // Verify acc-A's rows in all 4 task tables are deleted
+      expect(db.prepare('SELECT COUNT(*) as c FROM account_tasks WHERE account_id = ?').get('acc-A')).toEqual({ c: 0 });
+      expect(db.prepare('SELECT COUNT(*) as c FROM account_task_receipts WHERE account_id = ?').get('acc-A')).toEqual({ c: 0 });
+      expect(db.prepare('SELECT COUNT(*) as c FROM account_task_receipt_items WHERE account_id = ?').get('acc-A')).toEqual({ c: 0 });
+      expect(db.prepare('SELECT COUNT(*) as c FROM account_unsettled_proofs WHERE account_id = ?').get('acc-A')).toEqual({ c: 0 });
+
+      // Verify acc-B's rows in all 4 task tables remain completely intact
+      expect(db.prepare('SELECT COUNT(*) as c FROM account_tasks WHERE account_id = ?').get('acc-B')).toEqual({ c: 1 });
+      expect(db.prepare('SELECT COUNT(*) as c FROM account_task_receipts WHERE account_id = ?').get('acc-B')).toEqual({ c: 1 });
+      expect(db.prepare('SELECT COUNT(*) as c FROM account_task_receipt_items WHERE account_id = ?').get('acc-B')).toEqual({ c: 1 });
+      expect(db.prepare('SELECT COUNT(*) as c FROM account_unsettled_proofs WHERE account_id = ?').get('acc-B')).toEqual({ c: 1 });
+
+      // Verify purchased_emails: pe-A still exists with consumed_at and order_id preserved (account_id SET NULL), pe-B still has account_id acc-B
+      const peA = db.prepare('SELECT * FROM purchased_emails WHERE id = ?').get('pe-A') as { account_id: string | null; consumed_at: string; order_id: string };
+      expect(peA.account_id).toBeNull();
+      expect(peA.consumed_at).toBe('2026-09-10T00:05:00.000Z');
+      expect(peA.order_id).toBe('order-A');
+
+      const peB = db.prepare('SELECT * FROM purchased_emails WHERE id = ?').get('pe-B') as { account_id: string | null; consumed_at: string; order_id: string };
+      expect(peB.account_id).toBe('acc-B');
+      expect(peB.consumed_at).toBe('2026-09-10T00:10:00.000Z');
+      expect(peB.order_id).toBe('order-B');
+
+      // Test mid-delete rollback restores acc-rollback AND all 4 of its task tables
+      repo.createAccount({ id: 'acc-rb-all', email: 'rball@test.com', emailProvider: 'gmail94' });
+      db.prepare(`
+        INSERT INTO account_tasks (account_id, task_key, title, reward, status, updated_at)
+        VALUES ('acc-rb-all', 'task_rb', 'Task RB', 10, 4, datetime('now'))
+      `).run();
+      db.prepare(`
+        INSERT INTO account_task_receipts (account_id, run_id, session_alias, observed_at, required_after, server_total, server_done, is_fresh, is_final, updated_at)
+        VALUES ('acc-rb-all', 'run-rb', 'alias-rb', datetime('now'), datetime('now'), 1, 1, 1, 1, datetime('now'))
+      `).run();
+      db.prepare(`
+        INSERT INTO account_task_receipt_items (account_id, task_key, status, ordinal)
+        VALUES ('acc-rb-all', 'task_rb', 4, 1)
+      `).run();
+      db.prepare(`
+        INSERT INTO account_unsettled_proofs (account_id, run_id, task_key, op_id, proved_at)
+        VALUES ('acc-rb-all', 'run-rb', 'task_rb', 'op-rb', datetime('now'))
+      `).run();
+
+      db.exec(`
+        CREATE TRIGGER test_abort_delete_all
+        BEFORE DELETE ON accounts
+        WHEN OLD.id = 'acc-rb-all'
+        BEGIN
+          SELECT RAISE(ABORT, 'TEST_TRIGGER_ABORT_ALL');
+        END;
+      `);
+
+      expect(() => repo.deleteAccounts(['acc-rb-all'])).toThrow('TEST_TRIGGER_ABORT_ALL');
+
+      // Assert rollback: account and ALL 4 task tables are restored
+      expect(repo.getAccountById('acc-rb-all')).not.toBeNull();
+      expect(db.prepare('SELECT COUNT(*) as c FROM account_tasks WHERE account_id = ?').get('acc-rb-all')).toEqual({ c: 1 });
+      expect(db.prepare('SELECT COUNT(*) as c FROM account_task_receipts WHERE account_id = ?').get('acc-rb-all')).toEqual({ c: 1 });
+      expect(db.prepare('SELECT COUNT(*) as c FROM account_task_receipt_items WHERE account_id = ?').get('acc-rb-all')).toEqual({ c: 1 });
+      expect(db.prepare('SELECT COUNT(*) as c FROM account_unsettled_proofs WHERE account_id = ?').get('acc-rb-all')).toEqual({ c: 1 });
+    });
   });
 
   describe('LogRepository', () => {

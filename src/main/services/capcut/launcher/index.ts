@@ -37,6 +37,12 @@ export type {
 } from './BrowserLauncher';
 export { ApiV3Launcher, type ApiV3LauncherOptions } from './ApiV3Launcher';
 export { XcliLauncher, XCLI_PATH, XCLI_CWD, type XcliLauncherOptions } from './XcliLauncher';
+export {
+  ProfileStopError,
+  type ProfileStopDiagnostic,
+  type ProfileStopObservation,
+  type StopOptions
+} from './ProfileStopError';
 
 /** Đúng những gì `api-v3` cần: token của app + phần HTTP của `MultiloginProvider`. */
 export interface MultiloginLauncherDeps {

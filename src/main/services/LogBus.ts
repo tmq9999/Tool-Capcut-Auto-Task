@@ -39,10 +39,16 @@ export interface LogBusOptions {
   flushIntervalMs?: number;
 }
 
+export interface LogPersistenceNotice {
+  kind: 'write-failed' | 'recovered';
+  pending: number;
+}
+
 export interface LogBusDeps {
   now?: () => number;
   nextId?: () => string;
   scheduler?: LogBusScheduler;
+  onPersistenceNotice?: (notice: LogPersistenceNotice) => void;
 }
 
 const DEFAULT_MAX_BATCH_SIZE = 50;
@@ -67,12 +73,14 @@ export class LogBus implements StartLogResetPort {
   private timerHandle: number | null = null;
   private sequence = 0;
   private retryNotBefore = 0;
+  private writeOutage = false;
 
   private readonly now: () => number;
   private readonly nextId: () => string;
   private readonly scheduler: LogBusScheduler;
   private readonly maxBatchSize: number;
   private readonly flushIntervalMs: number;
+  private readonly onPersistenceNotice?: (notice: LogPersistenceNotice) => void;
 
   constructor(
     private readonly sink: ILogSink,
@@ -84,6 +92,16 @@ export class LogBus implements StartLogResetPort {
     this.scheduler = deps.scheduler ?? nodeScheduler;
     this.maxBatchSize = options.maxBatchSize ?? DEFAULT_MAX_BATCH_SIZE;
     this.flushIntervalMs = options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
+    this.onPersistenceNotice = deps.onPersistenceNotice;
+  }
+
+  private reportPersistenceNotice(kind: 'write-failed' | 'recovered'): void {
+    if (!this.onPersistenceNotice) return;
+    try {
+      this.onPersistenceNotice({ kind, pending: this.queue.length });
+    } catch {
+      // guard callback try/catch; reporter throw must not escape or disrupt log flow
+    }
   }
 
   emit(input: LogEntryInput): CanonicalRuntimeLog {
@@ -183,8 +201,16 @@ export class LogBus implements StartLogResetPort {
       if (this.queue.length === 0) {
         this.retryNotBefore = 0;
       }
+      if (this.writeOutage) {
+        this.writeOutage = false;
+        this.reportPersistenceNotice('recovered');
+      }
     } catch {
       this.retryNotBefore = now + this.flushIntervalMs;
+      if (!this.writeOutage) {
+        this.writeOutage = true;
+        this.reportPersistenceNotice('write-failed');
+      }
     }
   }
 

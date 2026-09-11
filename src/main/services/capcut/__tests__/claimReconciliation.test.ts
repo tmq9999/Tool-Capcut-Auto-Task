@@ -15,7 +15,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 const task: CapcutTask = { taskKey: 'pwa', taskId: 1, title: 'Install CapCut Web Desktop', status: 2, reward: 70, buttonText: 'Claim', childIds: [] };
-const snapshot = (status: number) => JSON.stringify({ data: { task_list: [{ task_key: 'pwa', task_id: 1, task_status: status, task_view: { title: task.title, button_text: status === 4 ? 'Done' : 'Claim' }, task_reward_view: { reward_amount: 70 } }] } });
+const snapshot = (status: number) => JSON.stringify({ err_no: 0, data: { task_list: [{ task_key: 'pwa', task_id: 1, task_status: status, task_view: { title: task.title, button_text: status === 4 ? 'Done' : 'Claim' }, task_reward_view: { reward_amount: 70 } }] } });
 function claimFixture(onClick: () => void) {
   const click = vi.fn(async () => { onClick(); });
   const press = vi.fn(async () => {});

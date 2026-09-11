@@ -24,7 +24,7 @@
 import type { BrowserContext, Locator, Page } from 'playwright-core';
 
 import { dump, StepError } from './diag';
-import { skipOnboardingSurvey } from './overlays';
+import { dismissOperationFeatureModal, skipOnboardingSurvey } from './overlays';
 import type { AccountUiInteraction } from './types';
 import { foregroundPage } from './human';
 import {
@@ -34,6 +34,7 @@ import {
   isDomReadTimeout,
   withinDeadline,
 } from './cancellation';
+import { readAuthFinalState, hasAuthenticatedWorkspace } from './authState';
 
 /**
  * Thông tin đăng nhập tối thiểu mà engine cần. Bản gốc là `Credentials` trong
@@ -72,7 +73,12 @@ async function fillVerified(
   stage: string,
   attempts = 3
 ): Promise<void> {
-  await input.waitFor({ state: 'visible', timeout: 20000 });
+  await boundedDomRead(
+    () => input.waitFor({ state: 'visible', timeout: 20000 }),
+    `${stage}:input-visible`,
+    20000,
+    signal
+  );
 
   for (let i = 0; i < attempts; i++) {
     signal.throwIfAborted();
@@ -107,7 +113,12 @@ async function clickUntilVisible(
   signal: AbortSignal,
   attempts = 60
 ): Promise<void> {
-  await trigger.waitFor({ state: 'visible', timeout: 20000 });
+  await boundedDomRead(
+    () => trigger.waitFor({ state: 'visible', timeout: 20000 }),
+    'login:trigger-visible',
+    20000,
+    signal
+  );
 
   for (let i = 0; i < attempts; i++) {
     signal.throwIfAborted();
@@ -128,32 +139,14 @@ async function clickUntilVisible(
 
 /** Kiểm tra đã đăng nhập chưa (đang ở trong app và không còn ở trang login/signup) */
 export async function isLoggedIn(page: Page, signal?: AbortSignal): Promise<boolean> {
-  signal?.throwIfAborted();
-  const url = page.url();
-  if (url.includes('/login') || url.includes('/signup')) return false;
-  if (!url.includes('capcut.com')) return false;
-
-  // Nếu URL đang ở trong app (my-edit, ai-design, ai-creator, workspace, tools) -> đã đăng nhập
-  if (
-    url.includes('/my-edit') ||
-    url.includes('/ai-design') ||
-    url.includes('/ai-creator') ||
-    url.includes('/workspace') ||
-    url.includes('/tools')
-  ) {
-    return true;
-  }
-
-  // Có nút Free credits, avatar, credit-section
-  const marker = page
-    .locator(
-      'button:has-text("Free credits"), .credit-section, button[class*="credit"], [class*="avatar"], [class*="userProfile"], [class*="account"]'
-    )
-    .first();
+  const effectiveSignal = signal ?? new AbortController().signal;
+  effectiveSignal.throwIfAborted();
   try {
-    return await withinDeadline(marker.isVisible({ timeout: 4000 }), 4000, signal);
-  } catch {
-    signal?.throwIfAborted();
+    const state = await readAuthFinalState(page, effectiveSignal);
+    return hasAuthenticatedWorkspace(state);
+  } catch (error) {
+    effectiveSignal.throwIfAborted();
+    if (isDomReadTimeout(error)) throw error;
     return false;
   }
 }
@@ -208,7 +201,12 @@ export async function loginCapcut(
   await fillVerified(inputEmail, creds.email, 'Email', log, ui, signal, 'login:fill-email');
 
   const continueBtn = page.getByRole('button', { name: /^(Continue|Tiếp tục)$/ });
-  await continueBtn.waitFor({ state: 'visible', timeout: 20000 });
+  await boundedDomRead(
+    () => continueBtn.waitFor({ state: 'visible', timeout: 20000 }),
+    'login:continue-visible',
+    20000,
+    signal
+  );
   await foregroundPage(page, { signal, stage: 'login:continue-email', ui }, () =>
     continueBtn.click({ timeout: 20000 })
   );
@@ -235,7 +233,14 @@ export async function loginCapcut(
       await dump(page, 'login_heading_khong_hien')
     );
   });
-  const headingText = (await heading.textContent())?.replace(/\s+/g, ' ').trim() ?? '';
+  const headingText = (
+    await boundedDomRead(
+      () => heading.textContent(),
+      'login:heading-text',
+      5000,
+      signal
+    )
+  )?.replace(/\s+/g, ' ').trim() ?? '';
 
   if (/Create an account|Tạo tài khoản/.test(headingText)) {
     throw new Error(
@@ -252,7 +257,12 @@ export async function loginCapcut(
   const signInBtn = page
     .getByRole('button', { name: /^(Sign in|Log in|Continue|Đăng nhập|Tiếp tục)$/ })
     .first();
-  await signInBtn.waitFor({ state: 'visible', timeout: 20000 });
+  await boundedDomRead(
+    () => signInBtn.waitFor({ state: 'visible', timeout: 20000 }),
+    'login:sign-in-visible',
+    20000,
+    signal
+  );
   await foregroundPage(page, { signal, stage: 'login:sign-in', ui }, () =>
     signInBtn.click({ timeout: 20000 })
   );
@@ -274,6 +284,7 @@ export async function loginCapcut(
 
   // Bỏ khảo sát onboarding — và kiểm modal đã tắt thật (xem `onboarding.ts`)
   await skipOnboardingSurvey(page, log, ui, signal);
+  await dismissOperationFeatureModal(page, log, ui, signal);
 
   // Đóng modal quảng cáo / onboarding nếu che UI
   const closeModal = page

@@ -315,6 +315,104 @@ describe('LogBus resilience and shutdown', () => {
       expect(() => bus.dispose()).toThrow('LOG_FLUSH_INCOMPLETE');
       expect(bus.pendingCount()).toBe(1);
     });
+
+    it('reports each outage and recovery once without recursive logging', () => {
+      let failing = true;
+      let attempts = 0;
+      const notices: Array<{ kind: string; pending: number }> = [];
+      const bus = new LogBus({
+        insertBatch: () => {
+          attempts += 1;
+          if (failing) throw new Error('RAW_DB_FIXTURE');
+        }
+      }, { maxBatchSize: 2, flushIntervalMs: 500 }, {
+        now: () => now, nextId: () => 'notice-' + ++idCounter, scheduler,
+        onPersistenceNotice: notice => {
+          notices.push(notice);
+          throw new Error('REPORTER_FIXTURE');
+        }
+      });
+      bus.start();
+      for (let i = 0; i < 4; i += 1) {
+        expect(() => bus.emit({
+          email: 'system', step: 'fixture', status: 'INFO', message: String(i)
+        })).not.toThrow();
+      }
+      expect(attempts).toBe(1);
+      expect(notices).toEqual([{ kind: 'write-failed', pending: 2 }]);
+      expect(bus.pendingCount()).toBe(4);
+      now += 500;
+      scheduler.tick();
+      expect(notices).toHaveLength(1);
+      failing = false;
+      now += 500;
+      scheduler.tick();
+      expect(notices).toEqual([
+        { kind: 'write-failed', pending: 2 }, { kind: 'recovered', pending: 2 }
+      ]);
+      scheduler.tick();
+      expect(bus.pendingCount()).toBe(0);
+      bus.dispose();
+    });
+
+    it('reports multiple outage and recovery cycles', () => {
+      let failing = false;
+      const notices: Array<{ kind: string; pending: number }> = [];
+      const bus = new LogBus({
+        insertBatch: () => {
+          if (failing) throw new Error('RAW_DB_FIXTURE');
+        }
+      }, { maxBatchSize: 2, flushIntervalMs: 500 }, {
+        now: () => now, nextId: () => 'notice-' + ++idCounter, scheduler,
+        onPersistenceNotice: notice => {
+          notices.push(notice);
+        }
+      });
+      bus.start();
+
+      // Healthy write
+      bus.emit({ email: 's', step: '1', status: 'INFO', message: 'a' });
+      bus.emit({ email: 's', step: '1', status: 'INFO', message: 'b' });
+      expect(notices).toHaveLength(0);
+
+      // Outage 1
+      failing = true;
+      bus.emit({ email: 's', step: '1', status: 'INFO', message: 'c' });
+      bus.emit({ email: 's', step: '1', status: 'INFO', message: 'd' });
+      expect(notices).toEqual([{ kind: 'write-failed', pending: 2 }]);
+
+      // Recovery 1
+      failing = false;
+      now += 500;
+      scheduler.tick();
+      expect(notices).toEqual([
+        { kind: 'write-failed', pending: 2 },
+        { kind: 'recovered', pending: 0 }
+      ]);
+
+      // Outage 2
+      failing = true;
+      bus.emit({ email: 's', step: '1', status: 'INFO', message: 'e' });
+      bus.emit({ email: 's', step: '1', status: 'INFO', message: 'f' });
+      expect(notices).toEqual([
+        { kind: 'write-failed', pending: 2 },
+        { kind: 'recovered', pending: 0 },
+        { kind: 'write-failed', pending: 2 }
+      ]);
+
+      // Recovery 2
+      failing = false;
+      now += 500;
+      scheduler.tick();
+      expect(notices).toEqual([
+        { kind: 'write-failed', pending: 2 },
+        { kind: 'recovered', pending: 0 },
+        { kind: 'write-failed', pending: 2 },
+        { kind: 'recovered', pending: 0 }
+      ]);
+
+      bus.dispose();
+    });
   });
 });
 

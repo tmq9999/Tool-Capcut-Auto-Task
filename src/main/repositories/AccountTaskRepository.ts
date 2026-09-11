@@ -172,6 +172,14 @@ export class AccountTaskRepository {
       );
     }
 
+    const observedMs = Date.parse(checkpoint.receipt.observedAt);
+    const requiredMs = Date.parse(checkpoint.receipt.requiredAfter);
+    if (!Number.isFinite(observedMs) || !Number.isFinite(requiredMs)) {
+      throw new Error('INVALID_CHECKPOINT_TIMESTAMP');
+    }
+    const observedIso = new Date(observedMs).toISOString();
+    const requiredIso = new Date(requiredMs).toISOString();
+
     const seen = new Set<string>();
     for (const row of checkpoint.rows) {
       if (seen.has(row.key)) {
@@ -237,24 +245,62 @@ export class AccountTaskRepository {
         accountId,
         checkpoint.receipt.runId,
         checkpoint.receipt.sessionAlias,
-        checkpoint.receipt.observedAt,
-        checkpoint.receipt.requiredAfter,
+        observedIso,
+        requiredIso,
         checkpoint.receipt.serverTotal,
         checkpoint.receipt.serverDone,
         checkpoint.receipt.isFresh ? 1 : 0,
         checkpoint.receipt.isFinal ? 1 : 0
       );
 
-      this.db.prepare('DELETE FROM account_unsettled_proofs WHERE account_id = ?').run(accountId);
-      const proofStmt = this.db.prepare(`
+      const isFreshSnapshot = checkpoint.receipt.isFresh && observedMs > requiredMs;
+
+      const settledKeys = new Set<string>();
+      if (isFreshSnapshot) {
+        const deleteSettledProofStmt = this.db.prepare(`
+          DELETE FROM account_unsettled_proofs
+          WHERE account_id = ? AND run_id = ? AND task_key = ? AND proved_at < ?
+        `);
+        for (const row of checkpoint.rows) {
+          if (row.status === 4) {
+            deleteSettledProofStmt.run(
+              accountId,
+              checkpoint.receipt.runId,
+              row.key,
+              observedIso
+            );
+            settledKeys.add(row.key);
+          }
+        }
+      }
+
+      const upsertProofStmt = this.db.prepare(`
         INSERT INTO account_unsettled_proofs (account_id, run_id, task_key, op_id, proved_at)
         VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(account_id, run_id, task_key) DO UPDATE SET
+          op_id = excluded.op_id,
+          proved_at = excluded.proved_at
+        WHERE excluded.proved_at > account_unsettled_proofs.proved_at
       `);
       for (const item of checkpoint.unsettledProofs ?? []) {
-        if (item.key !== item.proof.actionKey || item.proof.errNo !== 0 || !Number.isFinite(item.proof.at)) {
+        if (
+          item.key !== item.proof.actionKey ||
+          item.proof.errNo !== 0 ||
+          !Number.isFinite(item.proof.at) ||
+          !item.proof.opId
+        ) {
           throw new Error('INVALID_UNSETTLED_PROOF');
         }
-        proofStmt.run(accountId, checkpoint.receipt.runId, item.key, item.proof.opId, new Date(item.proof.at).toISOString());
+        if (settledKeys.has(item.key) && item.proof.at < observedMs) {
+          continue;
+        }
+        upsertProofStmt.run(
+          accountId,
+          checkpoint.receipt.runId,
+          item.key,
+          item.proof.opId,
+          new Date(item.proof.at).toISOString()
+        );
       }
 
       deleteItemsStmt.run(accountId);

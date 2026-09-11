@@ -295,7 +295,7 @@ describe('Pure SettingsController Unit Tests (Task 2.1.4 RED)', () => {
     expect(controller.getState().isSaving).toBe(false);
   });
 
-  it('dispose/unmount wipe method clears all secret drafts', () => {
+  it('dispose/unmount preserves drafts and detaches listeners', () => {
     const { bridge } = createMockBridge();
     const controller = new SettingsController(bridge);
 
@@ -308,8 +308,41 @@ describe('Pure SettingsController Unit Tests (Task 2.1.4 RED)', () => {
     controller.dispose();
 
     const state = controller.getState();
-    expect(state.drafts.gmail94).toEqual({ action: 'keep' });
-    expect(state.drafts.multilogin).toEqual({ action: 'keep' });
+    expect(state.drafts.gmail94).toEqual({ action: 'replace', value: 'secret-draft' });
+    expect(state.drafts.multilogin).toEqual({
+      action: 'replace',
+      auth: { mode: 'token', automationToken: 'tok-draft' },
+    });
+  });
+
+  it('reloads after replay and preserves a credential draft', async () => {
+    const { bridge } = createMockBridge();
+    const controller = new SettingsController(bridge);
+    await controller.load();
+    controller.setSimpleDraft('gmail94', { action: 'replace', value: 'DEMO' });
+    controller.dispose();
+    await controller.load();
+    expect(controller.getState().isLoading).toBe(false);
+    expect(controller.getState().drafts.gmail94)
+      .toEqual({ action: 'replace', value: 'DEMO' });
+  });
+
+  it('preserves untouched stored settings in an early-edit save payload', async () => {
+    const { bridge, getSpy, saveSpy } = createMockBridge();
+    const server = structuredClone(DEFAULT_APP_SETTINGS);
+    server.automation.threadCount = 17;
+    let resolve!: (value: unknown) => void;
+    getSpy.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    const controller = new SettingsController(bridge);
+    const loading = controller.load();
+    controller.updateSettings((s) => ({
+      ...s, general: { ...s.general, sessionRestore: !s.general.sessionRestore }
+    }));
+    resolve({ success: true, data: { settings: server, credentials: [] } });
+    await loading;
+    expect(controller.getState().settings.automation.threadCount).toBe(17);
+    await controller.save();
+    expect(saveSpy.mock.calls[0][0].settings.automation.threadCount).toBe(17);
   });
 
   it('no decrypted secret or stored credential value is ever accepted by load state; only isConfigured/masked metadata is stored', async () => {
@@ -447,6 +480,102 @@ describe('T09: Settings hydration and committed boot prefs', () => {
     const saved = await controller.save();
     expect(saved).toBe(true);
     expect(controller.getState().error).toBeNull();
+    expect(controller.getState().warning).toContain('làm mới');
     expect(controller.getLastCommittedGeneral()?.general.theme).toBe('light');
   });
+
+  it('F06 (AG08): save pending -> dispose -> old ack does not notify old listener and leaves new generation state untouched', async () => {
+    const { bridge, saveSpy } = createMockBridge();
+    let resolveSave!: (val: unknown) => void;
+    saveSpy.mockImplementationOnce(() => new Promise((resolve) => { resolveSave = resolve; }));
+
+    const controller = new SettingsController(bridge);
+    await controller.load();
+    let listenerCalls = 0;
+    controller.subscribe(() => { listenerCalls++; });
+
+    controller.updateSettings((s) => ({
+      ...s,
+      general: { ...s.general, theme: 'dark' },
+    }));
+
+    const saving = controller.save();
+    controller.dispose();
+    const callsAtDispose = listenerCalls;
+
+    // After dispose, save resolves
+    resolveSave({ success: true, data: { success: true } });
+    const result = await saving;
+
+    expect(result).toBe(true);
+    // Listener from disposed session should not receive further updates after dispose
+    expect(listenerCalls).toBe(callsAtDispose);
+  });
+
+  it('settles save ownership after replay', async () => {
+    const { bridge, saveSpy } = createMockBridge();
+    let resolve!: (reply: IpcEnvelope<{ success: boolean }>) => void;
+    saveSpy.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    const controller = new SettingsController(bridge);
+    await controller.load();
+    const saving = controller.save();
+    controller.dispose();
+    await controller.load();
+    resolve({ success: true, data: { success: true } });
+    expect(await saving).toBe(true);
+    expect(controller.getState().isSaving).toBe(false);
+    expect(await controller.save()).toBe(true);
+    expect(saveSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('settles save ownership after replay when commit rejects without polluting new generation', async () => {
+    const { bridge, saveSpy } = createMockBridge();
+    let rejectSave!: (err: Error) => void;
+    saveSpy.mockImplementationOnce(() => new Promise((_, reject) => { rejectSave = reject; }));
+    const controller = new SettingsController(bridge);
+    await controller.load();
+    const saving = controller.save();
+    controller.dispose();
+    await controller.load();
+    rejectSave(new Error('IPC crash'));
+    expect(await saving).toBe(false);
+    expect(controller.getState().isSaving).toBe(false);
+    expect(controller.getState().error).toBeNull();
+  });
+
+  it('settles save ownership after replay when post-save refresh rejects without publishing warning to new generation', async () => {
+    const { bridge, getSpy, saveSpy } = createMockBridge();
+    let resolveSave!: (reply: IpcEnvelope<{ success: boolean }>) => void;
+    saveSpy.mockImplementationOnce(() => new Promise((done) => { resolveSave = done; }));
+    const controller = new SettingsController(bridge);
+    await controller.load();
+    const saving = controller.save();
+    controller.dispose();
+    await controller.load();
+    // Simulate refresh failure for the old save's post-save refresh
+    getSpy.mockRejectedValueOnce(new Error('post-save refresh timeout'));
+    resolveSave({ success: true, data: { success: true } });
+    expect(await saving).toBe(true);
+    expect(controller.getState().isSaving).toBe(false);
+    expect(controller.getState().warning).toBeNull();
+  });
+
+  it('preserves new edits in replayed session when old in-flight save resolves', async () => {
+    const { bridge, saveSpy } = createMockBridge();
+    let resolveSave!: (reply: IpcEnvelope<{ success: boolean }>) => void;
+    saveSpy.mockImplementationOnce(() => new Promise((done) => { resolveSave = done; }));
+    const controller = new SettingsController(bridge);
+    await controller.load();
+    const saving = controller.save();
+    controller.dispose();
+    await controller.load();
+    controller.setSimpleDraft('gmail94', { action: 'replace', value: 'new-key-after-replay' });
+    resolveSave({ success: true, data: { success: true } });
+    expect(await saving).toBe(true);
+    expect(controller.getState().isSaving).toBe(false);
+    expect(controller.getState().drafts.gmail94).toEqual({ action: 'replace', value: 'new-key-after-replay' });
+  });
 });
+
+
+

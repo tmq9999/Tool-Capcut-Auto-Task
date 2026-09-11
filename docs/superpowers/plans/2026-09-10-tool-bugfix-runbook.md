@@ -1,160 +1,131 @@
-# Runbook Antigravity — fix backlog full-file audit
+# Runbook Antigravity — đóng 8 nhóm lỗi còn lại sau P01–P06
 
-## 1. Chỉ dẫn đầu vào
+## 1. Đọc đầu vào
 
-Đọc AGENTS.md → Superpowers using-superpowers → [Spec](../specs/2026-09-10-tool-bugfix-spec.md) → [Plan T01–T19](2026-09-10-tool-bugfix-plan.md).
+AGENTS.md → Superpowers using-superpowers → [Spec](../specs/2026-09-10-tool-bugfix-spec.md) → [Plan V01–V08](2026-09-10-tool-bugfix-plan.md) → runbook này.
 
-[Audit report](../reports/2026-09-10-full-file-audit.md) và [coverage](../reports/2026-09-10-full-file-audit-coverage.md) là bằng chứng baseline, không phải checklist cũ cần áp lại từ đầu.
+Bộ này thay trực tiếp bản P01–P06 cũ. Không áp lại các fix đã đúng: span Close thực,4acks→Stop đúng4proof, system-stop label, expected-close lifecycle và selective settlement canonical.
 
-Mục tiêu: 25 findings chính +5 legacy; giữ patches F/S hiện có. Không sửa flow do_action/task_list/claim/trial gate/pacing/normal restock. API key/password/proxy vẫn hiện plaintext. Không masking/storage redesign, media gate, đổi transport hoặc thêm retry để né lỗi.
+Baseline source **7ba6d23 + dirty Antigravity**,453JS/TSfiles. Review gần nhất:339tests/9filesPASS, typecheck/lint/buildPASS,95selectorchecksPASS. Đây là baseline, không chứng minh V01–V08 đãfix.
 
-Lượt viết tài liệu chưa sửa application source. Khi được giao triển khai, thực thi task theo plan; live/purchase/activate trial/commit/push/deploy cần quyền tương ứng. Không suy người dùng chạy executable nào.
+Giữ do_action/task_list/claim, trial gate, endpoint/op_id/order/pacing/restock và plaintext APIkey/password/proxyDashboard. Không product_mission/media/vault/masking hoặc mutationretryflowmới.
 
-## 2. Khóa baseline trước khi sửa
+## 2. Preflight và quyền
 
 ~~~powershell
 git status --short
 git rev-parse HEAD
 git diff --stat
-~~~
-
-Baseline: dd8a16e + dirty working tree đã review, không clean HEAD. Lúc lập kế hoạch đã so436hash và không khác report. Không reset/stash/checkout để bỏ changes Antigravity.
-
-Trước task, ghi SHA256 đúng file sẽ sửa:
-
-~~~powershell
+Get-FileHash -Algorithm SHA256 -LiteralPath 'src/main/providers/MultiloginProvider.ts'
 Get-FileHash -Algorithm SHA256 -LiteralPath 'src/main/services/AutomationRunService.ts'
+Get-FileHash -Algorithm SHA256 -LiteralPath 'src/main/repositories/AccountTaskRepository.ts'
 ~~~
 
-Thay path bằng file task. Nếu file đã khác audit, đọc diff/tái hiện lại, không patch mù theo line number.
+Đọc currentfunctions/callers/tests trước patch. Nếu source đổi so với review, tái hiện lại; khôngcopy oldwholefile hoặc resetdirtytree. Chỉ apply_patch đúnghunks.
 
-Giữ đường dẫn writable workspace; không sửa .env, credential DB, captured private data hoặc migration checksum. Một owner quản lý native addon trong suốt vòng test.
+Không sửauserDB/retainedleases, retrofillproof từlog, retryStop/stop-all hoặc killprocess. Không chạy livepurchase/trial/providerwrite/commit/push/deploy ngoài quyềnđượcgiao. Testflagkhôngthayapproval.
 
-## 3. Hàng đợi thực thi
+Một owner nativeaddon; không rebuild khi app/testprocess khác dùng. Một owner AutomationRunService tronglaneproof và khiV06 đụngruntime.
 
-| Wave | Tasks | Điều phối |
+## 3. Execution order
+
+| Lane | Thứ tự | Gate |
 |---|---|---|
-| 1 — lỗi ưu tiên | T01, T02; T04 rồi T05; T06 | Auth cùng files tuần tự; CAS độc lập runtime |
-| 2 — Start/save/UI | T07-A → T08 → T07-B; T09 sau contract T08 | Một người sửa Dashboard/IPC contracts tránh ghi đè |
-| 3 — proxy/log | T10; T11 sau T07; T12 | T10 dùng AutomationRunService, không đồng thời T05/T07 |
-| 4 — CRUD/lifecycle | T13 rồi T14; T15; T16 | Shared Accounts component fixture chung một owner |
-| 5 — legacy | T17, T18 | Chỉ offline test, không chạy live script main |
-| Xuyên suốt | T19 | Sửa false-green tại task tạo regression và verify chung cuối |
-| DOB | T03-A, T03-B | A chuẩn bị generator/fixture; B chờ range đã được xác nhận |
+| Stop | V01 → V06 | Malformedstatuskhôngconfirm; phase/cause/remote-localstateđúng |
+| Proof | V04 → V03 → V02 | Firstcause/priority → ownerwriter → abortfallback |
+| Modal | V05 | Readfailure/ambiguitykhôngCSSfirstbypass |
+| Repository | V07 | Canonicaltimecompare, no newerproofdelete |
+| Integration | V08 | Actualproducer/runtime/SQLite vàexactresources |
 
-T03-B không được bỏ khỏi báo cáo. Nếu chưa có earliest/latest hoặc minAge/maxAge user chọn, status WAITING-DOB-POLICY và tiếp tục task khác. Không tự dùng range demo làm production policy; không cài runtime blocker thiếu range vào signup đang dùng rồi báo fixed.
+V06 runtimehunk triển khai sau V02 hoặc cùngowner; không concurrencyghiđè.
 
-## 4. Chu trình cho từng task
+## 4. Task cycle
 
-1. Đọc function, caller, test fixture theo Plan.
-2. Thêm regression với đúng return type/timer/DB/DOM behavior.
-3. Chạy focused RED; ghi assertion cụ thể. Environment/import/ABI fail không phải RED nghiệp vụ.
-4. Patch nhỏ; không copy whole-file cũ hoặc sửa module ngoài allowlist.
-5. Chạy GREEN cùng regression và toàn neighboring test files.
-6. Reviewer khác kiểm: AC, code diff, actual failure path, happy trace giữ nguyên.
-7. Commit focused nếu có quyền; không được cấp thì giữ diff bàn giao. Không tự push/merge.
-8. Nếu task chưa đạt, giữ open; không dùng full-suite count thay assertion.
-
-Checkpoint:
+1. Read specAC và path fixture.
+2. Thêm regressionđúngactualboundary.
+3. Run RED,ghiassertion; compile/ABI/no-tests-found khôngRED.
+4. Minimalpatch giữhealthytrace.
+5. Run GREEN vàneighbors.
+6. Review source+testoracle; khôngcommitmessage/testcount làm bằngchứng.
+7. Ghi status; commitfocused chỉkhi cóquyền.
 
 ~~~text
-Task / findings:
-Baseline file hash:
-Repro + root cause:
+Task:
+Baseline hash:
+Trigger / root cause:
 RED command / exit / assertion:
 Patch files:
-GREEN command / exit:
-AC đạt / còn mở:
-Happy flow và plaintext giữ nguyên:
+GREEN command / exit / count:
+Acceptance IDs:
+Happy flow / proof / cleanup unchanged:
 Reviewer:
+Remaining gap:
 ~~~
 
-## 5. Những lỗi không được lặp lại trong implementation
+## 5. Những lỗi không được tái tạo
 
-### Auth/DOB/trial
+### V01/V06 — Stop
 
-- Pacing dùng abortableDelay cùng duration, không withinDeadline(browserSleep, đúng duration).
-- Đợi boundary spy entered rồi mới abort trong test; pre-abort không chứng minh in-flight cancellation.
-- DOB là task riêng bắt buộc: không1998/globalfirst/nth14; range chưa chốt thì không tự bịa.
-- Terms test phải có dynamic unchecked locator; đánh count xử lý không thay checked state.
-- Survey DOM read lỗi khác survey absent. Fatal trial phải failed, intentional ineligible skip giữ nguyên.
-- Không bọc resource-creating promise rồi bỏ owner khi timeout.
+- Empty `states:{}` hợp lệ khác missing/null/arraystates. Khôngparserfilterbadrow làmprofilebiếnmất.
+- Mapkey/profile_idconflict phải reject, khôngđổiidentity rồicoiabsence.
+- Observer/log callback throw không được đổi Stopoutcome/cause.
+- Remoteconfirmed khác CDPattachmentclosed. Keepbothfacts; conservativeownerretention vẫnnhưcũ.
+- Phaseunknown khi fallbackkhôngobserver; khôngbịa token/status từmessage.
+- Outerdeadline giữcause/latestphase; latephasekhôngthaylockedoutcome.
+- Khôngtăng10s/5s/60s haythêmStopretry/routeautofree.
 
-### Persistence/credential
+### V04/V03/V02 — Proof
 
-- Account update contract là {success:boolean}; true mới persisted, false/throw là failure.
-- In-memory failed + persisted=false phải được phân biệt với DB đã ghi error thành công.
-- Terminal DB failure ưu tiên final run failed, cleanup vẫn chạy; không replay account/purchase.
-- Credential CAS so encrypted BLOB snapshot; timestamp giây không đủ. Không upsert deleted credential từ response cũ.
-- Auth refresh catch không nuốt CAS error rồi sign-in cũ.
-- Metadata test result chỉ ghi vào credential đúng snapshot.
+- Account-terminalfailure priority riêng; prooffailure khôngchiếmslot rồi chặnaccountfailure.
+- DBcause giữmain-only, publicmessagefixed.
+- iterationOwners token mới làquyền; sessionSequence khôngthay được.
+- Missingproduction sink khôngthành saved.
+- Cacheexactackversionpromise trướcdispatch; fulfilled/rejected đều giữ. Đây làmemo choiteration, khôngretryqueue.
+- Callbacksealedreject; trustedfallback sau runnerthrow vẫn đượcdrain khiiterationownerchưaexpire.
+- No !aborted/activeThreads/thread.session gate cho localknownproof persistence.
+- Checkpointsettledproofversion không đượcfallbackinsertlại.
+- Abortunobservedaction5 không tạo5thproof. No newmutation/navigation/claim sauabort.
 
-### Start/logs
+### V05/V07/V08
 
-- Không clear logs ở renderer trước Start, không clearAllLogs trong IPC trước admission/preflight.
-- T07 dùng exact old ID ticket và stream cutoff; captured pending IDs flush trong preflight vẫn là old. Sau SQL transaction thành công mới prune queue.
-- New preflight/active logs không bị xóa; validation/active-owner/preflight failure không reset.
-- Named reset event và response cutoff đều idempotent; nhận event không dispatch delete lần nữa.
-- LogBus outage: throttle retry, maxBatch slice, giữ FIFO. Không tự cap/drop pending rồi gọi “no loss”.
-- Dispose còn queue vì flush failure phải báo; shutdown không được giả flushed.
-- Logs provenance qua replay không được mất; giữ normalized view identity/perf patch.
+- Modalreaderror khôngabsent;2visibleowners/2Closekhôngfirstfallback.
+- TimestampoffsetnormalizebeforeSQL; strictequalnotsettled.
+- Testkhôngsửa receipt totals đểgiảmatch; healthy12rows/12receipt/key/session/timekhớp.
+- RealSQLite13proof, no Setcheduplicatewrites; exactprofile/leaseids.
+- Fakefetch perpage, khôngglobalmutablefetchacrossconcurrentawait.
+- Failuretestfinally phảiabort/releasegates/settle trướcDBclose, khônghang.
 
-### Save/UI
+## 6. Focused commands
 
-- Snapshot revision đã gửi khác current edit. Old save success không bật badge cho current unsaved.
-- Pinned Start save target không bị later edits làm chờ mãi hoặc đổi run config.
-- saveAutomation là typed narrow write merge fresh main settings; không whole stale settings payload.
-- Settings save committed + refresh reject vẫn là committed; boot preference dùng committed snapshot không current draft.
-- Export/task dialog tests phải mounted effect/interaction; SSR không chạy useEffect.
-- Provider source canonical không đồng nghĩa mailbox host; legacy giá trị giữ khi edit field khác.
-
-### Cleanup/tests
-
-- Account delete chỉ task/receipt/pending và account trong transaction; purchased/consumed/financial ledger giữ.
-- Quit2 đang pending vẫn preventDefault; stop/close đúng một lần.
-- S07 test preset routeReleased không đủ: race actual cleanup trước flag.
-- Harness resource oracle phải độc lập identity sets; clamp về0 che duplicate release là không đạt.
-- Legacy scripts failure không exit0; test VM/import-safe helper, không import live main rồi chạy thật.
-
-## 6. Focused command index
-
-Chạy sau khi xác nhận Node ABI đúng. Chỉ chạy path mới sau khi task tạo nó.
+Chạy đúngfileđãtạo. NewaccountTaskSettlement.test.ts chỉchạy sauV07. DBtests yêu cầuNodeABI.
 
 ~~~powershell
-node node_modules/vitest/vitest.mjs run src/main/services/capcut/__tests__/authCancellation.test.ts src/main/services/capcut/__tests__/verifiedTyping.test.ts src/main/services/capcut/__tests__/trial.test.ts
-node node_modules/vitest/vitest.mjs run src/main/services/capcut/__tests__/signupTerms.test.ts src/main/services/capcut/__tests__/birthday.test.ts src/main/services/capcut/__tests__/signupBirthday.test.ts
-node node_modules/vitest/vitest.mjs run src/main/services/__tests__/AutomationRunService.test.ts src/main/services/__tests__/automationTaskProgress.test.ts --maxWorkers=4
-node node_modules/vitest/vitest.mjs run src/main/services/__tests__/MultiloginAuthService.test.ts src/main/services/__tests__/providerConnectivity.test.ts src/main/repositories/__tests__/repositories.test.ts --maxWorkers=4
-node node_modules/vitest/vitest.mjs run src/renderer/pages/Dashboard/__tests__/dashboardController.test.ts src/renderer/pages/Settings/__tests__/settingsController.test.ts src/renderer/pages/Logs/__tests__/logsController.test.ts --maxWorkers=4
-node node_modules/vitest/vitest.mjs run src/main/services/__tests__/LogBus.test.ts src/main/__tests__/lifecycle.test.ts
+node node_modules/vitest/vitest.mjs run src/main/providers/__tests__/MultiloginProvider.test.ts src/main/services/capcut/launcher/__tests__/launcherLifecycle.test.ts --maxWorkers=4
+node node_modules/vitest/vitest.mjs run src/main/services/__tests__/AutomationRunService.test.ts src/main/services/__tests__/automationTaskProgress.test.ts src/main/services/__tests__/CapcutEngineService.test.ts --maxWorkers=4
+node node_modules/vitest/vitest.mjs run src/main/services/capcut/__tests__/httpTasks.test.ts src/main/services/capcut/__tests__/overlayGuard.test.ts src/main/services/capcut/__tests__/authCancellation.test.ts src/main/services/capcut/__tests__/trial.test.ts --maxWorkers=4
+node node_modules/vitest/vitest.mjs run src/main/repositories/__tests__/accountTaskSettlement.test.ts src/main/repositories/__tests__/repositories.test.ts --maxWorkers=1
+node node_modules/vitest/vitest.mjs run src/main/services/capcut/__tests__/lateRunScenario.test.ts src/main/services/__tests__/deterministicHarnessOracle.test.ts --maxWorkers=4
 ~~~
 
-Các task T07–T18 có command lân cận riêng trong Plan, phải chạy cả chúng. Chưa tạo file mà command “no tests found” không được tính PASS.
+Mỗicommandriêng/exitrõ. NếuABI/importfail, sửaenvironment rồi chạy lại; khôngbỏtestđểclaimGREEN.
 
-## 7. Native ABI và full verification
+## 7. Full verification và native ABI
 
-Máy audit: Node24.19.0 ABI137; Electron35.7.5 ABI133. Addon cuối audit đã restore Electron. Không chạy test Node khi addon còn Electron rồi báo hàng trăm bugs logic.
-
-~~~powershell
-node --version
-node -e "const D=require('better-sqlite3');const db=new D(':memory:');console.log(process.versions.modules);db.close();"
-~~~
-
-Nếu mismatch, rebuild Node:
+Máy review Node24ABI137/Electron35ABI133. Lượtplan khôngrebuild. Khi app/testsownersidle:
 
 ~~~powershell
 npm run rebuild:node
 ~~~
 
-Npm11 inherited allow_scripts có thể gây EALLOWSCRIPTS. Workaround đã dùng trên máy này, chỉ child env:
+NếuđúngEALLOWSCRIPTS inheritedenv trênmáynày, workaroundchildenv:
 
 ~~~powershell
 node -e "const{spawnSync}=require('node:child_process');const testEnv={...process.env};for(const k of Object.keys(testEnv))if(k.toLowerCase()==='npm_config_allow_scripts')delete testEnv[k];const r=spawnSync(process.execPath,['C:/Program Files/nodejs/node_modules/npm/bin/npm-cli.js','rebuild','better-sqlite3'],{env:testEnv,stdio:'inherit'});process.exit(r.status??1);"
 ~~~
 
-Đổi đường dẫn npm-cli.js chỉ sau khi resolve đúng cài đặt trên máy khác; không sửa policy npm global. Permission/network bị chặn thì xin quyền đúng lệnh.
+Không globalpolicyedit. Máykhác resolve npmclipathtrước; sandbox/networkblock xinquyền đúnglệnh.
 
-Sau các focused GREEN, chạy **tuần tự**:
+Finalsourcegates:
 
 ~~~powershell
 node node_modules/vitest/vitest.mjs run --maxWorkers=4
@@ -165,74 +136,77 @@ npm run selectors
 git diff --check
 ~~~
 
-Dừng đọc lỗi từng lệnh, không lấy success của lệnh sau che lệnh trước. Không tăng timeout/bỏ assertions/tăngheap để giấu bug. Baseline2085 không phải target count; tests mới làm count thay đổi.
+OldEOF whitespace ởsource/test cóthểdọn đúngtaskhunks, khôngunrelatedrewrite. Không lấyPASScommandcuốicheFAILcommandtrước.
 
-Cuối Node suite khôi phục Electron:
+Actualmountedrole/fixture (xinquyềnlaunchẩn nếucần):
+
+~~~powershell
+node -e "const{spawnSync}=require('node:child_process');const r=spawnSync(process.execPath,['scripts/check-bugfix-ui.mjs'],{windowsHide:true,timeout:55000,stdio:'inherit'});if(r.error)console.error(r.error.message);process.exit(r.status??1);"
+~~~
+
+Existingcomponentsequences khôngthayproducer/SQLiteintegration. Runnerownedlocalhost/DEMO/profiletạm; closeunconfirmedgiữtemp,báopath; khôngkillbroadnode/electron. Táchboundedbatches thay tăngtimeoutchehang.
+
+RestoreElectron:
 
 ~~~powershell
 npx --no-install electron-rebuild -f -w better-sqlite3
 ~~~
 
-Harness ẩn sau quyền launch:
+Runtimesmokeisolated:
 
 ~~~powershell
-node -e "const{spawnSync}=require('node:child_process');const e={...process.env};delete e.ELECTRON_RUN_AS_NODE;delete e.NODE_OPTIONS;delete e.VITE_DEV_SERVER_URL;const p=require('node:path').resolve('.debug','antigravity-final-'+require('node:crypto').randomUUID());const r=spawnSync(require('electron'),['scripts/run-electron-harness.cjs','--user-data-dir='+p],{env:e,windowsHide:true,timeout:45000,stdio:'inherit'});if(r.error)console.error(r.error.message);process.exit(r.status??1);"
+node -e "const{spawnSync}=require('node:child_process');const e={...process.env};delete e.ELECTRON_RUN_AS_NODE;delete e.NODE_OPTIONS;delete e.VITE_DEV_SERVER_URL;const p=require('node:path').resolve('.debug','antigravity-vfix-'+require('node:crypto').randomUUID());const r=spawnSync(require('electron'),['scripts/run-electron-harness.cjs','--user-data-dir='+p],{env:e,windowsHide:true,timeout:45000,stdio:'inherit'});if(r.error)console.error(r.error.message);process.exit(r.status??1);"
 ~~~
 
-Sau T13, chạy node scripts/check-bugfix-ui.mjs với quyền tương ứng. Dùng fixture isolated, không app production userData/provider. Giữ owned temp khi close chưa xác nhận; không kill process khác hoặc recursive delete workspace.
+Noinstaller/deploy/liveaccount needed. Chỉcleanownedresolvedtemp saucloseconfirmed, khônguserData/workspace broad.
 
-Không bắt buộc dist/installer trong đợt bugfix; không dùng scripts/live-test-capcut-engine.cjs hoặc check-logs-tab.mjs làm QA an toàn.
+## 8. Live incident scope và điều kiện còn mở
 
-## 8. Review matrix và rollback
+Spec xácđịnh8code/testbugs, khôngchứngminhupstreamvìsao thiếu task_list hoặc phasefailcủaStop08:42. Instrumentationcóthểgiúplầnvalidateđượcduyệt, nhưngkhôngtựchạy lại paidworkflow.
 
-Mỗi ID phải có trạng thái riêng:
+Khôngretrofill4ackcũ nếuthiếuexactproof/op_id/time/authority. Khôngrelease3leasecũ từplan. KhôngđổiDOBpolicy hoặc authflow trongđợtVtasks.
 
-- fixed: behavioral regression GREEN, neighbor tests và reviewer đạt.
-- open: bug còn/patch chưa đạt.
-- waiting-policy: chỉ DOB defaultrange chưa được chốt.
-- legacy-maintenance: fix offline trong T17/T18, không tích hợp defaultflow.
-- unverified-live: không được dùng thay fixed; chỉ ghi phần upstream/GUI chưa chạy.
+Livevalidationnếucó phải đượcuserduyệtscope/cost/account trước; báo unknowncauses, khôngclaimfixhết từfakes.
 
-Bảng báo cáo cần đủ A01–A05, M01–M07, B01–B10, C01–C03, D01–D05. T19 testgaps mỗi mục có test thật đã sửa hoặc lý do chưa xong.
-
-Rollback không dùng git reset/checkout cảtree. Nếu patch chưa commit: undo đúng hunks do task tạo, không đụng changes khác; nếu đã commit và user cho phép rollback: revert đúng commit task. Không rollback DB migrations vì plan không có migration. Không xóa credential/mailbox/evidence để test pass. Snapshot/regression test giữ để tái kiểm bug.
-
-## 9. Handoff cuối
+## 9. Final handoff
 
 ~~~text
-Source HEAD + dirty files:
-A01-A05:
-M01-M07:
-B01-B10:
-C01-C03:
-D01-D05:
-T03-B DOB policy/range: confirmed hoặc WAITING-DOB-POLICY
-RED/GREEN commands + exits:
-Full suite / typecheck / lint / build / selectors:
-Mounted fixture / Electron harness:
-Log perf/retry counts:
-Credential/terminal/cleanup ownership assertions:
-Native ABI cuối:
-Reviewer / remaining gaps:
-Không thay do_action/trial gate/plaintext Dashboard:
+HEAD + dirty file hashes:
+V01 malformed statuses vs valid empty/stopped:
+V02 fallback abort drain / physical writes:
+V03 iteration token / missing sink / memo:
+V04 first causes / account-terminal precedence:
+V05 modal presence/owner/control ambiguity:
+V06 phase/remoteConfirmed/local attachment/reporter:
+V07 canonical timestamp settlement:
+V08 producer/runtime/SQLite13proofs / exactrequests/resources:
+RED/GREEN commands/exits:
+Fullsuite/typecheck/lint/build/selectors:
+Mountedrole/Electronharness/nativeABI:
+No flow/plaintext/retry/release changes:
+Reviewer:
+Unknown live causes / remaining gaps:
 ~~~
 
-Không báo “đã fix hết” nếu T03-B hoặc ID khác còn open. Không coi full-suite xanh là chứng minh mọi remote contract hoặc mọi UI tương tác đã được test.
+Rollbackchỉhunks/taskcommitkhiđượcquyền; không resetwholeworktree/DB/proofs. Taskchưađạtgiữopen, khôngđổi labelthànhdone.
 
 ## Prompt giao Antigravity
 
 ~~~text
-Đọc AGENTS.md, docs/superpowers/specs/2026-09-10-tool-bugfix-spec.md,
-docs/superpowers/plans/2026-09-10-tool-bugfix-plan.md và runbook này.
-Triển khai T01-T19 để đóng 25 findings chính +5 legacy từ full-file audit.
-Dùng current dirty source, giữ patches F/S đã đạt, không reset về clean HEAD.
-Giữ do_action/task_list/claim, trial gate, endpoints/op_id/order/pacing/restock
-và plaintext API key/password/proxy trên Dashboard. Không redesign flow/storage.
-Mỗi task RED đúng nguyên nhân, minimal patch, GREEN+review và AC mapping.
-DOB phải random hợp lệ; range production chỉ dùng sau user xác nhận,
-chưa chốt thì T03-B waiting-policy và làm tiếp task khác, không bịa default.
-Không clear log khi Start reject; không stale credential write; không completed
-khi terminal DB write lỗi. Test mounted dialogs và sửa false-green assertions.
-Không live/purchase/activate trial/commit/push/deploy ngoài quyền được giao.
-Báo đủ30ID, exact evidence, verification gaps và restore Electron ABI cuối.
+Đọc AGENTS.md, Superpowers, spec/plan/runbook2026-09-10-tool-bugfix trongdocs/superpowers.
+Triển khai V01–V08 trêncurrentdirty7ba6d23; khôngreset vàkhônglàmlạifixđãđúng.
+Ưu tiên V01 validstatuses; proof lane V04→V03→V02; V06runtime sau laneproof.
+Giữdo_action/task_list/claim,trialgate/endpoints/op_id/order/pacing/restock,
+APIkey/password/proxyDashboardplaintext. Khôngproductmission/media/vault/masking.
+Malformedstatuskhôngđượcconfirmstop. LocalCDPfailurekhác remoteuncertainty;
+reporterthrowkhôngđổicause, outerdeadlinegiữphase, khôngStopretry/autorelease.
+Proofwriter dùngactualiterationOwners token, sinkbắtbuộc, memoexactversion
+cachesuccess/failuređểfallbacksauabortkhôngmấtproof/ghiđúp/retry.
+Account-terminalfailureưu tiênriêng; DBcausemain-only/publicmessagefixed.
+Modalreaderror/ambiguitykhôngglobalfirstfallback; timestampcanonicalbeforeSQL.
+V08actualexecuteHttpTasks+runtime+SQLite,13pendingrows,valid12rowreceipts,
+exactrequests/resources; khôngmanualackarrayhaySetcheduplicatewrite.
+MỗitaskRED/minimalpatch/GREEN/review. Khônglivepurchase/trial/providerwrite,
+commit/push/deployngoàiquyền; khôngsửauserDB/retainedleases/proofcũ.
+Fullgatescùngsource,restoreElectronABIcuối; báotừngVstatus vàunknownlivecauses.
 ~~~

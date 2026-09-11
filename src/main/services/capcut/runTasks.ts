@@ -126,6 +126,7 @@ export interface RunTasksInput {
   unsettledProofs?: readonly UnsettledTaskProof[];
   ui: AccountUiInteraction;
   onCheckpoint?: (checkpoint: TaskCheckpoint) => Promise<void>;
+  onAcceptedProof?: (proof: UnsettledTaskProof) => Promise<void>;
 }
 
 async function waitForDelay(

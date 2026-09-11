@@ -28,6 +28,7 @@ export interface SettingsState {
   isLoading: boolean;
   isSaving: boolean;
   isSaved: boolean;
+  warning: string | null;
   error: ControllerError | null;
   settings: AppSettingsDTO;
   credentialStatuses: Record<KnownServiceName, CredentialStatusDTO>;
@@ -120,6 +121,50 @@ function cloneDefaultSettings(): AppSettingsDTO {
   return JSON.parse(JSON.stringify(DEFAULT_APP_SETTINGS)) as AppSettingsDTO;
 }
 
+function markLeafDiff(prev: unknown, next: unknown, prefix: string, out: Set<string>): void {
+  if (prev === next) return;
+  if (
+    typeof prev !== 'object' ||
+    prev === null ||
+    typeof next !== 'object' ||
+    next === null ||
+    Array.isArray(prev) ||
+    Array.isArray(next)
+  ) {
+    out.add(prefix);
+    return;
+  }
+  const keys = new Set([...Object.keys(prev), ...Object.keys(next)]);
+  for (const key of keys) {
+    const sub = prefix ? `${prefix}.${key}` : key;
+    markLeafDiff((prev as Record<string, unknown>)[key], (next as Record<string, unknown>)[key], sub, out);
+  }
+}
+
+function mergeUntouched<T>(current: T, incoming: T, prefix: string, touched: Set<string>): T {
+  if (
+    typeof incoming !== 'object' ||
+    incoming === null ||
+    typeof current !== 'object' ||
+    current === null ||
+    Array.isArray(incoming) ||
+    Array.isArray(current)
+  ) {
+    return touched.has(prefix) ? current : incoming;
+  }
+  const result: Record<string, unknown> = { ...(current as Record<string, unknown>) };
+  for (const key of Object.keys(incoming as Record<string, unknown>)) {
+    const sub = prefix ? `${prefix}.${key}` : key;
+    result[key] = mergeUntouched(
+      (current as Record<string, unknown>)[key],
+      (incoming as Record<string, unknown>)[key],
+      sub,
+      touched
+    );
+  }
+  return result as T;
+}
+
 export class SettingsController {
   private state: SettingsState;
   private readonly listeners = new Set<(state: SettingsState) => void>();
@@ -127,18 +172,20 @@ export class SettingsController {
   private loadToken = 0;
   private generation = 0;
   private disposed = false;
-  private touchedSettings = false;
-  private touchedDrafts = new Set<KnownServiceName>();
+  private readonly touchedSettingPaths = new Set<string>();
+  private readonly touchedDrafts = new Set<KnownServiceName>();
   private lastCommittedGeneral: {
     revision: number;
     general: Pick<AppSettingsDTO['general'], 'theme' | 'sessionRestore'>;
   } | null = null;
+  private activeSavePromise: Promise<boolean> | null = null;
 
   constructor(private readonly bridge: ISettingsBridge) {
     this.state = {
       isLoading: true,
       isSaving: false,
       isSaved: false,
+      warning: null,
       error: null,
       settings: cloneDefaultSettings(),
       credentialStatuses: createInitialStatuses(),
@@ -171,11 +218,13 @@ export class SettingsController {
   }
 
   async load(): Promise<void> {
+    this.disposed = false;
     const token = ++this.loadToken;
     const gen = this.generation;
     this.state = {
       ...this.state,
       isLoading: true,
+      isSaving: this.activeSavePromise !== null,
       error: null,
     };
     this.notify();
@@ -190,6 +239,7 @@ export class SettingsController {
         this.state = {
           ...this.state,
           isLoading: false,
+          isSaving: this.activeSavePromise !== null,
           error: {
             code: response.error.code || 'ERR_PERSISTENCE_FAILED',
             message: 'Failed to retrieve application settings or credentials.',
@@ -211,7 +261,12 @@ export class SettingsController {
         }
       }
 
-      const nextSettings = this.touchedSettings ? this.state.settings : parsedSettings;
+      const nextSettings = mergeUntouched(
+        this.state.settings,
+        parsedSettings,
+        '',
+        this.touchedSettingPaths
+      );
 
       const nextDrafts = { ...createInitialDrafts() };
       for (const svc of this.touchedDrafts) {
@@ -221,6 +276,7 @@ export class SettingsController {
       this.state = {
         ...this.state,
         isLoading: false,
+        isSaving: this.activeSavePromise !== null,
         settings: nextSettings,
         credentialStatuses: parsedStatuses,
         drafts: nextDrafts,
@@ -234,6 +290,7 @@ export class SettingsController {
       this.state = {
         ...this.state,
         isLoading: false,
+        isSaving: this.activeSavePromise !== null,
         error: {
           code: 'ERR_PERSISTENCE_FAILED',
           message: 'Failed to retrieve application settings or credentials.',
@@ -244,11 +301,13 @@ export class SettingsController {
   }
 
   updateSettings(updater: (prev: AppSettingsDTO) => AppSettingsDTO): void {
-    this.touchedSettings = true;
+    const prevSettings = this.state.settings;
+    const nextSettings = updater(prevSettings);
+    markLeafDiff(prevSettings, nextSettings, '', this.touchedSettingPaths);
     this.editRevision += 1;
     this.state = {
       ...this.state,
-      settings: updater(this.state.settings),
+      settings: nextSettings,
       isSaved: false,
     };
     this.notify();
@@ -282,12 +341,29 @@ export class SettingsController {
     this.notify();
   }
 
-  async save(): Promise<boolean> {
-    if (this.state.isSaving) {
-      return false;
+  save(): Promise<boolean> {
+    if (this.activeSavePromise) {
+      return Promise.resolve(false);
     }
+    const savePromise = this.executeSave().finally(() => {
+      if (this.activeSavePromise === savePromise) {
+        this.activeSavePromise = null;
+        if (!this.disposed && this.state.isSaving) {
+          this.state = {
+            ...this.state,
+            isSaving: false,
+          };
+          this.notify();
+        }
+      }
+    });
+    this.activeSavePromise = savePromise;
+    return savePromise;
+  }
 
+  private async executeSave(): Promise<boolean> {
     const savedRevision = this.editRevision;
+    const gen = this.generation;
 
     const savePayload: SettingsSaveRequestDTO = {
       settings: this.state.settings,
@@ -303,16 +379,18 @@ export class SettingsController {
     try {
       SettingsSaveRequestSchema.parse(savePayload);
     } catch {
-      this.state = {
-        ...this.state,
-        isSaving: false,
-        isSaved: false,
-        error: {
-          code: 'ERR_VALIDATION_FAILED',
-          message: 'Invalid settings save payload.',
-        },
-      };
-      this.notify();
+      if (!this.disposed && gen === this.generation) {
+        this.state = {
+          ...this.state,
+          isSaving: false,
+          isSaved: false,
+          error: {
+            code: 'ERR_VALIDATION_FAILED',
+            message: 'Invalid settings save payload.',
+          },
+        };
+        this.notify();
+      }
       return false;
     }
 
@@ -320,6 +398,7 @@ export class SettingsController {
       ...this.state,
       isSaving: true,
       isSaved: false,
+      warning: null,
       error: null,
     };
     this.notify();
@@ -328,30 +407,34 @@ export class SettingsController {
     try {
       response = await this.bridge.settings.save(savePayload);
     } catch {
-      this.state = {
-        ...this.state,
-        isSaving: false,
-        isSaved: false,
-        error: {
-          code: 'ERR_PERSISTENCE_FAILED',
-          message: 'Failed to persist application settings or credentials.',
-        },
-      };
-      this.notify();
+      if (!this.disposed && gen === this.generation) {
+        this.state = {
+          ...this.state,
+          isSaving: false,
+          isSaved: false,
+          error: {
+            code: 'ERR_PERSISTENCE_FAILED',
+            message: 'Failed to persist application settings or credentials.',
+          },
+        };
+        this.notify();
+      }
       return false;
     }
 
     if (!response.success || !response.data?.success) {
-      this.state = {
-        ...this.state,
-        isSaving: false,
-        isSaved: false,
-        error: {
-          code: (!response.success && response.error?.code) || 'ERR_PERSISTENCE_FAILED',
-          message: (!response.success && response.error?.message) || 'Failed to persist application settings or credentials.',
-        },
-      };
-      this.notify();
+      if (!this.disposed && gen === this.generation) {
+        this.state = {
+          ...this.state,
+          isSaving: false,
+          isSaved: false,
+          error: {
+            code: (!response.success && response.error?.code) || 'ERR_PERSISTENCE_FAILED',
+            message: (!response.success && response.error?.message) || 'Failed to persist application settings or credentials.',
+          },
+        };
+        this.notify();
+      }
       return false;
     }
 
@@ -363,13 +446,15 @@ export class SettingsController {
       },
     };
 
+    let refreshFailed = false;
     let nextStatuses = this.state.credentialStatuses;
     let nextSettings = this.state.settings;
 
     try {
       const refreshResponse = await this.bridge.settings.get();
       if (refreshResponse.success) {
-        nextSettings = AppSettingsSchema.parse(refreshResponse.data.settings);
+        const parsedRefresh = AppSettingsSchema.parse(refreshResponse.data.settings);
+        nextSettings = mergeUntouched(this.state.settings, parsedRefresh, '', this.touchedSettingPaths);
         nextStatuses = createInitialStatuses();
         if (Array.isArray(refreshResponse.data.credentials)) {
           for (const rawCred of refreshResponse.data.credentials) {
@@ -379,9 +464,15 @@ export class SettingsController {
             }
           }
         }
+      } else {
+        refreshFailed = true;
       }
     } catch {
-      // Refresh error is non-fatal to save outcome
+      refreshFailed = true;
+    }
+
+    if (this.disposed || gen !== this.generation) {
+      return true;
     }
 
     const hasNewEdits = this.editRevision !== savedRevision;
@@ -390,6 +481,7 @@ export class SettingsController {
       ...this.state,
       isSaving: false,
       isSaved: !hasNewEdits,
+      warning: refreshFailed ? 'Cài đặt đã được lưu nhưng không thể làm mới dữ liệu từ hệ thống.' : null,
       settings: hasNewEdits ? this.state.settings : nextSettings,
       credentialStatuses: nextStatuses,
       drafts: hasNewEdits ? this.state.drafts : createInitialDrafts(),
@@ -397,7 +489,7 @@ export class SettingsController {
     };
     if (!hasNewEdits) {
       this.touchedDrafts.clear();
-      this.touchedSettings = false;
+      this.touchedSettingPaths.clear();
     }
     this.notify();
     return true;
@@ -407,12 +499,6 @@ export class SettingsController {
     this.disposed = true;
     this.generation += 1;
     this.loadToken += 1;
-    this.state = {
-      ...this.state,
-      drafts: createInitialDrafts(),
-    };
-    this.touchedDrafts.clear();
-    this.touchedSettings = false;
     this.listeners.clear();
   }
 }

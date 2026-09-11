@@ -91,6 +91,7 @@ export class LogsController {
    */
   private lastQuery: LogsQuery = {};
   private loadToken = 0;
+  private resetEpoch = 0;
   private clearedThrough: number | null = null;
   private pendingPushes: CanonicalRuntimeLog[] = [];
   private clearPromise: Promise<boolean> | null = null;
@@ -232,6 +233,7 @@ export class LogsController {
 
   private async loadHistory(token: number, generation: number): Promise<void> {
     if (!this.isCurrentLoad(token, generation)) return;
+    const epoch = this.resetEpoch;
     this.pendingPushes = [];
     this.setState({ isLoading: true, error: this.clearError });
     const request: { page: number; pageSize: number; level?: string; email?: string } = {
@@ -249,7 +251,7 @@ export class LogsController {
       });
     try {
       const response = await this.bridge.logs.list(request);
-      if (!this.isCurrentLoad(token, generation)) return;
+      if (!this.isCurrentLoad(token, generation) || this.resetEpoch !== epoch) return;
       if (!response.success) {
         loadError();
         return;
@@ -270,7 +272,7 @@ export class LogsController {
       this.pendingPushes = [];
       this.publishRows(combined, { isLoading: false, error: this.clearError });
     } catch {
-      if (this.isCurrentLoad(token, generation)) loadError();
+      if (this.isCurrentLoad(token, generation) && this.resetEpoch === epoch) loadError();
     }
   }
 
@@ -319,6 +321,11 @@ export class LogsController {
   }
 
   private applyLogReset(cutoff: number): void {
+    if (this.clearedThrough !== null && cutoff <= this.clearedThrough) {
+      return;
+    }
+    this.resetEpoch += 1;
+    this.loadToken += 1;
     this.clearedThrough = Math.max(this.clearedThrough ?? 0, cutoff);
     const committedCutoff = this.clearedThrough;
     this.unconfirmedPushes = this.unconfirmedPushes.filter(
@@ -337,6 +344,9 @@ export class LogsController {
       (item) => item.streamSequence !== undefined && item.streamSequence > committedCutoff
     );
     this.publishRows(this.canonicalRows, { isLoading: false, error: null });
+    if (!this.disposed) {
+      void this.loadHistory(this.loadToken, this.generation);
+    }
   }
 
   setPaused(isPaused: boolean): void {
@@ -362,13 +372,14 @@ export class LogsController {
     if (this.clearPromise) return this.clearPromise;
     if (this.disposed) return Promise.resolve(false);
     this.loadToken += 1;
+    const clearEpoch = this.resetEpoch;
     const previousRows = [...this.canonicalRows];
     this.pendingPushes = [];
     this.clearPushes = [];
     this.clearCollecting = true;
     this.clearError = null;
     this.publishRows([], { isLoading: false, error: null });
-    const operation = this.finishClear(previousRows).finally(() => {
+    const operation = this.finishClear(previousRows, clearEpoch).finally(() => {
       if (this.clearPromise !== operation) return;
       this.clearPromise = null;
       this.clearPushes = [];
@@ -378,7 +389,10 @@ export class LogsController {
     return operation;
   }
 
-  private async finishClear(previousRows: CanonicalRuntimeLog[]): Promise<boolean> {
+  private async finishClear(
+    previousRows: CanonicalRuntimeLog[],
+    clearEpoch: number
+  ): Promise<boolean> {
     let response: Awaited<ReturnType<ILogsBridge['logs']['clear']>>;
     try {
       response = await this.bridge.logs.clear();
@@ -393,10 +407,14 @@ export class LogsController {
     }
     this.clearCollecting = false;
     if (!response.success || !response.data.success) {
+      if (clearEpoch !== this.resetEpoch) {
+        return false;
+      }
       this.clearError = response.success ? 'Clear failed' : response.error.message;
+      const restored = previousRows;
       this.clearSurvivors = this.compact([...this.clearPushes, ...this.clearSurvivors]);
       this.publishRows(
-        [...this.unconfirmedPushes, ...this.clearPushes, ...this.clearSurvivors, ...previousRows],
+        [...this.unconfirmedPushes, ...this.clearPushes, ...this.clearSurvivors, ...restored],
         { isLoading: false, error: this.clearError }
       );
       return false;
@@ -418,9 +436,13 @@ export class LogsController {
       this.unconfirmedPushes = [];
       this.clearSurvivors = [];
     }
-    this.publishRows(this.clearSurvivors, { isLoading: false, error: null });
+    if (clearEpoch === this.resetEpoch) {
+      this.publishRows(this.clearSurvivors, { isLoading: false, error: null });
+    } else {
+      this.publishRows(this.canonicalRows, { isLoading: false, error: null });
+    }
 
-    if (cutoff === undefined && !this.disposed) {
+    if (cutoff === undefined && !this.disposed && clearEpoch === this.resetEpoch) {
       // Private read cannot await this clearPromise; it owns the latest query now.
       const token = ++this.loadToken;
       await this.loadHistory(token, this.generation);

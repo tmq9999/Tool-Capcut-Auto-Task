@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Feature Announcement Modal Fixture</title>
+  <style>
+    .lv-modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.5); }
+    .lv-modal-wrapper { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  </style>
+</head>
+<body>
+  <div class="lv-modal-mask" style="display:block"></div>
+  <div class="lv-modal-wrapper" style="display:block">
+    <div class="lv-modal lv-modal-closable operation-features-modal">
+      <h2>What's new</h2>
+      <button type="button">Try now</button>
+      <span class="lv-icon-hover lv-modal-close-icon"
+            role="button" aria-label="Close"><svg></svg></span>
+    </div>
+  </div>
+  <div class="guideBubble-fixture">
+    <div class="guideFooter-fixture"><button>Got it</button></div>
+  </div>
+</body>
+</html>

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { generateBirthday, isLeapYear, getDaysInMonth } from '../birthday';
+import { generateBirthday, generateBirthdayInRange, isLeapYear, getDaysInMonth } from '../birthday';
 
 describe('T03 — A02: Birthday randomizer (1990 - 2004)', () => {
   it('correctly calculates leap years and days in month', () => {
@@ -63,6 +63,48 @@ describe('T03 — A02: Birthday randomizer (1990 - 2004)', () => {
     expect(bday.year).toBeLessThanOrEqual(2004);
     expect(bday.monthIndex).toBe(bday.month - 1);
     expect(bday.dayIndex).toBe(bday.day - 1);
+  });
+
+  it('rejects fractional, NaN, or infinite years and invalid RNG in generateBirthday', () => {
+    expect(() => generateBirthday({ startYear: NaN })).toThrow();
+    expect(() => generateBirthday({ endYear: Infinity })).toThrow();
+    expect(() => generateBirthday({ startYear: 1990.5 })).toThrow();
+    expect(() => generateBirthday({ startYear: 2005, endYear: 2000 })).toThrow();
+
+    expect(() => generateBirthday({}, () => -0.1)).toThrow();
+    expect(() => generateBirthday({}, () => 1.0)).toThrow();
+    expect(() => generateBirthday({}, () => NaN)).toThrow();
+  });
+
+  it('generateBirthdayInRange: validates calendar day bounds and sample uniform day distribution', () => {
+    // Leap year boundary: 2000-02-28 to 2000-03-01 has 3 days (28, 29, 1)
+    const feb28 = generateBirthdayInRange({ earliest: '2000-02-28', latest: '2000-03-01' }, () => 0);
+    expect(feb28).toMatchObject({ year: 2000, month: 2, day: 28, monthName: 'February' });
+
+    const feb29 = generateBirthdayInRange({ earliest: '2000-02-28', latest: '2000-03-01' }, () => 0.34);
+    expect(feb29).toMatchObject({ year: 2000, month: 2, day: 29, monthName: 'February' });
+
+    const mar01 = generateBirthdayInRange({ earliest: '2000-02-28', latest: '2000-03-01' }, () => 0.99);
+    expect(mar01).toMatchObject({ year: 2000, month: 3, day: 1, monthName: 'March' });
+
+    // Single day range
+    const single = generateBirthdayInRange({ earliest: '1995-06-15', latest: '1995-06-15' }, () => 0.5);
+    expect(single).toMatchObject({ year: 1995, month: 6, day: 15, monthName: 'June', monthIndex: 5, dayIndex: 14 });
+
+    // Invalid non-leap 1900-02-29
+    expect(() => generateBirthdayInRange({ earliest: '1900-02-29', latest: '1900-03-01' })).toThrow('INVALID_BIRTHDAY_RANGE');
+
+    // Invalid date formats or malformed
+    expect(() => generateBirthdayInRange({ earliest: '2000/01/01', latest: '2000-01-02' })).toThrow('INVALID_BIRTHDAY_RANGE');
+    expect(() => generateBirthdayInRange({ earliest: '2000-13-01', latest: '2000-13-02' })).toThrow('INVALID_BIRTHDAY_RANGE');
+
+    // Reversed range
+    expect(() => generateBirthdayInRange({ earliest: '2000-01-05', latest: '2000-01-01' })).toThrow('INVALID_BIRTHDAY_RANGE');
+
+    // Invalid RNG
+    expect(() => generateBirthdayInRange({ earliest: '2000-01-01', latest: '2000-01-05' }, () => -0.01)).toThrow('INVALID_BIRTHDAY_RNG');
+    expect(() => generateBirthdayInRange({ earliest: '2000-01-01', latest: '2000-01-05' }, () => 1.0)).toThrow('INVALID_BIRTHDAY_RNG');
+    expect(() => generateBirthdayInRange({ earliest: '2000-01-01', latest: '2000-01-05' }, () => NaN)).toThrow('INVALID_BIRTHDAY_RNG');
   });
 });
 

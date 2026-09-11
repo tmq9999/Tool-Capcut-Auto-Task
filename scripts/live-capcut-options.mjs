@@ -74,6 +74,11 @@ export function parseHeadlessFlag(argv) {
   return argv.includes('--headless');
 }
 
+export function parseMissionTransport(argv) {
+  const explicit = argv.find((arg) => arg.startsWith('--mission-transport='));
+  return explicit ? explicit.split('=')[1] : (argv.includes('--http-only') ? 'http-only' : 'ui');
+}
+
 /** @typedef {1 | 3 | 5 | 10} RolloutStage */
 /** @typedef {{ threads: number, mailLimit: number, approvedMailboxes: number, stopAfter: number, maxBillablePurchases: number }} EqualCaps */
 /** @typedef {{ requireIndependent?: true }} IndependenceOption */

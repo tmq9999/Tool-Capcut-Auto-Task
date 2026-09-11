@@ -47,6 +47,7 @@ export interface DashboardActionBarProps {
   onStart?: () => void;
   isRunning?: boolean;
   isStopping?: boolean;
+  isSubmitting?: boolean;
   workerTarget?: number;
   workersActive?: number;
   accountsAccepted?: number;
@@ -69,6 +70,7 @@ export const DashboardActionBar: React.FC<DashboardActionBarProps> = ({
   onStart,
   isRunning = false,
   isStopping = false,
+  isSubmitting = false,
   workerTarget,
   workersActive,
   accountsAccepted,
@@ -154,10 +156,10 @@ export const DashboardActionBar: React.FC<DashboardActionBarProps> = ({
           size="sm"
           icon={<Play className="w-3.5 h-3.5 fill-current" />}
           onClick={onStart}
-          disabled={isStopping}
+          disabled={isStopping || isSubmitting}
           className="px-5 font-bold tracking-wide"
         >
-          {isStopping ? 'ĐANG DỪNG...' : isRunning ? 'DỪNG LẠI' : 'BẮT ĐẦU'}
+          {isStopping ? 'ĐANG DỪNG...' : isSubmitting ? 'ĐANG BẬT...' : isRunning ? 'DỪNG LẠI' : 'BẮT ĐẦU'}
         </Button>
       </div>
     </div>

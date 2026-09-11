@@ -22,7 +22,7 @@ import { loadOfflineFixture } from './offlineFixture';
 
 import { assertHittable } from '../src/main/services/capcut/diag';
 import { findTaskRow, findTaskEntries } from '../src/main/services/capcut/missionRunner';
-import { skipOnboardingSurvey, closeBlockingPricingModal, ensurePageUsable } from '../src/main/services/capcut/overlays';
+import { skipOnboardingSurvey, closeBlockingPricingModal, ensurePageUsable, dismissOperationFeatureModal } from '../src/main/services/capcut/overlays';
 import { findExportButton, ensureNodeToolbar } from '../src/main/services/capcut/missions/videoStudio';
 import type { CapcutMissionEnv } from '../src/main/services/capcut/types';
 import { createDirectUiInteraction } from '../src/main/services/capcut/uiInteractionScheduler';
@@ -658,6 +658,40 @@ async function main(): Promise<void> {
     check('bỏ panel phủ thì assertHittable cho qua', clear === true);
 
     await page.close();
+  }
+
+  // ------------------------------------------ Modal What's new (dom-operation-features-modal.html)
+  {
+    const { page, close } = await open(browser, 'tools/fixtures/dom-operation-features-modal.html');
+    console.log("\n=== modal What's new — kiểm tra nút Close accessible ===");
+
+    const wrapper = page.locator('.lv-modal-wrapper').filter({ has: page.locator('.operation-features-modal') });
+    check("wrapper modal What's new là duy nhất", (await wrapper.count()) === 1);
+
+    const closeBtn = wrapper.getByRole('button', { name: 'Close', exact: true });
+    check('nút Close (span role=button aria-label=Close) được nhận diện đúng 1', (await closeBtn.count()) === 1);
+
+    const tryNowBtn = wrapper.locator('button:has-text("Try now")');
+    check('nút Try now tồn tại trong modal nhưng không phải nút Close', (await tryNowBtn.count()) === 1);
+
+    const outsideGotIt = page.locator('.guideBubble-fixture button:has-text("Got it")');
+    check("nút Got it nằm ngoài wrapper modal What's new", (await outsideGotIt.count()) === 1);
+
+    const insideGotIt = wrapper.locator('button:has-text("Got it")');
+    check("nút Got it KHÔNG nằm trong wrapper modal What's new", (await insideGotIt.count()) === 0);
+
+    // Giả lập hành vi browser đóng modal khi click nút Close
+    await page.evaluate(() => {
+      document.querySelector('.lv-modal-close-icon')?.addEventListener('click', () => {
+        const modalWrapper = document.querySelector('.lv-modal-wrapper') as HTMLElement | null;
+        if (modalWrapper) modalWrapper.style.display = 'none';
+      });
+    });
+
+    const dismissed = await dismissOperationFeatureModal(page, () => {}, toolUi, toolSignal);
+    check("dismissOperationFeatureModal đóng thành công modal What's new khi click Close", dismissed === true);
+
+    await close();
   }
 
   await browser.close();

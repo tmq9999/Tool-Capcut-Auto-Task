@@ -53,14 +53,16 @@ export interface IDashboardBridge {
   };
 }
 
-/** Credential mutations that leave every stored secret untouched. */
-const KEEP_ALL_CREDENTIALS: SettingsSaveRequestDTO['credentials'] = [
-  { serviceName: 'gmail94', operation: { action: 'keep' } },
-  { serviceName: 'multilogin', operation: { action: 'keep' } },
-  { serviceName: 'kiotproxy', operation: { action: 'keep' } },
-  { serviceName: 'dongvanfb', operation: { action: 'keep' } },
-  { serviceName: 'gologin', operation: { action: 'keep' } }
-];
+
+interface ConfigSaveTarget {
+  revision: number;
+  config: AutomationConfigSettingsDTO;
+}
+
+type ConfigSaveResult = {
+  revision: number;
+  status: 'committed' | 'failed' | 'superseded';
+};
 
 export interface DashboardState {
   isLoading: boolean;
@@ -115,11 +117,33 @@ export class DashboardController {
   private autoSaveEnabled = false;
   private configRevision = 0;
   private lastSavedRevision = 0;
-  private inFlightSave: Promise<boolean> | null = null;
+  private lastCommittedRevision = 0;
+  private activeTarget: {
+    target: ConfigSaveTarget;
+    waiters: Array<(res: ConfigSaveResult) => void>;
+    generation: number;
+  } | null = null;
+  private pendingPinnedTarget: {
+    target: ConfigSaveTarget;
+    waiters: Array<(res: ConfigSaveResult) => void>;
+    generation: number;
+  } | null = null;
+  private pendingBackgroundTarget: {
+    target: ConfigSaveTarget;
+    waiters: Array<(res: ConfigSaveResult) => void>;
+    generation: number;
+  } | null = null;
+  private pendingStart: Promise<boolean> | null = null;
   private pendingStop: Promise<boolean> | null = null;
+  private lastSaveError: string | null = null;
   private snapshotPromise: Promise<void> | null = null;
   private snapshotPending = false;
   private generation = 0;
+  private loadToken = 0;
+  private progressPushRevision = 0;
+  private logResetEpoch = 0;
+  private logClearedThrough: number | null = null;
+  private readonly editedConfigKeys = new Set<keyof AutomationConfigState>();
   private currentCompletion: { promise: Promise<void>; resolve: () => void } | null = null;
   private nextCompletion: { promise: Promise<void>; resolve: () => void } | null = null;
   private isDisposed = false;
@@ -182,86 +206,227 @@ export class DashboardController {
 
   updateConfig(patch: Partial<AutomationConfigState>): void {
     this.configRevision += 1;
+    for (const k of Object.keys(patch) as Array<keyof AutomationConfigState>) {
+      this.editedConfigKeys.add(k);
+    }
     this.setState({ config: { ...this.state.config, ...patch }, configSavedAt: null });
     if (this.autoSaveEnabled) {
       void this.scheduleSave();
     }
   }
 
-  private scheduleSave(): Promise<boolean> {
-    if (this.inFlightSave) {
-      return this.inFlightSave.then(() => {
-        if (this.lastSavedRevision < this.configRevision) {
-          return this.scheduleSave();
-        }
-        return true;
-      });
+  private enqueueSave(
+    target: ConfigSaveTarget,
+    priority: 'background' | 'pinned'
+  ): Promise<ConfigSaveResult> {
+    if (this.isDisposed) {
+      return Promise.resolve({ revision: target.revision, status: 'superseded' });
     }
 
-    const targetRevision = this.configRevision;
-    const targetConfig = toPersistedConfig(this.state.config);
-    this.setState({ isSavingConfig: true });
-
-    this.inFlightSave = (async () => {
-      try {
-        const response = this.bridge.settings.saveAutomation
-          ? await this.bridge.settings.saveAutomation(targetConfig)
-          : await (async () => {
-              const base = this.storedSettings;
-              if (!base) {
-                return {
-                  success: false,
-                  error: { code: 'ERR_PERSISTENCE_FAILED', message: 'Chưa đọc được cài đặt hiện tại, hãy thử tải lại.' }
-                };
-              }
-              return await this.bridge.settings.save({
-                settings: { ...base, automation: targetConfig },
-                credentials: KEEP_ALL_CREDENTIALS
-              });
-            })();
-
-        if (!response.success) {
-          this.setState({ isSavingConfig: false, error: response.error.message });
-          return false;
+    const currentGeneration = this.generation;
+    return new Promise<ConfigSaveResult>((resolve) => {
+      if (!this.activeTarget) {
+        this.activeTarget = {
+          target,
+          waiters: [resolve],
+          generation: currentGeneration
+        };
+        if (!this.isDisposed) {
+          this.setState({ isSavingConfig: true });
         }
+        void this.processSaveQueue();
+        return;
+      }
 
-        this.lastSavedRevision = Math.max(this.lastSavedRevision, targetRevision);
-        if (this.storedSettings) {
-          this.storedSettings = { ...this.storedSettings, automation: targetConfig };
+      if (priority === 'pinned') {
+        if (this.activeTarget.target.revision === target.revision) {
+          this.activeTarget.waiters.push(resolve);
+          return;
         }
-        this.setState({
-          isSavingConfig: this.lastSavedRevision < this.configRevision,
-          configSavedAt: new Date().toISOString(),
-          error: null
-        });
-        return true;
-      } finally {
-        this.inFlightSave = null;
+        if (this.pendingPinnedTarget) {
+          if (this.pendingPinnedTarget.target.revision === target.revision) {
+            this.pendingPinnedTarget.waiters.push(resolve);
+            return;
+          }
+          for (const w of this.pendingPinnedTarget.waiters) {
+            try {
+              w({ revision: this.pendingPinnedTarget.target.revision, status: 'superseded' });
+            } catch {
+              // ignore
+            }
+          }
+        }
+        this.pendingPinnedTarget = {
+          target,
+          waiters: [resolve],
+          generation: currentGeneration
+        };
+        return;
       }
-    })();
 
-    return this.inFlightSave.then((success) => {
-      if (success && this.lastSavedRevision < this.configRevision) {
-        return this.scheduleSave();
+      // priority === 'background'
+      if (this.activeTarget.target.revision === target.revision) {
+        this.activeTarget.waiters.push(resolve);
+        return;
       }
-      return success;
+
+      if (this.pendingBackgroundTarget) {
+        if (this.pendingBackgroundTarget.target.revision === target.revision) {
+          this.pendingBackgroundTarget.waiters.push(resolve);
+          return;
+        }
+        const superseded = this.pendingBackgroundTarget;
+        this.pendingBackgroundTarget = {
+          target,
+          waiters: [resolve],
+          generation: currentGeneration
+        };
+        for (const w of superseded.waiters) {
+          try {
+            w({ revision: superseded.target.revision, status: 'superseded' });
+          } catch {
+            // ignore
+          }
+        }
+        return;
+      }
+
+      this.pendingBackgroundTarget = {
+        target,
+        waiters: [resolve],
+        generation: currentGeneration
+      };
     });
   }
 
-  /** Lets a caller (or a test) await an auto-save that is in flight. */
-  async flushPendingSave(targetRevision?: number): Promise<void> {
-    if (!this.autoSaveEnabled && !this.inFlightSave) {
-      return;
-    }
-    const target = targetRevision ?? this.configRevision;
-    while (this.lastSavedRevision < target && (this.autoSaveEnabled || this.inFlightSave)) {
-      if (this.inFlightSave) {
-        await this.inFlightSave;
-      } else if (this.autoSaveEnabled) {
-        const ok = await this.scheduleSave();
-        if (!ok) break;
+  private async processSaveQueue(): Promise<void> {
+    while (this.activeTarget) {
+      const current = this.activeTarget;
+      const { target, waiters, generation: targetGen } = current;
+
+      let result: ConfigSaveResult;
+      try {
+        let response: IpcEnvelope<{ success: boolean }>;
+        if (this.bridge.settings.saveAutomation) {
+          response = await this.bridge.settings.saveAutomation(target.config);
+        } else {
+          response = {
+            success: false,
+            error: {
+              code: 'ERR_BRIDGE_NOT_READY',
+              message: 'Cầu nối cài đặt chưa hỗ trợ lưu cấu hình tự động.'
+            }
+          };
+        }
+
+        if (response.success && response.data?.success === true) {
+          this.lastSavedRevision = Math.max(this.lastSavedRevision, target.revision);
+          this.lastCommittedRevision = target.revision;
+          if (this.storedSettings) {
+            this.storedSettings = { ...this.storedSettings, automation: target.config };
+          }
+          if (!this.isDisposed && this.generation === targetGen) {
+            const isCurrent = this.configRevision === target.revision;
+            const shouldClearError = isCurrent && this.state.error === this.lastSaveError;
+            if (shouldClearError) {
+              this.lastSaveError = null;
+            }
+            this.setState({
+              configSavedAt: isCurrent ? new Date().toISOString() : null,
+              ...(shouldClearError ? { error: null } : {})
+            });
+          }
+          result = { revision: target.revision, status: 'committed' };
+        } else {
+          const errorMsg = !response.success
+            ? response.error.message
+            : 'Lưu cấu hình tự động không thành công.';
+          this.lastSaveError = errorMsg;
+          if (!this.isDisposed && this.generation === targetGen) {
+            this.setState({
+              configSavedAt: null,
+              error: errorMsg
+            });
+          }
+          result = { revision: target.revision, status: 'failed' };
+        }
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        this.lastSaveError = errorMsg;
+        if (!this.isDisposed && this.generation === targetGen) {
+          this.setState({
+            configSavedAt: null,
+            error: errorMsg
+          });
+        }
+        result = { revision: target.revision, status: 'failed' };
+      }
+
+      for (const w of waiters) {
+        try {
+          w(result);
+        } catch {
+          // ignore
+        }
+      }
+
+      if (this.pendingPinnedTarget) {
+        this.activeTarget = this.pendingPinnedTarget;
+        this.pendingPinnedTarget = null;
+      } else if (this.pendingBackgroundTarget) {
+        this.activeTarget = this.pendingBackgroundTarget;
+        this.pendingBackgroundTarget = null;
+      } else {
+        this.activeTarget = null;
       }
     }
+
+    if (!this.isDisposed) {
+      this.setState({ isSavingConfig: false });
+    }
+  }
+
+  private scheduleSave(): Promise<boolean> {
+    const target: ConfigSaveTarget = {
+      revision: this.configRevision,
+      config: toPersistedConfig(this.state.config)
+    };
+    return this.enqueueSave(target, 'background').then(
+      (res) => res.status === 'committed'
+    );
+  }
+
+  /** Lets a caller (or a test) await an auto-save that is in flight. */
+  async flushPendingSave(targetRevision?: number): Promise<boolean> {
+    const target = targetRevision ?? this.configRevision;
+
+    if (this.lastCommittedRevision === target) {
+      return true;
+    }
+
+    if (this.activeTarget?.target.revision === target) {
+      return new Promise<boolean>((resolve) => {
+        this.activeTarget!.waiters.push((res) => resolve(res.status === 'committed'));
+      });
+    }
+
+    if (this.pendingPinnedTarget?.target.revision === target) {
+      return new Promise<boolean>((resolve) => {
+        this.pendingPinnedTarget!.waiters.push((res) => resolve(res.status === 'committed'));
+      });
+    }
+
+    if (this.pendingBackgroundTarget?.target.revision === target) {
+      return new Promise<boolean>((resolve) => {
+        this.pendingBackgroundTarget!.waiters.push((res) => resolve(res.status === 'committed'));
+      });
+    }
+
+    if (target === 0 || this.lastCommittedRevision === target) {
+      return true;
+    }
+
+    return false;
   }
 
   /**
@@ -271,7 +436,12 @@ export class DashboardController {
    */
   async saveConfig(): Promise<boolean> {
     this.configRevision += 1;
-    return this.scheduleSave();
+    const target: ConfigSaveTarget = {
+      revision: this.configRevision,
+      config: toPersistedConfig(this.state.config)
+    };
+    const result = await this.enqueueSave(target, 'background');
+    return result.status === 'committed';
   }
 
   private requestSnapshotRefresh(): Promise<void> {
@@ -379,43 +549,64 @@ export class DashboardController {
   }
 
   async load(): Promise<void> {
+    const generation = this.generation;
+    const token = ++this.loadToken;
+    const isCurrent = () => !this.isDisposed && this.generation === generation && this.loadToken === token;
+
     this.setState({ isLoading: true, error: null });
 
-    // Restore the saved knobs, keeping whatever the user is currently typing in
-    // the fields that are deliberately never persisted.
-    const settingsResponse = await this.bridge.settings.get();
-    if (settingsResponse.success) {
-      this.storedSettings = settingsResponse.data.settings;
-      this.autoSaveEnabled = settingsResponse.data.settings.general.autoSaveConfig;
-      this.setState({
-        customEmail: settingsResponse.data.settings.customEmail,
-        config: fromPersistedConfig(settingsResponse.data.settings.automation, {
+    try {
+      // Restore the saved knobs, keeping whatever the user has already edited in
+      // memory, and keeping fields that are deliberately never persisted.
+      const settingsResponse = await this.bridge.settings.get();
+      if (!isCurrent()) return;
+
+      if (settingsResponse.success) {
+        this.storedSettings = settingsResponse.data.settings;
+        this.autoSaveEnabled = settingsResponse.data.settings.general.autoSaveConfig;
+        const persisted = fromPersistedConfig(settingsResponse.data.settings.automation, {
           emailList: this.state.config.emailList,
           proxyList: this.state.config.proxyList,
           proxyKeyList: this.state.config.proxyKeyList,
           customPassword: this.state.config.customPassword
-        })
-      });
+        });
+        const nextConfig = { ...this.state.config };
+        for (const key of Object.keys(persisted) as Array<keyof AutomationConfigState>) {
+          if (!this.editedConfigKeys.has(key)) {
+            Object.assign(nextConfig, { [key]: persisted[key] });
+          }
+        }
+        this.setState({
+          customEmail: settingsResponse.data.settings.customEmail,
+          config: nextConfig
+        });
+      }
+
+      await this.refreshLogs();
+      if (!isCurrent()) return;
+
+      const providersResponse = await this.bridge.email.providers();
+      if (!isCurrent()) return;
+      if (providersResponse.success) {
+        this.setState({ emailProviders: providersResponse.data });
+      }
+
+      const pushRevBefore = this.progressPushRevision;
+      const progressResponse = await this.bridge.run.progress();
+      if (!isCurrent()) return;
+      if (this.progressPushRevision === pushRevBefore && progressResponse.success) {
+        this.setState({ progress: progressResponse.data });
+      }
+
+      await this.requestSnapshotRefresh();
+      if (!isCurrent()) return;
+
+      this.setState({ isLoading: false });
+    } catch (err) {
+      if (!isCurrent()) return;
+      const message = err instanceof Error ? err.message : String(err);
+      this.setState({ isLoading: false, error: message });
     }
-
-    const logsResponse = await this.bridge.logs.list({ page: 1, pageSize: this.maxLogs });
-    if (logsResponse.success) {
-      this.setState({ logs: logsResponse.data.items });
-    }
-
-    const providersResponse = await this.bridge.email.providers();
-    if (providersResponse.success) {
-      this.setState({ emailProviders: providersResponse.data });
-    }
-
-    const progressResponse = await this.bridge.run.progress();
-    if (progressResponse.success) {
-      this.setState({ progress: progressResponse.data });
-    }
-
-    await this.requestSnapshotRefresh();
-
-    this.setState({ isLoading: false });
   }
 
   /** Wires the push channels. Returns the detach function for convenience. */
@@ -424,9 +615,19 @@ export class DashboardController {
       return () => this.dispose();
     }
     this.isDisposed = false;
+    if (this.pendingStart) {
+      this.setState({ isSubmitting: true });
+    }
 
     this.detachers.push(
       this.bridge.logs.onEntry((entry) => {
+        if (
+          this.logClearedThrough !== null &&
+          entry.streamSequence !== undefined &&
+          entry.streamSequence <= this.logClearedThrough
+        ) {
+          return;
+        }
         const next = [entry, ...this.state.logs].slice(0, this.maxLogs);
         this.setState({ logs: next });
       })
@@ -434,6 +635,7 @@ export class DashboardController {
 
     this.detachers.push(
       this.bridge.run.onProgress((progress) => {
+        this.progressPushRevision++;
         const terminalError =
           progress.state === 'blocked' || progress.state === 'failed'
             ? progress.message
@@ -468,51 +670,142 @@ export class DashboardController {
     return () => this.dispose();
   }
 
-  async start(): Promise<boolean> {
-    const startRevision = this.configRevision;
-    await this.flushPendingSave(startRevision);
-    const mapped = toRunConfig(this.state.config);
+  start(): Promise<boolean> {
+    if (this.pendingStart) {
+      return this.pendingStart;
+    }
+    this.setState({ isSubmitting: true });
+    const activeStart = this.executeStart().finally(() => {
+      if (this.pendingStart === activeStart) {
+        this.pendingStart = null;
+      }
+      if (!this.isDisposed && this.pendingStart === null) {
+        this.setState({ isSubmitting: false });
+      }
+    });
+    this.pendingStart = activeStart;
+    return activeStart;
+  }
+
+  private async executeStart(): Promise<boolean> {
+    const startGeneration = this.generation;
+    const snapshotConfig = { ...this.state.config };
+    const snapshotRevision = this.configRevision;
+
+    const mapped = toRunConfig(snapshotConfig);
     if (!mapped.ok) {
-      this.setState({ error: mapped.message });
+      if (!this.isDisposed && this.generation === startGeneration) {
+        this.setState({ error: mapped.message });
+      }
       return false;
     }
 
-    this.setState({ isSubmitting: true, error: null });
-
-    const response = await this.bridge.run.start(mapped.config);
-    this.setState({ isSubmitting: false });
-
-    if (!response.success) {
-      this.setState({ error: response.error.message });
-      return false;
-    }
-
-    if (response.data.clearedThrough !== undefined) {
-      this.applyLogReset(response.data.clearedThrough);
-    } else {
-      try {
-        if (this.bridge.logs.clear) {
-          const clearRes = await this.bridge.logs.clear();
-          if (clearRes.success && clearRes.data?.clearedThrough !== undefined) {
-            this.applyLogReset(clearRes.data.clearedThrough);
-          } else {
-            this.setState({ logs: [] });
-          }
-        }
-      } catch {
-        // Best-effort clear
+    if (this.autoSaveEnabled) {
+      const pinnedTarget: ConfigSaveTarget = {
+        revision: snapshotRevision,
+        config: toPersistedConfig(snapshotConfig)
+      };
+      const saveResult = await this.enqueueSave(pinnedTarget, 'pinned');
+      if (saveResult.status !== 'committed') {
+        return false;
       }
     }
 
-    this.setState({ error: null });
-    return true;
+    try {
+      const response = await this.bridge.run.start(mapped.config);
+      if (!response.success) {
+        if (!this.isDisposed && this.generation === startGeneration) {
+          this.setState({ error: response.error.message });
+        }
+        return false;
+      }
+
+      if (response.data.clearedThrough !== undefined) {
+        this.applyLogReset(response.data.clearedThrough);
+      }
+
+      if (!this.isDisposed && this.generation === startGeneration) {
+        this.setState({ error: null });
+      }
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!this.isDisposed && this.generation === startGeneration) {
+        this.setState({ error: message });
+      }
+      return false;
+    }
   }
 
   private applyLogReset(clearedThrough: number): void {
+    if (this.logClearedThrough !== null && clearedThrough <= this.logClearedThrough) {
+      return;
+    }
+    this.logResetEpoch += 1;
+    this.logClearedThrough = Math.max(this.logClearedThrough ?? 0, clearedThrough);
+    const cutoff = this.logClearedThrough;
     this.setState({
-      logs: this.state.logs.filter((l) => (l.streamSequence ?? 0) > clearedThrough)
+      logs: this.state.logs.filter((l) => l.streamSequence !== undefined && l.streamSequence > cutoff)
     });
+    void this.refreshLogs();
   }
+
+  private async refreshLogs(): Promise<void> {
+    const requestEpoch = this.logResetEpoch;
+    const requestGen = this.generation;
+
+    try {
+      const logsResponse = await this.bridge.logs.list({ page: 1, pageSize: this.maxLogs });
+      if (this.isDisposed || this.generation !== requestGen || this.logResetEpoch !== requestEpoch) {
+        return;
+      }
+      if (!logsResponse.success) {
+        return;
+      }
+
+      const visibleLogs = logsResponse.data.items.filter((l) =>
+        this.logClearedThrough === null ||
+        l.streamSequence === undefined ||
+        l.streamSequence > this.logClearedThrough
+      );
+
+      const survivingBuffer = this.state.logs.filter((l) =>
+        this.logClearedThrough === null ||
+        l.streamSequence === undefined ||
+        l.streamSequence > this.logClearedThrough
+      );
+
+      const seenIds = new Set<string>();
+      const merged: CanonicalRuntimeLog[] = [];
+      for (const l of [...visibleLogs, ...survivingBuffer]) {
+        const idKey = l.id ? String(l.id) : `${l.createdAt}-${l.message}`;
+        if (!seenIds.has(idKey)) {
+          seenIds.add(idKey);
+          merged.push(l);
+        }
+      }
+
+      merged.sort((a, b) => {
+        const timeA = new Date(a.createdAt).getTime();
+        const timeB = new Date(b.createdAt).getTime();
+        if (timeA !== timeB) {
+          return timeB - timeA;
+        }
+        const seqA = a.streamSequence;
+        const seqB = b.streamSequence;
+        if (seqA !== undefined && seqB !== undefined && seqA !== seqB) {
+          return seqB - seqA;
+        }
+        return 0;
+      });
+
+      this.setState({ logs: merged.slice(0, this.maxLogs) });
+    } catch {
+      // Ignore background log refresh failures
+    }
+  }
+
+
 
   /** Deletes account rows from the grid, e.g. clearing finished runs. */
   async removeAccounts(ids: string[]): Promise<boolean> {
@@ -574,6 +867,28 @@ export class DashboardController {
       this.nextCompletion = null;
     }
     this.snapshotPending = false;
+
+    if (this.pendingPinnedTarget) {
+      for (const w of this.pendingPinnedTarget.waiters) {
+        try {
+          w({ revision: this.pendingPinnedTarget.target.revision, status: 'superseded' });
+        } catch {
+          // ignore
+        }
+      }
+      this.pendingPinnedTarget = null;
+    }
+    if (this.pendingBackgroundTarget) {
+      for (const w of this.pendingBackgroundTarget.waiters) {
+        try {
+          w({ revision: this.pendingBackgroundTarget.target.revision, status: 'superseded' });
+        } catch {
+          // ignore
+        }
+      }
+      this.pendingBackgroundTarget = null;
+    }
+    // In-flight start promise ownership is preserved across dispose/attach so duplicate Start IPCs are coalesced.
   }
 }
 

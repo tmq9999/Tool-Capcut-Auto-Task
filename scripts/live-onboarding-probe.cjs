@@ -11,6 +11,7 @@ const { KiotProxyProvider } = require('../src/main/providers/KiotProxyProvider.t
 const { FetchHttpClient } = require('../src/main/providers/HttpClient.ts');
 const { parseTrialOffers } = require('../src/main/services/capcut/http/trialOffers.ts');
 
+const workspaceRoot = path.resolve(__dirname, '..');
 const vaultHelper = path.join(workspaceRoot, '.superpowers/sdd/2026-09-09-native-signup-live/mailbox-vault.cjs');
 const { protect, unprotect } = require(vaultHelper);
 const { pollGmailOtp } = require('./legacy-diagnostic-helpers.cjs');

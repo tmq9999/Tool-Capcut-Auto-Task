@@ -7,6 +7,7 @@ interface MockCheckboxState {
   visible: boolean;
   checked: boolean;
   clickToggles?: boolean;
+  initialReadError?: Error;
 }
 
 function createTermsTestPage(checkboxStates: MockCheckboxState[]) {
@@ -14,18 +15,27 @@ function createTermsTestPage(checkboxStates: MockCheckboxState[]) {
   const trace: string[] = [];
 
   const createBoxLocator = (index: number) => {
+    let reads = 0;
     const boxLoc: Record<string, unknown> = {
       page: () => page,
       first: () => boxLoc,
       nth: () => boxLoc,
       isVisible: vi.fn(async () => checkboxStates[index]?.visible ?? false),
-      isChecked: vi.fn(async () => checkboxStates[index]?.checked ?? false),
+      isChecked: vi.fn(async () => {
+        const state = checkboxStates[index];
+        if (!state) return false;
+        reads++;
+        if (reads === 1 && state.initialReadError) {
+          throw state.initialReadError;
+        }
+        return state.checked;
+      }),
       click: vi.fn(async () => {
         trace.push(`click-box-${index}`);
         const state = checkboxStates[index];
         if (!state) return;
         if (state.clickToggles !== false) {
-          state.checked = true;
+          state.checked = !state.checked;
         }
       })
     };
@@ -68,6 +78,7 @@ function createTermsTestPage(checkboxStates: MockCheckboxState[]) {
             if (isSubmit) {
               trace.push('submit-click');
               submitClicked.value = true;
+              throw new Error('AFTER_SUBMIT_SENTINEL');
             } else {
               trace.push('continue-click');
             }
@@ -114,16 +125,17 @@ function createTermsTestPage(checkboxStates: MockCheckboxState[]) {
       }
       if (selector.includes('checkbox')) {
         const isNotCheckedQuery = selector.includes(':not(:checked)');
-        const matchingIndices = checkboxStates
-          .map((s, idx) => ({ s, idx }))
-          .filter(({ s }) => (isNotCheckedQuery ? !s.checked : true))
-          .map(({ idx }) => idx);
+        const matchingIndices = () =>
+          checkboxStates
+            .map((s, idx) => ({ s, idx }))
+            .filter(({ s }) => (isNotCheckedQuery ? !s.checked : true))
+            .map(({ idx }) => idx);
 
         const listLoc: Record<string, unknown> = {
           page: () => page,
-          count: vi.fn(async () => matchingIndices.length),
-          first: () => createBoxLocator(matchingIndices[0] ?? 0),
-          nth: vi.fn((i: number) => createBoxLocator(matchingIndices[i] ?? 0))
+          count: vi.fn(async () => matchingIndices().length),
+          first: () => createBoxLocator(matchingIndices()[0] ?? 0),
+          nth: vi.fn((i: number) => createBoxLocator(matchingIndices()[i] ?? 0))
         };
         return listLoc;
       }
@@ -197,6 +209,68 @@ describe('T02 — A03: signup terms checkbox handling', () => {
       await vi.advanceTimersByTimeAsync(15000);
       await assertion;
       expect(submitClicked.value).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves checked state and fails before clicking if initial read fails with error', async () => {
+    const error = new Error('READ_CHECKBOX_FAILED');
+    const { page, checkboxStates, trace, submitClicked } = createTermsTestPage([
+      { visible: true, checked: true, initialReadError: error }
+    ]);
+    const controller = new AbortController();
+    const ui = createDirectUiInteraction(controller.signal);
+
+    vi.useFakeTimers();
+    try {
+      const running = signupCapcut(page, {} as BrowserContext, {
+        email: 'test@example.com',
+        password: 'Password123!'
+      }, {
+        ui,
+        signal: controller.signal,
+        log: () => {}
+      });
+      const assertion = expect(running).rejects.toThrow('READ_CHECKBOX_FAILED');
+      await vi.advanceTimersByTimeAsync(15000);
+      await assertion;
+
+      expect(checkboxStates[0].checked).toBe(true);
+      expect(trace).not.toContain('click-box-0');
+      expect(submitClicked.value).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('skips already checked checkbox and hidden checkbox', async () => {
+    const { page, checkboxStates, trace, submitClicked } = createTermsTestPage([
+      { visible: true, checked: true },
+      { visible: false, checked: false }
+    ]);
+    const controller = new AbortController();
+    const ui = createDirectUiInteraction(controller.signal);
+
+    vi.useFakeTimers();
+    try {
+      const running = signupCapcut(page, {} as BrowserContext, {
+        email: 'test@example.com',
+        password: 'Password123!'
+      }, {
+        ui,
+        signal: controller.signal,
+        log: () => {}
+      });
+      const assertion = expect(running).rejects.toThrow('AFTER_SUBMIT_SENTINEL');
+      await vi.advanceTimersByTimeAsync(15000);
+      await assertion;
+
+      expect(checkboxStates[0].checked).toBe(true);
+      expect(checkboxStates[1].checked).toBe(false);
+      expect(trace).not.toContain('click-box-0');
+      expect(trace).not.toContain('click-box-1');
+      expect(submitClicked.value).toBe(true);
     } finally {
       vi.useRealTimers();
     }

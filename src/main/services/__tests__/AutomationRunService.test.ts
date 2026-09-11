@@ -9,17 +9,19 @@ import {
   type CapcutTaskRunner,
   type BrowserSessionRuntime
 } from '../AutomationRunService';
-import type { BrowserLauncher, LaunchedProfile } from '../capcut/launcher';
+import { type BrowserLauncher, type LaunchedProfile, ProfileStopError } from '../capcut/launcher';
 import { createDirectUiInteraction, type RunUiInteractionScheduler } from '../capcut/uiInteractionScheduler';
 import type { AutomationRunTerminalSnapshot } from '../AutomationRunService';
 import { DomReadTimeoutError } from '../capcut/cancellation';
 import { runDeterministicSimulation } from './fixtures/deterministicRunHarness';
-import { LogBus, type ILogSink } from '../LogBus';
+import { LogBus, type ILogSink, type StartLogResetPort } from '../LogBus';
 import { ProviderError } from '../../providers/ProviderError';
 import { AutomationRunConfigSchema, type AutomationRunConfigDTO, type AutomationRunProgressDTO } from '../../../shared/schemas/automation.schema';
 import type { AcquiredProxyLease } from '../ProxyLeaseManager';
 import type { DirectProxyPool } from '../DirectProxyPool';
 import type { PurchasedEmailDTO, EmailSourceProvider } from '../../../shared/schemas/provider.schema';
+import type { AutomationEvidenceTerminalEvent } from '../../../shared/schemas/automation-evidence.schema';
+import type { RunTelemetry } from '../capcut/runTelemetry';
 import { AutomationTerminalError } from '../AutomationTerminalError';
 import type {
   AutomationWorkItem,
@@ -33,9 +35,21 @@ import { headlessWorkerStaggerMs } from '../AutomationRunService';
 import { createAutomationWorkSourceFactory } from '../AutomationWorkSource';
 import type { ObservationIdentity, ObservationScope } from '../../providers/ObservedHttpClient';
 
+interface TestLogRow {
+  id?: string;
+  [key: string]: unknown;
+}
+
 class CollectingSink implements ILogSink {
-  public rows: unknown[] = [];
-  insertBatch(logs: unknown[]): void { this.rows.push(...logs); }
+  public rows: TestLogRow[] = [];
+  public deletedIds: string[] = [];
+  insertBatch(logs: unknown[]): void { this.rows.push(...(logs as TestLogRow[])); }
+  listIds(): string[] { return this.rows.map((r) => r.id).filter((id): id is string => Boolean(id)); }
+  deleteIds(ids: string[]): void {
+    this.deletedIds.push(...ids);
+    const set = new Set(ids);
+    this.rows = this.rows.filter((r) => !r.id || !set.has(r.id));
+  }
 }
 
 function purchasedRow(index: number, provider: EmailSourceProvider = 'gmail94'): PurchasedEmailDTO {
@@ -230,7 +244,8 @@ function createService(
   httpOnlyRunner?: HttpOnlyAccountRunner,
   capcut?: CapcutTaskRunner,
   observation?: ObservationScope,
-  emailOtpSource?: { readOtp: (id: string) => Promise<string | null> }
+  emailOtpSource?: { readOtp: (id: string) => Promise<string | null> },
+  logReset?: StartLogResetPort
 ): AutomationRunService {
   let configuredHoldMs = 0;
   const workSources: AutomationWorkSourceFactory = {
@@ -377,6 +392,7 @@ function createService(
       browser,
       accounts,
       logBus,
+      ...(logReset ? { logReset } : {}),
       launcher: () => uiLauncher,
       observation,
       ...(httpOnlyRunner ? { httpOnlyRunner } : {}),
@@ -2706,9 +2722,12 @@ describe('AutomationRunService continuous cancellable worker lifecycle', () => {
       expect(timing.some((message) => message.startsWith('stage=' + stage + ' ')))
         .toBe(true);
     }
-    expect(timing.every((message) =>
-      /^stage=[a-z0-9:_-]+ elapsedMs=\d+ outcome=(success|error)$/.test(message)
-    )).toBe(true);
+    expect(timing.every((message) => {
+      if (message.startsWith('stage=account-total ')) {
+        return /^stage=account-total elapsedMs=\d+ operationOutcome=(success|error) accountOutcome=(completed|failed|stopped|skipped|unrecorded) persisted=(true|false)$/.test(message);
+      }
+      return /^stage=[a-z0-9:_-]+ elapsedMs=\d+ outcome=(success|error)$/.test(message);
+    })).toBe(true);
   });
 
   it('logs a failed browser stage without copying the launcher exception', async () => {
@@ -3214,6 +3233,610 @@ describe('session-scoped browser ownership', () => {
     expect(summary.terminalReason?.code).toBe('RESOURCE_CLEANUP_FAILED');
   });
 
+  it('P03: captures ProfileStopError diagnostics on session and logs sanitized warning without raw token', async () => {
+    const fakeLauncher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async (opts) => {
+        opts.onProfileStarted?.('p03-profile');
+        return {
+          page: {} as unknown as LaunchedProfile['page'],
+          context: {} as unknown as LaunchedProfile['context'],
+          port: 9222,
+          profileId: 'p03-profile'
+        };
+      }),
+      stop: vi.fn(async () => {
+        throw new ProfileStopError(
+          { phase: 'stop-request', kind: 'provider-error', providerCode: 'AUTH_ERROR', httpStatus: 401 },
+          new Error('token=secret-token-1234')
+        );
+      })
+    };
+
+    const logs: string[] = [];
+    const testLogBus = new LogBus(sink);
+    testLogBus.subscribe((entry) => {
+      logs.push(entry.message);
+    });
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['user@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser,
+        accounts,
+        logBus: testLogBus,
+        launcher: () => fakeLauncher
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-p03',
+        profileStopTimeoutMs: 50
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, browser: 'multilogin', testDurationMs: 600_000 }));
+    await service.waitUntilRunning();
+
+    await service.stop();
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('failed');
+    expect(summary.terminalReason?.code).toBe('RESOURCE_CLEANUP_FAILED');
+    expect(logs.some((m) => m.includes('phase "stop-request" (provider-error, code=AUTH_ERROR, status=401)'))).toBe(true);
+    expect(logs.join('\n')).not.toContain('secret-token-1234');
+  });
+
+  it('V06: preserves latest stop phase and remoteConfirmed on deadline timeout in AutomationRunService', async () => {
+    const fakeLauncher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async (opts) => {
+        opts.onProfileStarted?.('v06-profile');
+        return {
+          page: {} as unknown as LaunchedProfile['page'],
+          context: {} as unknown as LaunchedProfile['context'],
+          port: 9222,
+          profileId: 'v06-profile'
+        };
+      }),
+      stop: vi.fn(async (_profileId, options?: { onPhase?: (obs: { phase: string; remoteConfirmed: boolean }) => void }) => {
+        options?.onPhase?.({ phase: 'confirm-status', remoteConfirmed: true });
+        // Hang to trigger deadline timeout
+        await new Promise(() => {});
+      })
+    };
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['user@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser,
+        accounts,
+        logBus: new LogBus(sink),
+        launcher: () => fakeLauncher
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-v06',
+        profileStopTimeoutMs: 30
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, browser: 'multilogin', testDurationMs: 600_000 }));
+    await service.waitUntilRunning();
+
+    const activeThreads = (service as unknown as { activeThreads: Map<string, { session?: { stopDiagnostic?: unknown } }> }).activeThreads;
+    const thread = Array.from(activeThreads.values())[0];
+    const observedSession = thread?.session;
+
+    await service.stop();
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('failed');
+    expect(summary.terminalReason?.code).toBe('RESOURCE_CLEANUP_FAILED');
+    expect(observedSession?.stopDiagnostic).toMatchObject({
+      phase: 'confirm-status',
+      kind: 'deadline',
+      remoteConfirmed: true
+    });
+  });
+
+  it('P02: onAcceptedProof streams proof to taskProgress.recordUnsettled', async () => {
+    let capturedProof: unknown;
+    const taskProgressSink = {
+      record: async () => {},
+      recordUnsettled: vi.fn(async (_accId: string, _runId: string, proofs: readonly unknown[]) => {
+        capturedProof = proofs[0];
+      })
+    };
+
+    const fakeLauncher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async (opts) => {
+        opts.onProfileStarted?.('p02-profile');
+        return {
+          page: {} as unknown as LaunchedProfile['page'],
+          context: {} as unknown as LaunchedProfile['context'],
+          port: 9222,
+          profileId: 'p02-profile'
+        };
+      }),
+      stop: vi.fn(async () => {})
+    };
+
+    const fakeCapcut: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        if (input.onAcceptedProof) {
+          await input.onAcceptedProof({
+            key: 'capcut_web_pwa_install',
+            proof: {
+              actionKey: 'capcut_web_pwa_install',
+              opId: 'op-123',
+              errNo: 0,
+              errTips: '',
+              at: Date.now()
+            }
+          });
+        }
+        return {
+          authenticated: true,
+          done: 1,
+          total: 12,
+          credits: 50,
+          creditsTotal: 670,
+          missing: [],
+          tasks: [],
+          unsettledProofs: [],
+          verification: null
+        };
+      }
+    };
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['p02@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser,
+        accounts,
+        logBus,
+        capcut: fakeCapcut,
+        taskProgress: taskProgressSink,
+        launcher: () => fakeLauncher
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-p02'
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, browser: 'multilogin', testDurationMs: 600_000 }));
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('completed');
+    expect(taskProgressSink.recordUnsettled).toHaveBeenCalledTimes(1);
+    expect(capturedProof).toMatchObject({ key: 'capcut_web_pwa_install' });
+  });
+
+  it('P02.7: surfaces failure in taskProgress.recordUnsettled as TASK_CHECKPOINT_PERSISTENCE_FAILED with ACK_PROOF_PERSISTENCE_FAILED details', async () => {
+    const taskProgressSink = {
+      record: async () => {},
+      recordUnsettled: vi.fn(async () => {
+        throw new Error('disk I/O error');
+      })
+    };
+
+    const fakeLauncher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async (opts) => {
+        opts.onProfileStarted?.('p02fail-profile');
+        return {
+          page: {} as unknown as LaunchedProfile['page'],
+          context: {} as unknown as LaunchedProfile['context'],
+          port: 9222,
+          profileId: 'p02fail-profile'
+        };
+      }),
+      stop: vi.fn(async () => {})
+    };
+
+    const fakeCapcut: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        if (input.onAcceptedProof) {
+          await input.onAcceptedProof({
+            key: 'capcut_web_pwa_install',
+            proof: {
+              actionKey: 'capcut_web_pwa_install',
+              opId: 'op-fail',
+              errNo: 0,
+              errTips: '',
+              at: Date.now()
+            }
+          });
+        }
+        return {
+          authenticated: true,
+          done: 0,
+          total: 12,
+          credits: 0,
+          creditsTotal: 670,
+          missing: [],
+          tasks: [],
+          unsettledProofs: [],
+          verification: null
+        };
+      }
+    };
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['p02fail@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser,
+        accounts,
+        logBus,
+        capcut: fakeCapcut,
+        taskProgress: taskProgressSink,
+        launcher: () => fakeLauncher
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-p02-fail'
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, browser: 'multilogin', testDurationMs: 600_000 }));
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('failed');
+    expect(summary.terminalReason?.code).toBe('TASK_CHECKPOINT_PERSISTENCE_FAILED');
+    expect(summary.terminalReason?.details).toMatchObject({ failure: 'ACK_PROOF_PERSISTENCE_FAILED' });
+  });
+
+  it('proof persistence: preserves proof failure cause and gives account terminal persistence precedence', async () => {
+    const dbCause = new Error('RAW_DB_DEMO_SINK_FAIL');
+    const accountCause = new Error('RAW_DB_DEMO_ACCOUNT_UPDATE_FAIL');
+
+    const taskProgressSink = {
+      record: async () => {},
+      recordUnsettled: vi.fn(async () => {
+        throw dbCause;
+      })
+    };
+
+    const testAccounts = new StubAccounts();
+    testAccounts.update = vi.fn((_id, data) => {
+      if (data?.status) {
+        throw accountCause;
+      }
+      return { success: true };
+    });
+
+    const fakeLauncher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async (opts) => {
+        opts.onProfileStarted?.('v04-profile');
+        return {
+          page: {} as unknown as LaunchedProfile['page'],
+          context: {} as unknown as LaunchedProfile['context'],
+          port: 9222,
+          profileId: 'v04-profile'
+        };
+      }),
+      stop: vi.fn(async () => {})
+    };
+
+    const fakeCapcut: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        if (input.onAcceptedProof) {
+          await input.onAcceptedProof({
+            key: 'capcut_web_pwa_install',
+            proof: {
+              actionKey: 'capcut_web_pwa_install',
+              opId: 'op-v04',
+              errNo: 0,
+              errTips: '',
+              at: Date.now()
+            }
+          });
+        }
+        return {
+          authenticated: true,
+          done: 0,
+          total: 12,
+          credits: 0,
+          creditsTotal: 670,
+          missing: [],
+          tasks: [],
+          unsettledProofs: [],
+          verification: null
+        };
+      }
+    };
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['v04@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser,
+        accounts: testAccounts,
+        logBus,
+        capcut: fakeCapcut,
+        taskProgress: taskProgressSink,
+        launcher: () => fakeLauncher
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-v04'
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, browser: 'multilogin', testDurationMs: 600_000 }));
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('failed');
+    expect(summary.terminalReason).toMatchObject({
+      code: 'INTERNAL_ERROR',
+      details: { failure: 'ACCOUNT_TERMINAL_PERSISTENCE_FAILED', persisted: false }
+    });
+    expect(summary.accountsFailed).toBe(1);
+    expect(summary.accountsCompleted).toBe(0);
+    expect(summary.message).not.toContain('RAW_DB_DEMO');
+  });
+
+  it('proof persistence: uses fixed public message and preserves original cause chain when only proof write fails', async () => {
+    const dbCause = new Error('RAW_DB_DEMO_SINK_FAIL');
+
+    const taskProgressSink = {
+      record: async () => {},
+      recordUnsettled: vi.fn(async () => {
+        throw dbCause;
+      })
+    };
+
+    const fakeLauncher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async (opts) => {
+        opts.onProfileStarted?.('v04-proof-only-profile');
+        return {
+          page: {} as unknown as LaunchedProfile['page'],
+          context: {} as unknown as LaunchedProfile['context'],
+          port: 9222,
+          profileId: 'v04-proof-only-profile'
+        };
+      }),
+      stop: vi.fn(async () => {})
+    };
+
+    const fakeCapcut: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        if (input.onAcceptedProof) {
+          await input.onAcceptedProof({
+            key: 'capcut_web_pwa_install',
+            proof: {
+              actionKey: 'capcut_web_pwa_install',
+              opId: 'op-v04-proof',
+              errNo: 0,
+              errTips: '',
+              at: Date.now()
+            }
+          });
+        }
+        return {
+          authenticated: true,
+          done: 0,
+          total: 12,
+          credits: 0,
+          creditsTotal: 670,
+          missing: [],
+          tasks: [],
+          unsettledProofs: [],
+          verification: null
+        };
+      }
+    };
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['v04-proof@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser,
+        accounts,
+        logBus,
+        capcut: fakeCapcut,
+        taskProgress: taskProgressSink,
+        launcher: () => fakeLauncher
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-v04-proof'
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, browser: 'multilogin', testDurationMs: 600_000 }));
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('failed');
+    expect(summary.terminalReason).toMatchObject({
+      code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED',
+      details: { failure: 'ACK_PROOF_PERSISTENCE_FAILED' }
+    });
+    expect(summary.message).toBe('Không lưu được bằng chứng nhiệm vụ đã được xác nhận.');
+    expect(summary.message).not.toContain('RAW_DB_DEMO');
+    const privateService = service as unknown as { proofPersistenceFailure: AutomationTerminalError | null };
+    expect(privateService.proofPersistenceFailure?.cause).toBe(dbCause);
+  });
+
+  it('P04: distinguishes cleanup safety-abort from user stop on peer threads', async () => {
+    const customBrowser = new StubBrowserRuntime();
+    customBrowser.failStopFor.add('profile-1');
+
+    let worker2Started!: () => void;
+    const worker2Signal = new Promise<void>((resolve) => {
+      worker2Started = resolve;
+    });
+
+    const fakeCapcut: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        if (input.email === 'u1@example.com') {
+          // Worker 1 runs and fails with an error
+          await worker2Signal;
+          throw new Error('TASK_LIST_MISSING');
+        }
+        // Worker 2 and 3 hang until aborted by peer failure
+        worker2Started();
+        await new Promise<void>((_, reject) => {
+          input.signal.addEventListener('abort', () => {
+            reject(input.signal.reason);
+          });
+        });
+        return {
+          authenticated: true,
+          done: 0,
+          total: 12,
+          credits: 0,
+          creditsTotal: 670,
+          missing: [],
+          tasks: [],
+          unsettledProofs: [],
+          verification: null
+        };
+      }
+    };
+
+    let profileCounter = 0;
+    const fakeLauncher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async (opts) => {
+        profileCounter += 1;
+        const id = 'profile-' + profileCounter;
+        opts.onProfileStarted?.(id);
+        return {
+          page: {} as unknown as LaunchedProfile['page'],
+          context: {} as unknown as LaunchedProfile['context'],
+          port: 9222,
+          profileId: id
+        };
+      }),
+      stop: vi.fn(async (profileId) => {
+        await customBrowser.stopProfile(profileId);
+      })
+    };
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['u1@example.com|p1', 'u2@example.com|p2', 'u3@example.com|p3']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser: customBrowser,
+        accounts,
+        logBus,
+        capcut: fakeCapcut,
+        launcher: () => fakeLauncher
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-p04'
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 3, browser: 'multilogin', testDurationMs: 600_000 }));
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('failed');
+    expect(summary.terminalReason?.code).toBe('RESOURCE_CLEANUP_FAILED');
+    expect(summary.accountsFailed).toBe(1);
+    expect(summary.accountsStopped).toBe(2);
+
+    // Peer threads must NOT say "Đã dừng theo yêu cầu"
+    const peerUpdates = accounts.updates.filter((u) => u.id === 'acc-2' || u.id === 'acc-3');
+    expect(peerUpdates.length).toBeGreaterThanOrEqual(2);
+    for (const update of peerUpdates) {
+      if (update.data.status === 'stopped') {
+        expect(update.data.automationStep).toBe('Đã dừng vì lỗi thu hồi browser của phiên chạy');
+        expect(update.data.automationStep).not.toBe('Đã dừng theo yêu cầu');
+      }
+    }
+  });
+
+  it('P04: sets "Đã dừng theo yêu cầu" when user explicitly stops the run', async () => {
+    let workerStarted!: () => void;
+    const workerSignal = new Promise<void>((resolve) => {
+      workerStarted = resolve;
+    });
+
+    const fakeCapcut: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        workerStarted();
+        await new Promise<void>((_, reject) => {
+          input.signal.addEventListener('abort', () => {
+            reject(input.signal.reason);
+          });
+        });
+        return {
+          authenticated: true,
+          done: 0,
+          total: 12,
+          credits: 0,
+          creditsTotal: 670,
+          missing: [],
+          tasks: [],
+          unsettledProofs: [],
+          verification: null
+        };
+      }
+    };
+
+    const fakeLauncher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async (opts) => {
+        opts.onProfileStarted?.('p04-user-profile');
+        return {
+          page: {} as unknown as LaunchedProfile['page'],
+          context: {} as unknown as LaunchedProfile['context'],
+          port: 9222,
+          profileId: 'p04-user-profile'
+        };
+      }),
+      stop: vi.fn(async () => {})
+    };
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['userstop@example.com|p1']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser,
+        accounts,
+        logBus,
+        capcut: fakeCapcut,
+        launcher: () => fakeLauncher
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-p04-user'
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, browser: 'multilogin', testDurationMs: 600_000 }));
+    await workerSignal;
+
+    await service.stop('USER_STOP');
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('stopped');
+    expect(summary.accountsStopped).toBe(1);
+
+    const userUpdates = accounts.updates.filter((u) => u.data.status === 'stopped');
+    expect(userUpdates.length).toBeGreaterThanOrEqual(1);
+    expect(userUpdates[userUpdates.length - 1].data.automationStep).toBe('Đã dừng theo yêu cầu');
+  });
+
   it('turns failed profile stop into run-terminal scheduler shutdown', async () => {
     let shutdownReason: { code?: string; message?: string } | undefined;
     const customBrowser = new StubBrowserRuntime();
@@ -3334,6 +3957,27 @@ describe('session-scoped browser ownership', () => {
       expect(result.counters.completed).toBe(100);
       expect(result.final.schedulerCount).toBe(0);
     });
+
+    it.each([10, 100, 500])('settles %i fake accounts without retained resources', async (itemCount) => {
+      const result = await runDeterministicSimulation({ count: 3, itemCount, seed: 42 });
+      expect(result.counters).toMatchObject({
+        accepted: itemCount,
+        completed: itemCount,
+        failed: 0,
+        stopped: 0,
+        cleanupFailures: 0
+      });
+      expect(result.final).toMatchObject({
+        activeThreads: 0,
+        schedulerCount: 0,
+        activeProfiles: 0,
+        activeProxies: 0,
+        activeMailReservations: 0
+      });
+      expect(result.ownership.ownedProfiles.size).toBe(0);
+      expect(result.ownership.ownedProxies.size).toBe(0);
+      expect(result.ownership.ownedMailReservations.size).toBe(0);
+    }, 15_000);
 
     it('retires schedulers after one hundred definitive no-resource launch failures', async () => {
       const result = await runDeterministicSimulation({
@@ -4477,8 +5121,10 @@ describe('session-scoped browser ownership', () => {
       let readerCalled = false;
       let readerError: unknown = null;
 
+      let runnerSignal: AbortSignal | undefined;
       const customCapcut: CapcutTaskRunner = {
         runAccount: async (input) => {
+          runnerSignal = input.signal;
           if (input.getOtp) {
             readerCalled = true;
             try {
@@ -4534,7 +5180,8 @@ describe('session-scoped browser ownership', () => {
       await service.waitForCompletion();
 
       // Reader rejected due to cancellation
-      expect(readerError).toBeDefined();
+      expect(readerError).toBeInstanceOf(Error);
+      expect(readerError).toBe(runnerSignal?.reason);
 
       // Clear sink logs before resolving late code
       sink.rows = [];
@@ -4544,6 +5191,7 @@ describe('session-scoped browser ownership', () => {
       await new Promise((r) => setTimeout(r, 20));
 
       // Assert no SUCCESS log was emitted for late code
+      logBus.flush();
       const successLogs = (sink.rows as Array<{ status: string; step: string }>).filter((r) => r.status === 'SUCCESS' && r.step === 'OTP');
       expect(successLogs).toHaveLength(0);
     });
@@ -4614,7 +5262,7 @@ describe('session-scoped browser ownership', () => {
 
         await service.waitForCompletion();
 
-        expect(readerError).toBeDefined();
+        expect(readerError).toBeInstanceOf(Error);
         expect((readerError as Error).message).toMatch(/Không lấy được OTP cho/);
         // Only 1 attempt made because deadline expired during read
         expect(readAttempts).toBe(1);
@@ -4625,6 +5273,7 @@ describe('session-scoped browser ownership', () => {
         }
         await new Promise((r) => setTimeout(r, 20));
 
+        logBus.flush();
         const successLogs = (sink.rows as Array<{ status: string; step: string }>).filter((r) => r.status === 'SUCCESS' && r.step === 'OTP');
         expect(successLogs).toHaveLength(0);
       } finally {
@@ -4723,41 +5372,55 @@ describe('session-scoped browser ownership', () => {
       expect((service as unknown as ServiceCleanupAccessor).activeProxyCount).toBe(1);
     });
 
-    it('S07-E: releases route exactly once on duplicate cleanup calls after successful stop', async () => {
+    it('S07-E: releases route exactly once when two cleanup calls occur while release is unresolved', async () => {
       const service = createService();
-      await service.start(baseConfig({
-        threadCount: 1,
-        emailSource: { mode: 'manual', entries: ['user1@example.com|pass1'] }
-      }));
-
-      await service.waitForCompletion();
-
-      expect(browser.stopped).toContain('profile-1');
-      expect(proxySource.released).toEqual(['10.0.0.1']);
-
-      // Simulate a duplicate cleanupIteration call on the same thread with routeReleased flag
-      const duplicateLease: AcquiredProxyLease = {
-        leaseId: 'l1',
-        keyValue: 'k1',
-        ip: '10.0.0.1',
-        host: '10.0.0.1',
-        port: 8080,
-        protocol: 'http',
-        username: null,
-        password: null,
-        nextChangeSeconds: 60
+      let releaseCalls = 0;
+      let resolveRelease!: () => void;
+      const deferredRelease = new Promise<void>((resolve) => { resolveRelease = resolve; });
+      const originalRelease = proxySource.release.bind(proxySource);
+      proxySource.release = async (lease) => {
+        releaseCalls += 1;
+        await deferredRelease;
+        return originalRelease(lease);
       };
-      const fakeThread = { runId: 'run-1', workerAlias: 'w1', accountAlias: 'a1', accountId: 'acc-1', routeReleased: true };
-      await (service as unknown as ServiceCleanupAccessor).cleanupIteration(
-        { release: vi.fn() },
-        undefined,
-        true,
-        fakeThread,
-        duplicateLease
-      );
 
-      // Route release count is still 1
-      expect(proxySource.released).toEqual(['10.0.0.1']);
+      try {
+        const fakeThread = { runId: 'run-1', workerAlias: 'w1', accountAlias: 'a1', accountId: 'acc-1', routeReleased: false };
+        const lease: AcquiredProxyLease = {
+          leaseId: 'l1',
+          keyValue: 'k1',
+          ip: '10.0.0.1',
+          host: '10.0.0.1',
+          port: 8080,
+          protocol: 'http',
+          username: null,
+          password: null,
+          nextChangeSeconds: 60
+        };
+
+        const firstCleanup = (service as unknown as ServiceCleanupAccessor).cleanupIteration(
+          { release: vi.fn() },
+          undefined,
+          true,
+          fakeThread,
+          lease
+        );
+        const secondCleanup = (service as unknown as ServiceCleanupAccessor).cleanupIteration(
+          { release: vi.fn() },
+          undefined,
+          true,
+          fakeThread,
+          lease
+        );
+
+        resolveRelease();
+        await Promise.all([firstCleanup, secondCleanup]);
+
+        expect(releaseCalls).toBe(1);
+        expect(proxySource.released).toEqual(['10.0.0.1']);
+      } finally {
+        proxySource.release = originalRelease;
+      }
     });
 
     it('S07-G: refuses to start a new run while a profile remains unstopped from a previous run', async () => {
@@ -4861,4 +5524,326 @@ describe('session-scoped browser ownership', () => {
       expect(proxySource.released).toEqual(proxySource.acquired);
     });
   });
+
+  describe('Start log reset and preflight integration (§F14.5)', () => {
+    it('clears old durable and queued logs upon successful preflight while preserving new preflight logs', async () => {
+      // 1. Seed durable logs in sink
+      sink.rows = [
+        { id: 'durable-1', accountId: 'acc-old', email: 'old@test.com', step: 'Init', status: 'INFO', message: 'old durable log', at: new Date().toISOString() }
+      ];
+      // 2. Seed queued log in logBus
+      logBus.emit({
+        email: 'system', step: 'Init', status: 'INFO', message: 'old queued log'
+      });
+      expect(logBus.pendingCount()).toBe(1);
+
+      let preflightCalled = false;
+      const httpRunner: HttpOnlyAccountRunner = {
+        preflight: async () => {
+          preflightCalled = true;
+          // Emit a fresh preflight log during preflight (after ticket capture, before ticket commit)
+          logBus.emit({
+            email: 'system', step: 'Preflight', status: 'INFO', message: 'fresh preflight log'
+          });
+        },
+        runAccount: async () => ({
+          done: 1,
+          total: 1,
+          credits: 70,
+          creditsTotal: 70,
+          missing: [],
+          tasks: []
+        })
+      };
+
+      const service = createService(undefined, httpRunner, undefined, undefined, undefined, logBus);
+
+      const startResult = await service.start(baseConfig({
+        missionTransport: 'http-only',
+        threadCount: 1,
+        proxy: { mode: 'direct', entries: ['127.0.0.1:8080:user:pass'] },
+        emailSource: { mode: 'manual', entries: ['new@test.com|pass'] }
+      }));
+
+      expect(preflightCalled).toBe(true);
+      expect(startResult).toHaveProperty('runId');
+      expect(startResult.clearedThrough).toBeDefined();
+
+      // Old durable log should have been deleted
+      expect(sink.deletedIds).toContain('durable-1');
+      expect(sink.rows.find((r) => r.id === 'durable-1')).toBeUndefined();
+
+      // Flush logBus to write remaining queue to sink
+      logBus.flush();
+
+      // Old queued log should have been purged by commit
+      expect(sink.rows.find((r) => r.message === 'old queued log')).toBeUndefined();
+
+      // Fresh preflight log should STILL be present
+      expect(sink.rows.find((r) => r.message === 'fresh preflight log')).toBeDefined();
+
+      await service.stop();
+      await service.waitForCompletion();
+    });
+
+    it('does not reset logs when preflight fails', async () => {
+      sink.rows = [
+        { id: 'durable-keep', accountId: 'acc-old', email: 'old@test.com', step: 'Init', status: 'INFO', message: 'keep me', at: new Date().toISOString() }
+      ];
+      logBus.emit({
+        email: 'system', step: 'Init', status: 'INFO', message: 'keep queued'
+      });
+
+      const httpRunner: HttpOnlyAccountRunner = {
+        preflight: async () => {
+          throw new Error('PREFLIGHT_FAILED');
+        },
+        runAccount: async () => ({
+          done: 1,
+          total: 1,
+          credits: 70,
+          creditsTotal: 70,
+          missing: [],
+          tasks: []
+        })
+      };
+
+      const service = createService(undefined, httpRunner, undefined, undefined, undefined, logBus);
+
+      await expect(service.start(baseConfig({
+        missionTransport: 'http-only',
+        threadCount: 1,
+        proxy: { mode: 'direct', entries: ['127.0.0.1:8080:user:pass'] },
+        emailSource: { mode: 'manual', entries: ['new@test.com|pass'] }
+      }))).rejects.toThrow();
+
+      // Durable log must NOT have been deleted
+      expect(sink.deletedIds).not.toContain('durable-keep');
+      expect(sink.rows.find((r) => r.id === 'durable-keep')).toBeDefined();
+
+      // Queued log must still be in queue
+      logBus.flush();
+      expect(sink.rows.find((r) => r.message === 'keep queued')).toBeDefined();
+    });
+
+    it('starts successfully even if reset observer throws', async () => {
+      let observerCalled = false;
+      logBus.onReset(() => {
+        observerCalled = true;
+        throw new Error('RESET_OBSERVER_CRASH');
+      });
+
+      const httpRunner: HttpOnlyAccountRunner = {
+        preflight: async () => {},
+        runAccount: async () => ({
+          done: 1,
+          total: 1,
+          credits: 70,
+          creditsTotal: 70,
+          missing: [],
+          tasks: []
+        })
+      };
+
+      const service = createService(undefined, httpRunner, undefined, undefined, undefined, logBus);
+
+      const startResult = await service.start(baseConfig({
+        missionTransport: 'http-only',
+        threadCount: 1,
+        proxy: { mode: 'direct', entries: ['127.0.0.1:8080:user:pass'] },
+        emailSource: { mode: 'manual', entries: ['new@test.com|pass'] }
+      }));
+
+      expect(observerCalled).toBe(true);
+      expect(startResult).toHaveProperty('runId');
+      expect(startResult.clearedThrough).toBeDefined();
+
+      await service.stop();
+      await service.waitForCompletion();
+    });
+  });
+
+  describe('R08 (LR09/LR10): current attempt summary & account outcome log', () => {
+    it('returns current blocked attempt after an earlier run completed', async () => {
+      const service = createService();
+      const started = await service.start(baseConfig({
+        threadCount: 1,
+        emailSource: { mode: 'manual', entries: ['first@example.test|demo'] }
+      }));
+      expect((await service.waitForCompletion()).runId).toBe(started.runId);
+      emailSource.available = 0;
+      emailSource.failures = ['SECOND_PREFLIGHT_FIXTURE'];
+      await expect(service.start(baseConfig({ threadCount: 1 })))
+        .rejects.toThrow('SECOND_PREFLIGHT_FIXTURE');
+      const current = service.getProgress();
+      const result = await service.waitForCompletion();
+      expect(current.runId).not.toBe(started.runId);
+      expect(current.state).toBe('blocked');
+      expect(result.runId).toBe(current.runId);
+      expect(result.state).toBe(current.state);
+      expect(result.accountsAccepted).toBe(0);
+    });
+
+    it('records failed accountOutcome in account-total timing when workload fails', async () => {
+      const mockCapcut: CapcutTaskRunner = {
+        runAccount: vi.fn(async () => {
+          throw new Error('TASK_LIST_FIXTURE');
+        })
+      };
+      const service = createService(undefined, undefined, mockCapcut);
+      await service.start(baseConfig({
+        threadCount: 1,
+        emailSource: { mode: 'manual', entries: ['failed@example.test|demo'] }
+      }));
+      const summary = await service.waitForCompletion();
+      logBus.flush();
+
+      expect(summary.accountsAccepted).toBe(1);
+      expect(summary.accountsFailed).toBe(1);
+      expect(summary.accountsCompleted).toBe(0);
+      expect(browser.stopped).toHaveLength(1);
+
+      const timingRows = sink.rows
+        .map((row) => (row as { message: string }).message)
+        .filter((message) => message.startsWith('stage=account-total '));
+      expect(timingRows).toHaveLength(1);
+      expect(timingRows[0]).toContain('operationOutcome=success');
+      expect(timingRows[0]).toContain('accountOutcome=failed');
+      expect(timingRows[0]).toContain('persisted=true');
+    });
+
+    it('handles same-instance 3 runs: completed -> preflight rejected -> completed with fresh state', async () => {
+      const service = createService();
+      // Run 1: completed
+      const run1 = await service.start(baseConfig({
+        threadCount: 1,
+        emailSource: { mode: 'manual', entries: ['run1@example.test|demo'] }
+      }));
+      const summary1 = await service.waitForCompletion();
+      expect(summary1.runId).toBe(run1.runId);
+      expect(summary1.state).toBe('completed');
+      expect(summary1.accountsAccepted).toBe(1);
+      expect(summary1.accountsCompleted).toBe(1);
+
+      // Run 2: preflight rejected
+      emailSource.available = 0;
+      emailSource.failures = ['RUN2_PREFLIGHT_BLOCKED'];
+      await expect(service.start(baseConfig({ threadCount: 1 })))
+        .rejects.toThrow('RUN2_PREFLIGHT_BLOCKED');
+      const progress2 = service.getProgress();
+      const summary2 = await service.waitForCompletion();
+      expect(progress2.runId).not.toBe(run1.runId);
+      expect(progress2.state).toBe('blocked');
+      expect(summary2.runId).toBe(progress2.runId);
+      expect(summary2.state).toBe(progress2.state);
+      expect(summary2.accountsAccepted).toBe(0);
+
+      // Run 3: completed
+      emailSource.available = 1;
+      emailSource.failures = [];
+      const run3 = await service.start(baseConfig({
+        threadCount: 1,
+        emailSource: { mode: 'manual', entries: ['run3@example.test|demo'] }
+      }));
+      const summary3 = await service.waitForCompletion();
+      expect(summary3.runId).toBe(run3.runId);
+      expect(summary3.runId).not.toBe(summary2.runId);
+      expect(summary3.runId).not.toBe(run1.runId);
+      expect(summary3.state).toBe('completed');
+      expect(summary3.accountsAccepted).toBe(1);
+      expect(summary3.accountsCompleted).toBe(1);
+    });
+
+    it('terminates preparation when capacity lookup rejects', async () => {
+      proxySource.availableSlots = async () => {
+        throw new Error('CAPACITY_READ_FIXTURE');
+      };
+      const service = createService();
+      await expect(service.start(baseConfig({
+        threadCount: 1,
+        emailSource: { mode: 'manual', entries: ['demo@example.test|demo'] }
+      }))).rejects.toThrow('CAPACITY_READ_FIXTURE');
+      expect(service.isRunning()).toBe(false);
+      expect(await service.waitForCompletion()).toMatchObject({
+        runId: service.getProgress().runId,
+        state: 'failed',
+        accountsAccepted: 0,
+        terminalReason: { code: 'INTERNAL_ERROR' }
+      });
+    });
+
+    it('handles logReset capture failure without leaking previous summary or throwing synchronously', async () => {
+      let failCapture = false;
+      const reset: StartLogResetPort = {
+        capture: (runId) => {
+          if (failCapture) throw new Error('CAPTURE_FIXTURE');
+          return { runId, ids: [], throughSequence: 0 };
+        },
+        commit: (ticket) => ({ clearedThrough: ticket.throughSequence })
+      };
+      const service = createService(
+        undefined, undefined, undefined, undefined, undefined, reset
+      );
+      const run1 = await service.start(baseConfig({
+        threadCount: 1,
+        emailSource: { mode: 'manual', entries: ['run1@example.test|demo'] }
+      }));
+      const summary1 = await service.waitForCompletion();
+      expect(summary1.state).toBe('completed');
+
+      failCapture = true;
+      let pending!: Promise<unknown>;
+      expect(() => {
+        pending = service.start(baseConfig({ threadCount: 1 }));
+      }).not.toThrow();
+      await expect(pending).rejects.toThrow('CAPTURE_FIXTURE');
+      expect(service.isRunning()).toBe(false);
+      const summary2 = await service.waitForCompletion();
+      expect(summary2.runId).not.toBe(run1.runId);
+      expect(summary2.state).toBe('failed');
+      expect(summary2.accountsAccepted).toBe(0);
+    });
+
+    it('records terminal telemetry matching blocked state and reason without creating source', async () => {
+      const terminalEvents: AutomationEvidenceTerminalEvent[] = [];
+      const createSource = vi.fn((): AutomationWorkSource => {
+        throw new Error('SOURCE_MUST_NOT_BE_CREATED');
+      });
+      const service = new AutomationRunService({
+        workSources: { create: createSource },
+        emailOtp: { readOtp: async () => null },
+        proxies: proxySource, browser, accounts, logBus
+      }, {
+        nextId: () => 'run-telemetry-fixture',
+        createTelemetry: (): RunTelemetry => ({
+          record: () => {},
+          close: async summary => { terminalEvents.push(summary); },
+          filePath: () => 'unused-fixture.jsonl',
+          artifactBasename: () => 'unused-fixture.jsonl'
+        })
+      });
+      await expect(service.start(baseConfig({
+        threadCount: 1,
+        headless: false,
+        rolloutStage: 1,
+        browser: 'gologin',
+        emailSource: { mode: 'api', provider: 'gmail94', service: 'capcut' },
+        mailLimit: 1,
+        approvedMailboxes: 1,
+        stopAfter: 1,
+        maxBillablePurchases: 1
+      }))).rejects.toMatchObject({
+        state: 'blocked', reason: { code: 'PROVIDER_CONFIG_ERROR' }
+      });
+      const summary = await service.waitForCompletion();
+      expect(terminalEvents).toHaveLength(1);
+      expect(terminalEvents[0]).toMatchObject({
+        runId: summary.runId, state: 'blocked',
+        code: 'PROVIDER_CONFIG_ERROR', accepted: 0
+      });
+      expect(createSource).not.toHaveBeenCalled();
+    });
+  });
 });
+
+

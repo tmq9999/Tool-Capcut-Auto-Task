@@ -31,46 +31,65 @@ import { OperationDeadlineError, withinDeadline } from './cancellation';
 import { validateRewardAttempt } from './stepEvidence';
 import type { RewardAttempt, RewardStepResult } from './stepEvidence';
 import type { ActionProof, CapcutTask, TaskSnapshot } from './http/taskTypes';
+import { validateTaskRowsDetailed } from './httpTasks';
 export type { ActionProof, CapcutTask, TaskSnapshot } from './http/taskTypes';
 
-/** Đọc phản hồi `task_list` thành snapshot. Trả null nếu không phải task_list. */
+/** Đọc phản hồi `task_list` thành snapshot. Trả null nếu không phải task_list hoặc có dòng không hợp lệ. */
 export function parseTaskList(json: string, at = Date.now()): TaskSnapshot | null {
-  let list: Array<Record<string, unknown>>;
   try {
-    const root = JSON.parse(json) as { data?: { task_list?: Array<Record<string, unknown>> } };
-    list = root.data?.task_list ?? [];
+    const root: unknown = JSON.parse(json);
+    if (
+      root === null ||
+      typeof root !== 'object' ||
+      !('err_no' in root) ||
+      (root as { err_no?: unknown }).err_no !== 0
+    ) {
+      return null;
+    }
+    const data = (root as { data?: unknown }).data;
+    if (data === null || typeof data !== 'object') {
+      return null;
+    }
+    const rawList = (data as { task_list?: unknown }).task_list;
+    if (!Array.isArray(rawList) || rawList.length === 0) {
+      return null;
+    }
+
+    const validation = validateTaskRowsDetailed(rawList);
+    if (!validation.valid) {
+      return null;
+    }
+
+    const byKey = new Map<string, CapcutTask>();
+    for (const rawItem of rawList) {
+      const t = rawItem as Record<string, unknown>;
+      const view = (t.task_view ?? {}) as Record<string, unknown>;
+      const rw = (t.task_reward_view ?? {}) as Record<string, unknown>;
+      const rel = (t.task_relation ?? {}) as Record<string, unknown>;
+      const taskKey = t.task_key as string;
+      byKey.set(taskKey, {
+        taskKey,
+        taskId: t.task_id as number,
+        title: typeof view.title === 'string' ? view.title : '',
+        reward: typeof rw.reward_amount === 'number' ? rw.reward_amount : 0,
+        status: t.task_status as number,
+        buttonText: typeof view.button_text === 'string' ? view.button_text : '',
+        childIds: Array.isArray(rel.child_task_ids) ? (rel.child_task_ids as number[]) : [],
+      });
+    }
+    if (byKey.size === 0) return null;
+
+    const all = [...byKey.values()];
+    return {
+      at,
+      byKey,
+      totalReward: all.reduce((s, t) => s + t.reward, 0),
+      earnedReward: all.filter((t) => t.status === 4).reduce((s, t) => s + t.reward, 0),
+      doneKeys: all.filter((t) => t.status === 4).map((t) => t.taskKey),
+    };
   } catch {
     return null;
   }
-  if (list.length === 0) return null;
-
-  const byKey = new Map<string, CapcutTask>();
-  for (const t of list) {
-    const view = (t.task_view ?? {}) as Record<string, unknown>;
-    const rw = (t.task_reward_view ?? {}) as Record<string, unknown>;
-    const rel = (t.task_relation ?? {}) as Record<string, unknown>;
-    const taskKey = String(t.task_key ?? '');
-    if (!taskKey) continue;
-    byKey.set(taskKey, {
-      taskKey,
-      taskId: Number(t.task_id ?? 0),
-      title: String(view.title ?? ''),
-      reward: Number(rw.reward_amount ?? 0),
-      status: Number(t.task_status ?? -1),
-      buttonText: String(view.button_text ?? ''),
-      childIds: Array.isArray(rel.child_task_ids) ? (rel.child_task_ids as number[]) : [],
-    });
-  }
-  if (byKey.size === 0) return null;
-
-  const all = [...byKey.values()];
-  return {
-    at,
-    byKey,
-    totalReward: all.reduce((s, t) => s + t.reward, 0),
-    earnedReward: all.filter((t) => t.status === 4).reduce((s, t) => s + t.reward, 0),
-    doneKeys: all.filter((t) => t.status === 4).map((t) => t.taskKey),
-  };
 }
 
 /**

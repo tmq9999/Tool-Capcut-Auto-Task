@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useSyncExternalStore } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useSyncExternalStore } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Download, Trash2, Edit, Plus, AlertCircle } from 'lucide-react';
 import { RowSelectionState } from '@tanstack/react-table';
@@ -199,6 +199,11 @@ export const AccountsPage: React.FC = () => {
     setIsDeleteDialogOpen(false);
   };
 
+  const handleLoadTasks = useCallback(
+    (accountId: string) => controller.loadTasks(accountId),
+    [controller]
+  );
+
   const columns = useMemo(
     () =>
       createAccountsColumns({
@@ -353,7 +358,7 @@ export const AccountsPage: React.FC = () => {
         onClose={() => setTaskAccount(null)}
         accountId={taskAccount?.id ?? null}
         email={taskAccount?.email ?? ''}
-        loadTasks={(accountId) => controller.loadTasks(accountId)}
+        loadTasks={handleLoadTasks}
       />
     </div>
   );

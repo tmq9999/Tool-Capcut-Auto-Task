@@ -50,6 +50,7 @@ import { attachPrivateCapture } from './capcut/http/privateCapture';
 import { SessionEvidenceBudget } from './capcut/evidenceBudget';
 import { attachTaskListDiagnostics } from './capcut/taskApi';
 import { TaskEvidenceError } from './capcut/TaskEvidenceError';
+import type { TaskListFailureDetail } from './capcut/httpTasks';
 
 /**
  * Từ `outcomes` + `snapshot` của `runAllTasks` thành các dòng tiến độ để lưu DB.
@@ -186,6 +187,8 @@ export class CapcutEngineService implements CapcutTaskRunner {
       receipt: CapcutVerificationReceipt;
       unsettledProofs: readonly UnsettledTaskProof[];
     }) => Promise<void>;
+    onAcceptedProof?: (proof: UnsettledTaskProof) => Promise<void>;
+    isExpectedClose?: () => boolean;
   }): Promise<CapcutUiAccountResult> {
     if (!input.ui) throw new Error('UI_INTERACTION_REQUIRED');
     input.signal.throwIfAborted();
@@ -212,13 +215,16 @@ export class CapcutEngineService implements CapcutTaskRunner {
       ? attachTaskListDiagnostics(context, input.signal, event => log('INFO', 'Task diagnostics', JSON.stringify(event)))
       : undefined;
 
+    let activeResolver: PrimaryPageResolver | undefined;
     try {
 
     const resolver = new PrimaryPageResolver(
       context,
       input.page,
-      (message) => log('WARNING', 'Browser', message)
+      (message) => log('WARNING', 'Browser', message),
+      { isExpectedClose: input.isExpectedClose }
     );
+    activeResolver = resolver;
     let page = await resolver.resolve('authentication');
     input.signal.throwIfAborted();
 
@@ -360,6 +366,7 @@ export class CapcutEngineService implements CapcutTaskRunner {
       sessionAlias: input.sessionAlias,
       sessionStartedAt,
       unsettledProofs: input.unsettledProofs,
+      onAcceptedProof: input.onAcceptedProof,
       onCheckpoint: async (checkpoint: TaskCheckpoint) => {
         if (input.signal?.aborted) return;
         if (!input.onTaskCheckpoint) return;
@@ -384,9 +391,12 @@ export class CapcutEngineService implements CapcutTaskRunner {
     const { outcomes, snapshot } = runResult;
     if (!snapshot) {
       // Không có snapshot thì KHÔNG được suy ra "xong" — thà báo lỗi rõ.
+      const diag = (runResult.fatalError as { diagnostic?: TaskListFailureDetail })?.diagnostic;
+      const diagMsg = diag ? ` [${diag.phase}:${diag.reason}]` : '';
       throw new TaskEvidenceError(
-        'Không đọc được task_list của CapCut nên không thể xác nhận kết quả.',
-        runResult.unsettledProofs ?? []
+        `Không đọc được task_list của CapCut${diagMsg} nên không thể xác nhận kết quả.`,
+        runResult.unsettledProofs ?? [],
+        runResult.fatalError ? { cause: runResult.fatalError, diagnostic: diag } : diag
       );
     }
 
@@ -415,6 +425,7 @@ export class CapcutEngineService implements CapcutTaskRunner {
       unsettledProofs: runResult.unsettledProofs ?? []
     };
     } finally {
+      activeResolver?.dispose();
       stopTaskDiagnostics?.();
       await capture?.stop();
       await privateCapture?.stop();

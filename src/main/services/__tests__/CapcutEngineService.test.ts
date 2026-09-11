@@ -535,4 +535,34 @@ describe('CapcutEngineService.runAccount', () => {
     });
     expect(onTaskCheckpoint).not.toHaveBeenCalled();
   });
+
+  it('preserves task_list diagnostic on TaskEvidenceError', async () => {
+    const proofs = [{
+      key: 'capcut_web_pwa_install',
+      proof: {
+        actionKey: 'capcut_web_pwa_install',
+        opId: 'accepted-op',
+        errNo: 0 as const,
+        errTips: '',
+        at: 2000
+      }
+    }];
+    const diagnostic = { phase: 'initial' as const, reason: 'TASK_ROW_INVALID' as const, httpStatus: 200, rowIndex: 0, field: 'task_id' as const };
+    const fatalError = Object.assign(new Error('TASK_LIST_RESPONSE_INVALID'), { diagnostic });
+    runAllTasks.mockResolvedValueOnce({
+      outcomes: [],
+      snapshot: null,
+      fatalError,
+      unsettledProofs: proofs
+    });
+    const err = await new CapcutEngineService({ userDataDir: 'C:/tmp/fixture' })
+      .runAccount(runInput())
+      .catch(e => e);
+    expect(err).toMatchObject({
+      name: 'TaskEvidenceError',
+      diagnostic,
+      unsettledProofs: proofs,
+      cause: fatalError
+    });
+  });
 });

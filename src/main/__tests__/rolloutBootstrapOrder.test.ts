@@ -14,7 +14,7 @@ vi.mock('electron', () => ({
     quit: () => {},
     isPackaged: false,
     getAppPath: () => process.cwd(),
-    getVersion: () => '3.0.2',
+    getVersion: () => '3.0.3',
     requestSingleInstanceLock: () => true,
     whenReady: () => state.ready,
     exit: () => { state.events.push('exit'); }

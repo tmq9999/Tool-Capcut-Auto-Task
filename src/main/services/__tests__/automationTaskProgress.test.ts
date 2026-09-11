@@ -25,7 +25,7 @@ import {
 import { toTaskProgressRows } from '../CapcutEngineService';
 import type { BrowserLauncher, LaunchedProfile } from '../capcut/launcher';
 import type { TaskSnapshotSummary } from '../capcut/runTasks';
-import type { TaskOutcome, CapcutVerificationReceipt } from '../capcut/types';
+import type { TaskOutcome, CapcutVerificationReceipt, UnsettledTaskProof } from '../capcut/types';
 import { LogBus, type ILogSink } from '../LogBus';
 import { AutomationTerminalError } from '../AutomationTerminalError';
 import { TaskEvidenceError } from '../capcut/TaskEvidenceError';
@@ -1206,5 +1206,243 @@ describe('Task 8: Recovery state machine and single-recycle resume', () => {
     const summary = await service.waitForCompletion();
     expect(summary.accountsFailed).toBe(1);
     expect(recordedUnsettled).toEqual(proofs);
+  });
+
+  it('V03: rejects onAcceptedProof callback when iterationOwner token is replaced or deleted', async () => {
+    let capturedCallback: ((p: UnsettledTaskProof) => Promise<void>) | undefined;
+    let runnerRelease!: () => void;
+    const runnerPending = new Promise<void>((resolve) => { runnerRelease = resolve; });
+
+    const runner: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        capturedCallback = input.onAcceptedProof;
+        await runnerPending;
+        return fullCompleteResult();
+      }
+    };
+
+    const recorded: UnsettledTaskProof[] = [];
+    const progressSink: ICapcutTaskProgressSink = {
+      record: async () => {},
+      recordUnsettled: async (_acc, _run, proofs) => {
+        recorded.push(...proofs);
+      }
+    };
+
+    const service = createService(runner, progressSink);
+    await service.start(baseConfig());
+
+    while (!capturedCallback) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const privateService = service as unknown as { iterationOwners: Map<string, unknown> };
+    const accountId = Array.from(privateService.iterationOwners.keys())[0] as string;
+    expect(accountId).toBeDefined();
+
+    // Replace iterationOwner token with a new token
+    privateService.iterationOwners.set(accountId, {});
+
+    const proof = {
+      key: 'task-1',
+      proof: { actionKey: 'task-1', opId: 'op-1', errNo: 0 as const, errTips: '', at: 1000 }
+    };
+
+    await expect(capturedCallback(proof)).rejects.toThrow('STALE_ACK_PROOF_OWNER');
+    expect(recorded).toHaveLength(0);
+
+    runnerRelease();
+    await service.waitForCompletion();
+  });
+
+  it('V03: rejects onAcceptedProof callback after invocation has closed', async () => {
+    let capturedCallback: ((p: UnsettledTaskProof) => Promise<void>) | undefined;
+
+    const runner: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        capturedCallback = input.onAcceptedProof;
+        return fullCompleteResult();
+      }
+    };
+
+    const progressSink: ICapcutTaskProgressSink = {
+      record: async () => {},
+      recordUnsettled: async () => {}
+    };
+
+    const service = createService(runner, progressSink);
+    await service.start(baseConfig());
+    await service.waitForCompletion();
+
+    expect(capturedCallback).toBeDefined();
+
+    const proof = {
+      key: 'task-1',
+      proof: { actionKey: 'task-1', opId: 'op-1', errNo: 0 as const, errTips: '', at: 1000 }
+    };
+
+    await expect(capturedCallback!(proof)).rejects.toThrow('INVOCATION_CLOSED');
+  });
+
+  it('V03: deduplicates concurrent onAcceptedProof calls to 1 physical write', async () => {
+    let capturedCallback: ((p: UnsettledTaskProof) => Promise<void>) | undefined;
+    let runnerRelease!: () => void;
+    const runnerPending = new Promise<void>((resolve) => { runnerRelease = resolve; });
+
+    const runner: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        capturedCallback = input.onAcceptedProof;
+        await runnerPending;
+        return fullCompleteResult();
+      }
+    };
+
+    let writeCount = 0;
+    const progressSink: ICapcutTaskProgressSink = {
+      record: async () => {},
+      recordUnsettled: async () => {
+        writeCount++;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    };
+
+    const service = createService(runner, progressSink);
+    await service.start(baseConfig());
+
+    while (!capturedCallback) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const proof = {
+      key: 'task-dedup',
+      proof: { actionKey: 'task-dedup', opId: 'op-dedup', errNo: 0 as const, errTips: '', at: 2000 }
+    };
+
+    await Promise.all([
+      capturedCallback(proof),
+      capturedCallback(proof)
+    ]);
+
+    expect(writeCount).toBe(1);
+
+    runnerRelease();
+    await service.waitForCompletion();
+  });
+
+  it('V03: throws typed persistence failure when taskProgress.recordUnsettled is missing', async () => {
+    let capturedCallback: ((p: UnsettledTaskProof) => Promise<void>) | undefined;
+    let runnerRelease!: () => void;
+    const runnerPending = new Promise<void>((resolve) => { runnerRelease = resolve; });
+
+    const runner: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        capturedCallback = input.onAcceptedProof;
+        await runnerPending;
+        return fullCompleteResult();
+      }
+    };
+
+    // Sink without recordUnsettled
+    const progressSink: ICapcutTaskProgressSink = {
+      record: async () => {}
+    };
+
+    const service = createService(runner, progressSink);
+    await service.start(baseConfig());
+
+    while (!capturedCallback) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const proof = {
+      key: 'task-no-sink',
+      proof: { actionKey: 'task-no-sink', opId: 'op-no-sink', errNo: 0 as const, errTips: '', at: 3000 }
+    };
+
+    await expect(capturedCallback(proof)).rejects.toMatchObject({
+      name: 'AutomationTerminalError',
+      reason: { code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED' }
+    });
+
+    runnerRelease();
+    await service.waitForCompletion();
+  });
+
+  it('V02: persists unsettled proofs on proof-bearing cancellation even when aborted', async () => {
+    const proofs = [
+      { key: 't1', proof: { actionKey: 't1', opId: 'op-1', errNo: 0 as const, errTips: '', at: 1000 } },
+      { key: 't2', proof: { actionKey: 't2', opId: 'op-2', errNo: 0 as const, errTips: '', at: 1001 } },
+      { key: 't3', proof: { actionKey: 't3', opId: 'op-3', errNo: 0 as const, errTips: '', at: 1002 } },
+      { key: 't4', proof: { actionKey: 't4', opId: 'op-4', errNo: 0 as const, errTips: '', at: 1003 } }
+    ];
+
+    const runner: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        await new Promise<void>((resolve) => {
+          if (input.signal.aborted) return resolve();
+          input.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        throw new TaskEvidenceError('Cancelled with proofs', proofs);
+      }
+    };
+
+    const recorded: UnsettledTaskProof[] = [];
+    const progressSink: ICapcutTaskProgressSink = {
+      record: async () => {},
+      recordUnsettled: async (_acc, _run, p) => {
+        recorded.push(...p);
+      }
+    };
+
+    const service = createService(runner, progressSink);
+    await service.start(baseConfig());
+
+    await new Promise((r) => setTimeout(r, 20));
+    await service.stop('USER_STOP');
+    const summary = await service.waitForCompletion();
+
+    expect(summary.accountsStopped).toBe(1);
+    expect(recorded).toHaveLength(4);
+    expect(recorded.map((r) => r.key)).toEqual(['t1', 't2', 't3', 't4']);
+  });
+
+  it('V02: deduplicates fallback TaskEvidenceError against already streamed onAcceptedProof', async () => {
+    const proofs = [
+      { key: 't1', proof: { actionKey: 't1', opId: 'op-1', errNo: 0 as const, errTips: '', at: 1000 } },
+      { key: 't2', proof: { actionKey: 't2', opId: 'op-2', errNo: 0 as const, errTips: '', at: 1001 } },
+      { key: 't3', proof: { actionKey: 't3', opId: 'op-3', errNo: 0 as const, errTips: '', at: 1002 } },
+      { key: 't4', proof: { actionKey: 't4', opId: 'op-4', errNo: 0 as const, errTips: '', at: 1003 } }
+    ];
+
+    let writeCount = 0;
+    const runner: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        for (const p of proofs) {
+          await input.onAcceptedProof?.(p);
+        }
+        await new Promise<void>((resolve) => {
+          if (input.signal.aborted) return resolve();
+          input.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        throw new TaskEvidenceError('Aborted fallback', proofs);
+      }
+    };
+
+    const progressSink: ICapcutTaskProgressSink = {
+      record: async () => {},
+      recordUnsettled: async () => {
+        writeCount++;
+      }
+    };
+
+    const service = createService(runner, progressSink);
+    await service.start(baseConfig());
+
+    await new Promise((r) => setTimeout(r, 20));
+    await service.stop('USER_STOP');
+    const summary = await service.waitForCompletion();
+
+    expect(summary.accountsStopped).toBe(1);
+    expect(writeCount).toBe(4);
   });
 });

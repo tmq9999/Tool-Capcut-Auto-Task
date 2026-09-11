@@ -24,9 +24,10 @@ import type {
 import type { ActionProof } from './taskApi';
 import type { RunTasksResult, TaskSnapshotSummary, SnapshotTaskSummary } from './runTasks';
 import { paceGapMs } from './runTasks';
-import { abortableDelay, withinDeadline, boundedDomRead, isDomReadTimeout } from './cancellation';
+import { abortableDelay, withinDeadline, boundedDomRead, isDomReadTimeout, OperationDeadlineError } from './cancellation';
 import { foregroundPage } from './human';
 import { TaskEvidenceError } from './TaskEvidenceError';
+import { AutomationTerminalError } from '../AutomationTerminalError';
 
 export const LEAF_TASKS = [
   'capcut_web_pwa_install',
@@ -51,10 +52,56 @@ export interface ExecuteHttpTasksInput {
   sessionStartedAt?: number;
   unsettledProofs?: readonly UnsettledTaskProof[];
   onCheckpoint?: (checkpoint: TaskCheckpoint) => Promise<void>;
+  onAcceptedProof?: (proof: UnsettledTaskProof) => Promise<void>;
   ui?: AccountUiInteraction;
 }
 
-interface RawTaskItem {
+export type TaskListFailureReason =
+  | 'HTTP_STATUS'
+  | 'FETCH_FAILED'
+  | 'INVALID_JSON'
+  | 'ERR_NO_INVALID'
+  | 'ERR_NO_NONZERO'
+  | 'TASK_LIST_MISSING'
+  | 'TASK_ROW_INVALID'
+  | 'TASK_DUPLICATE_KEY'
+  | 'TASK_DUPLICATE_ID'
+  | 'TASK_TOTAL_INVALID'
+  | 'EVALUATION_FAILED'
+  | 'HOST_TIMEOUT';
+
+export interface TaskListFailureDetail {
+  phase: 'initial' | 'after-hydration' | 'after-claim';
+  reason: TaskListFailureReason;
+  httpStatus: number | null;
+  errNo?: number;
+  dataPresent?: boolean;
+  taskListShape?: 'missing' | 'null' | 'not-array' | 'array';
+  recoveryStage?: 'popup-before-tasks' | 'popup-after-hydration' | 'task-drawer';
+  rowIndex?: number;
+  field?:
+    | 'row'
+    | 'task_key'
+    | 'task_id'
+    | 'task_status'
+    | 'task_reward_view'
+    | 'reward_amount'
+    | 'task_view'
+    | 'title'
+    | 'button_text';
+}
+
+export class TaskListResponseError extends Error {
+  readonly diagnostic: TaskListFailureDetail;
+
+  constructor(diagnostic: TaskListFailureDetail) {
+    super('TASK_LIST_RESPONSE_INVALID');
+    this.name = 'TaskListResponseError';
+    this.diagnostic = diagnostic;
+  }
+}
+
+export interface RawTaskItem {
   task_key: string;
   task_id: number;
   task_status: number;
@@ -62,35 +109,75 @@ interface RawTaskItem {
   task_view?: { title?: string; button_text?: string };
 }
 
-function validateTaskRows(rawRows: unknown[]): { valid: boolean; rows: RawTaskItem[] } {
-  if (!Array.isArray(rawRows)) return { valid: false, rows: [] };
+export function validateTaskRowsDetailed(rawRows: unknown):
+  | { valid: true; rows: RawTaskItem[] }
+  | { valid: false; detail: Pick<TaskListFailureDetail, 'reason' | 'rowIndex' | 'field'> } {
+  if (!Array.isArray(rawRows)) return { valid: false, detail: { reason: 'TASK_LIST_MISSING' } };
   const rows: RawTaskItem[] = [];
   const seenKeys = new Set<string>();
   const seenIds = new Set<number>();
-  for (const item of rawRows) {
-    if (!item || typeof item !== 'object') return { valid: false, rows: [] };
+  let totalCredits = 0;
+  for (let i = 0; i < rawRows.length; i++) {
+    const item = rawRows[i];
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return { valid: false, detail: { reason: 'TASK_ROW_INVALID', rowIndex: i, field: 'row' } };
+    }
     const r = item as Record<string, unknown>;
-    if (typeof r.task_key !== 'string' || r.task_key.trim() === '') return { valid: false, rows: [] };
-    if (typeof r.task_id !== 'number' || !Number.isInteger(r.task_id) || r.task_id <= 0) return { valid: false, rows: [] };
-    if (typeof r.task_status !== 'number' || !Number.isInteger(r.task_status)) return { valid: false, rows: [] };
+    if (typeof r.task_key !== 'string' || r.task_key.trim() === '') {
+      return { valid: false, detail: { reason: 'TASK_ROW_INVALID', rowIndex: i, field: 'task_key' } };
+    }
+    if (typeof r.task_id !== 'number' || !Number.isSafeInteger(r.task_id) || r.task_id <= 0) {
+      return { valid: false, detail: { reason: 'TASK_ROW_INVALID', rowIndex: i, field: 'task_id' } };
+    }
+    if (typeof r.task_status !== 'number' || !Number.isInteger(r.task_status)) {
+      return { valid: false, detail: { reason: 'TASK_ROW_INVALID', rowIndex: i, field: 'task_status' } };
+    }
+
+    if (r.task_view !== undefined && r.task_view !== null) {
+      if (typeof r.task_view !== 'object' || Array.isArray(r.task_view)) {
+        return { valid: false, detail: { reason: 'TASK_ROW_INVALID', rowIndex: i, field: 'task_view' } };
+      }
+      const tv = r.task_view as Record<string, unknown>;
+      if (tv.title !== undefined && tv.title !== null && typeof tv.title !== 'string') {
+        return { valid: false, detail: { reason: 'TASK_ROW_INVALID', rowIndex: i, field: 'title' } };
+      }
+      if (tv.button_text !== undefined && tv.button_text !== null && typeof tv.button_text !== 'string') {
+        return { valid: false, detail: { reason: 'TASK_ROW_INVALID', rowIndex: i, field: 'button_text' } };
+      }
+    }
 
     if (r.task_reward_view !== undefined && r.task_reward_view !== null) {
-      if (typeof r.task_reward_view !== 'object') return { valid: false, rows: [] };
+      if (typeof r.task_reward_view !== 'object' || Array.isArray(r.task_reward_view)) {
+        return { valid: false, detail: { reason: 'TASK_ROW_INVALID', rowIndex: i, field: 'task_reward_view' } };
+      }
       const rw = r.task_reward_view as Record<string, unknown>;
       if (rw.reward_amount !== undefined && rw.reward_amount !== null) {
         if (typeof rw.reward_amount !== 'number' || !Number.isFinite(rw.reward_amount) || rw.reward_amount < 0) {
-          return { valid: false, rows: [] };
+          return { valid: false, detail: { reason: 'TASK_ROW_INVALID', rowIndex: i, field: 'reward_amount' } };
         }
+        totalCredits += rw.reward_amount;
       }
     }
-    if (seenKeys.has(r.task_key) || seenIds.has(r.task_id)) {
-      return { valid: false, rows: [] };
+    if (seenKeys.has(r.task_key)) {
+      return { valid: false, detail: { reason: 'TASK_DUPLICATE_KEY', rowIndex: i, field: 'task_key' } };
+    }
+    if (seenIds.has(r.task_id)) {
+      return { valid: false, detail: { reason: 'TASK_DUPLICATE_ID', rowIndex: i, field: 'task_id' } };
     }
     seenKeys.add(r.task_key);
     seenIds.add(r.task_id);
     rows.push(r as unknown as RawTaskItem);
   }
+  if (!Number.isFinite(totalCredits)) {
+    return { valid: false, detail: { reason: 'TASK_TOTAL_INVALID' } };
+  }
   return { valid: true, rows };
+}
+
+export function validateTaskRows(rawRows: unknown[]): { valid: boolean; rows: RawTaskItem[] } {
+  const res = validateTaskRowsDetailed(rawRows);
+  if (res.valid) return { valid: true, rows: res.rows };
+  return { valid: false, rows: [] };
 }
 
 /**
@@ -154,6 +241,7 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
   log('============================================================');
 
   // Đóng các modal/popup che khuất trước khi thao tác
+  log('   ℹ️ Kiểm tra popup trước nhiệm vụ [popup-before-tasks]...');
   if (typeof page.locator === 'function') {
     for (const closeSel of [
       'button[aria-label="Close"]',
@@ -203,16 +291,29 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
   const attemptedKeys = new Set<string>();
   let latestSettledAt = invocationStartedAt;
 
-  async function preserveTaskEvidence<T>(operation: () => Promise<T>): Promise<T> {
+  async function preserveTaskEvidence<T>(
+    operation: () => Promise<T>,
+    context?: { recoveryStage?: 'popup-before-tasks' | 'popup-after-hydration' | 'task-drawer'; diagnostic?: TaskListFailureDetail }
+  ): Promise<T> {
     try {
       return await operation();
     } catch (error: unknown) {
-      signal.throwIfAborted();
-      if (error instanceof TaskEvidenceError || proofMemory.size === 0) throw error;
-      throw new TaskEvidenceError(
-        error instanceof Error ? error.message : String(error),
-        [...proofMemory].map(([key, proof]) => ({ key, proof }))
-      );
+      if (error instanceof AutomationTerminalError) throw error;
+      if (error instanceof TaskEvidenceError) throw error;
+      if (proofMemory.size > 0) {
+        const diag: TaskListFailureDetail | undefined = context?.diagnostic
+          ? {
+              ...context.diagnostic,
+              ...(context.recoveryStage ? { recoveryStage: context.recoveryStage } : {})
+            }
+          : undefined;
+        throw new TaskEvidenceError(
+          error instanceof Error ? error.message : String(error),
+          [...proofMemory].map(([key, proof]) => ({ key, proof })),
+          { cause: error, ...(diag ? { diagnostic: diag } : {}) }
+        );
+      }
+      throw error;
     }
   }
 
@@ -261,7 +362,6 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
         signal
       )
     );
-    signal.throwIfAborted();
 
     latestSettledAt = Date.now();
 
@@ -275,10 +375,15 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
       };
       proofMemory.set(actionKey, accepted);
       currentAcceptedProofs.set(actionKey, accepted);
+      if (input.onAcceptedProof) {
+        await input.onAcceptedProof({ key: actionKey, proof: accepted });
+      }
       log(`      ✅ ${actionKey}: hoàn thành (err_no=0)`);
     } else {
       log(`      ℹ️  ${actionKey}: trạng thái ${result.errNo} (${result.errMsg || 'đã xong/bỏ qua'})`);
     }
+
+    signal.throwIfAborted();
 
     // Nhịp jitter tránh spam quá nhanh
     const jitter = input.actionDelayMs !== undefined ? input.actionDelayMs : Math.max(500, paceGapMs(input.pace) || 800);
@@ -297,98 +402,254 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
     httpStatus?: number;
     error?: string;
     observedAt: number;
+    failureDetail?: TaskListFailureDetail;
   }
 
-  const fetchTaskList = async (): Promise<FetchTaskResult> => {
+  const fetchTaskList = async (phase: 'initial' | 'after-hydration' | 'after-claim'): Promise<FetchTaskResult> => {
     signal.throwIfAborted();
-    const evaluated = await preserveTaskEvidence(() =>
-      withinDeadline(
+    let evaluated: unknown;
+    try {
+      evaluated = await withinDeadline(
         page.evaluate(async () => {
           try {
-            const r = await fetch('https://edit-api-sg.capcut.com/luckycat/i18n/capcut/task/v1/task_list', {
-              method: 'POST',
-              credentials: 'include',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ scene: 'capcut_web_task' })
-            });
-            const d: unknown = await r.json();
+            let r: Response;
+            try {
+              r = await fetch('https://edit-api-sg.capcut.com/luckycat/i18n/capcut/task/v1/task_list', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ scene: 'capcut_web_task' })
+              });
+            } catch (fetchErr: unknown) {
+              return {
+                transportOk: false,
+                reason: 'FETCH_FAILED' as const,
+                httpStatus: null,
+                error: (fetchErr as Error)?.message || String(fetchErr),
+                tasks: [],
+                observedAt: Date.now()
+              };
+            }
+
+            if (!r.ok) {
+              return {
+                transportOk: false,
+                reason: 'HTTP_STATUS' as const,
+                httpStatus: r.status,
+                tasks: [],
+                observedAt: Date.now()
+              };
+            }
+
+            let d: unknown;
+            try {
+              d = await r.json();
+            } catch (jsonErr: unknown) {
+              return {
+                transportOk: false,
+                reason: 'INVALID_JSON' as const,
+                httpStatus: r.status,
+                error: (jsonErr as Error)?.message || String(jsonErr),
+                tasks: [],
+                observedAt: Date.now()
+              };
+            }
+
             const body = d && typeof d === 'object' ? (d as Record<string, unknown>) : {};
-            const dataObj = body.data && typeof body.data === 'object' ? (body.data as Record<string, unknown>) : {};
-            const hasTaskList = Array.isArray(dataObj.task_list);
-            const rawList = hasTaskList ? dataObj.task_list : [];
             const numeric = typeof body.err_no === 'number' && Number.isInteger(body.err_no);
-            const valid = r.ok && numeric && body.err_no === 0 && hasTaskList;
+            if (!numeric) {
+              return {
+                transportOk: false,
+                reason: 'ERR_NO_INVALID' as const,
+                httpStatus: r.status,
+                tasks: [],
+                observedAt: Date.now()
+              };
+            }
+            if (body.err_no !== 0) {
+              return {
+                transportOk: false,
+                reason: 'ERR_NO_NONZERO' as const,
+                httpStatus: r.status,
+                errNo: body.err_no as number,
+                errMsg:
+                  typeof body.err_tips === 'string'
+                    ? body.err_tips
+                    : typeof body.message === 'string'
+                      ? body.message
+                      : '',
+                tasks: [],
+                observedAt: Date.now()
+              };
+            }
+
+            const dataObj = body.data && typeof body.data === 'object' ? (body.data as Record<string, unknown>) : null;
+            const dataPresent = dataObj !== null;
+            let taskListShape: 'missing' | 'null' | 'not-array' | 'array' = 'missing';
+            if (dataObj) {
+              if (dataObj.task_list === undefined) taskListShape = 'missing';
+              else if (dataObj.task_list === null) taskListShape = 'null';
+              else if (Array.isArray(dataObj.task_list)) taskListShape = 'array';
+              else taskListShape = 'not-array';
+            }
+            if (!Array.isArray(dataObj?.task_list)) {
+              return {
+                transportOk: false,
+                reason: 'TASK_LIST_MISSING' as const,
+                httpStatus: r.status,
+                errNo: 0,
+                dataPresent,
+                taskListShape,
+                tasks: [],
+                observedAt: Date.now()
+              };
+            }
+
             return {
-              valid,
-              tasks: rawList,
-              errNo: numeric ? (body.err_no as number) : -1,
+              transportOk: true,
+              httpStatus: r.status,
+              errNo: 0,
+              dataPresent: true,
+              taskListShape: 'array' as const,
+              tasks: dataObj.task_list,
               errMsg:
                 typeof body.err_tips === 'string'
                   ? body.err_tips
                   : typeof body.message === 'string'
                     ? body.message
                     : '',
-              httpStatus: r.status,
               observedAt: Date.now()
             };
           } catch (e: unknown) {
             return {
-              valid: false,
+              transportOk: false,
+              reason: 'FETCH_FAILED' as const,
               tasks: [],
               errNo: -1,
               error: (e as Error)?.message || String(e),
-              httpStatus: 0,
+              httpStatus: null,
               observedAt: Date.now()
             };
           }
         }),
         30000,
         signal
-      )
-    );
+      );
+    } catch (error: unknown) {
+      signal.throwIfAborted();
+      const isTimeout = error instanceof OperationDeadlineError || (error instanceof Error && error.message.includes('deadline'));
+      const reason: TaskListFailureReason = isTimeout ? 'HOST_TIMEOUT' : 'EVALUATION_FAILED';
+      const failureDetail: TaskListFailureDetail = {
+        phase,
+        reason,
+        httpStatus: null
+      };
+      throw new TaskEvidenceError(
+        error instanceof Error ? error.message : String(error),
+        [...proofMemory].map(([key, proof]) => ({ key, proof })),
+        { cause: error, diagnostic: failureDetail }
+      );
+    }
     signal.throwIfAborted();
 
     if (!evaluated || typeof evaluated !== 'object' || Array.isArray(evaluated)) {
+      const failureDetail: TaskListFailureDetail = {
+        phase,
+        reason: 'EVALUATION_FAILED',
+        httpStatus: null
+      };
       return {
         valid: false,
         tasks: [],
         observedAt: Date.now(),
-        error: 'INVALID_EVALUATED_RESULT'
+        error: 'INVALID_EVALUATED_RESULT',
+        failureDetail
       };
     }
 
-    const res = evaluated as FetchTaskResult;
-    if (!res.valid) {
+    const res = evaluated as {
+      transportOk: boolean;
+      reason?: TaskListFailureReason;
+      httpStatus?: number;
+      errNo?: number;
+      errMsg?: string;
+      error?: string;
+      dataPresent?: boolean;
+      taskListShape?: 'missing' | 'null' | 'not-array' | 'array';
+      tasks: unknown[];
+      observedAt: number;
+    };
+
+    if (!res.transportOk) {
+      const failureDetail: TaskListFailureDetail = {
+        phase,
+        reason: res.reason ?? 'FETCH_FAILED',
+        httpStatus: res.httpStatus ?? null,
+        errNo: res.errNo,
+        dataPresent: res.dataPresent,
+        taskListShape: res.taskListShape
+      };
+      log(
+        `   ⚠️ task_list bị loại [${phase}]: reason=${failureDetail.reason}, status=${failureDetail.httpStatus ?? 'none'}${failureDetail.errNo !== undefined ? `, err_no=${failureDetail.errNo}` : ''}`
+      );
       return {
-        ...res,
         valid: false,
-        tasks: []
+        tasks: [],
+        errNo: res.errNo,
+        errMsg: res.errMsg,
+        error: res.error,
+        httpStatus: res.httpStatus ?? undefined,
+        observedAt: res.observedAt,
+        failureDetail
       };
     }
 
-    const validated = validateTaskRows(res.tasks);
+    const validated = validateTaskRowsDetailed(res.tasks);
     if (!validated.valid) {
+      const failureDetail: TaskListFailureDetail = {
+        phase,
+        reason: validated.detail.reason,
+        httpStatus: res.httpStatus ?? 200,
+        errNo: res.errNo ?? 0,
+        dataPresent: res.dataPresent ?? true,
+        taskListShape: res.taskListShape ?? (Array.isArray(res.tasks) ? 'array' : 'not-array'),
+        rowIndex: validated.detail.rowIndex,
+        field: validated.detail.field
+      };
+      log(
+        `   ⚠️ task_list bị loại [${phase}]: reason=${failureDetail.reason}, status=${failureDetail.httpStatus ?? 'none'}${failureDetail.rowIndex !== undefined ? `, row=${failureDetail.rowIndex}` : ''}${failureDetail.field ? `, field=${failureDetail.field}` : ''}`
+      );
       return {
-        ...res,
         valid: false,
-        tasks: []
+        tasks: [],
+        errNo: res.errNo,
+        errMsg: res.errMsg,
+        error: res.error,
+        httpStatus: res.httpStatus ?? 200,
+        observedAt: res.observedAt,
+        failureDetail
       };
     }
 
     return {
-      ...res,
       valid: true,
-      tasks: validated.rows
+      tasks: validated.rows,
+      errNo: res.errNo,
+      errMsg: res.errMsg,
+      httpStatus: res.httpStatus,
+      observedAt: res.observedAt
     };
   };
 
-  let listRes = await fetchTaskList();
+  let listRes = await fetchTaskList('initial');
   let rawTasks = listRes.tasks;
+  const initialFailureDetail = listRes.failureDetail;
 
   // Nếu chưa có task hoặc list chưa hợp lệ và có thể goto để hydrate
   if ((!listRes.valid || rawTasks.length === 0) && typeof page.goto === 'function') {
+    const failureReason = listRes.failureDetail?.reason ?? 'UNKNOWN';
     log(
-      `   ℹ️ task_list chưa trả dữ liệu hợp lệ (valid=${listRes.valid}, err_no=${listRes.errNo ?? 'N/A'}, msg=${listRes.errMsg || listRes.error || ''}). Đang kích hoạt khu vực nhiệm vụ...`
+      `   ℹ️ task_list chưa trả dữ liệu hợp lệ (valid=${listRes.valid}, err_no=${listRes.errNo ?? 'N/A'}, reason=${failureReason}). Đang kích hoạt khu vực nhiệm vụ...`
     );
 
     signal.throwIfAborted();
@@ -400,24 +661,27 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
       30000,
       signal
     ).catch(() => {});
-    await abortableDelay(2000, signal);
+    await abortableDelay(input.actionDelayMs !== undefined ? input.actionDelayMs : 2000, signal);
 
     // Đóng popup nếu có
+    log('   ℹ️ Kiểm tra popup sau kích hoạt [popup-after-hydration]...');
     if (typeof page.locator === 'function') {
       for (const closeSel of ['button[aria-label="Close"]', 'button:has-text("Skip")', 'button:has-text("Got it")']) {
         signal.throwIfAborted();
         const btn = page.locator(closeSel).first();
-        const visible = await preserveTaskEvidence(() =>
-          boundedDomRead(
-            () => btn.isVisible(),
-            'http-task-popup:visible',
-            1000,
-            signal
-          ).catch((error) => {
-            signal.throwIfAborted();
-            if (isDomReadTimeout(error)) throw error;
-            return false;
-          })
+        const visible = await preserveTaskEvidence(
+          () =>
+            boundedDomRead(
+              () => btn.isVisible(),
+              'http-task-popup:visible',
+              1000,
+              signal
+            ).catch((error) => {
+              signal.throwIfAborted();
+              if (isDomReadTimeout(error)) throw error;
+              return false;
+            }),
+          { recoveryStage: 'popup-after-hydration', diagnostic: initialFailureDetail }
         );
         if (visible) {
           signal.throwIfAborted();
@@ -432,17 +696,19 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
       // Click icon task drawer nếu có
       signal.throwIfAborted();
       const taskEntry = page.locator('[data-id="TitleBarTaskList"], [class*="Lv_Task-wrapper"], button.entry-').first();
-      const entryVisible = await preserveTaskEvidence(() =>
-        boundedDomRead(
-          () => taskEntry.isVisible(),
-          'http-task-drawer:visible',
-          1000,
-          signal
-        ).catch((error) => {
-          signal.throwIfAborted();
-          if (isDomReadTimeout(error)) throw error;
-          return false;
-        })
+      const entryVisible = await preserveTaskEvidence(
+        () =>
+          boundedDomRead(
+            () => taskEntry.isVisible(),
+            'http-task-drawer:visible',
+            1000,
+            signal
+          ).catch((error) => {
+            signal.throwIfAborted();
+            if (isDomReadTimeout(error)) throw error;
+            return false;
+          }),
+        { recoveryStage: 'task-drawer', diagnostic: initialFailureDetail }
       );
       if (entryVisible) {
         signal.throwIfAborted();
@@ -451,12 +717,12 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
             taskEntry.click({ timeout: 2000, signal })
           ).catch(() => {});
         }
-        await abortableDelay(1500, signal);
+        await abortableDelay(input.actionDelayMs !== undefined ? input.actionDelayMs : 1500, signal);
       }
     }
 
     // Thử lại fetch
-    listRes = await fetchTaskList();
+    listRes = await fetchTaskList('after-hydration');
     rawTasks = listRes.tasks;
   }
 
@@ -465,7 +731,9 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
     return {
       outcomes: [],
       snapshot: null,
-      fatalError: new Error('TASK_LIST_RESPONSE_INVALID'),
+      fatalError: listRes.failureDetail
+        ? new TaskListResponseError(listRes.failureDetail)
+        : new Error('TASK_LIST_RESPONSE_INVALID'),
       unsettledProofs
     };
   }
@@ -574,7 +842,7 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
     }
 
     // Refresh lại task_list sau khi claim
-    listRes = await fetchTaskList();
+    listRes = await fetchTaskList('after-claim');
     if (!listRes.valid) {
       break;
     }
@@ -586,7 +854,9 @@ export async function executeHttpTasks(input: ExecuteHttpTasksInput): Promise<Ru
     return {
       outcomes: [],
       snapshot: null,
-      fatalError: new Error('TASK_LIST_RESPONSE_INVALID'),
+      fatalError: listRes.failureDetail
+        ? new TaskListResponseError(listRes.failureDetail)
+        : new Error('TASK_LIST_RESPONSE_INVALID'),
       unsettledProofs
     };
   }

@@ -36,10 +36,11 @@ import type { BrowserContext, Locator, Page } from 'playwright-core';
 
 import type { CapcutCredentials, LogFn } from './login';
 import { dump, StepError } from './diag';
-import { skipOnboardingSurvey } from './overlays';
+import { dismissOperationFeatureModal, skipOnboardingSurvey } from './overlays';
 import type { AccountUiInteraction } from './types';
 import { foregroundPage } from './human';
-import { generateBirthday, type BirthdayInfo } from './birthday';
+import { generateBirthday, type BirthdayInfo, MONTH_NAMES } from './birthday';
+import { readAuthFinalState, hasAuthenticatedWorkspace } from './authState';
 import {
   abortable,
   abortableDelay,
@@ -97,7 +98,12 @@ async function fillVerified(
   stage: string,
   attempts = 3
 ): Promise<void> {
-  await input.waitFor({ state: 'visible', timeout: 25000 });
+  await boundedDomRead(
+    () => input.waitFor({ state: 'visible', timeout: 25000 }),
+    `${stage}:input-visible`,
+    25000,
+    signal
+  );
 
   for (let i = 0; i < attempts; i++) {
     signal.throwIfAborted();
@@ -132,7 +138,12 @@ async function clickUntilVisible(
   signal: AbortSignal,
   attempts = 60
 ): Promise<void> {
-  await trigger.waitFor({ state: 'visible', timeout: 25000 });
+  await boundedDomRead(
+    () => trigger.waitFor({ state: 'visible', timeout: 25000 }),
+    'signup:trigger-visible',
+    25000,
+    signal
+  );
   for (let i = 0; i < attempts; i++) {
     signal.throwIfAborted();
     await foregroundPage(trigger.page(), { signal, stage: 'signup:open-email-form', ui }, async () => {
@@ -246,7 +257,7 @@ async function acceptTermsIfAny(
       'signup:terms-check-state',
       1000,
       signal
-    ).catch(() => false);
+    );
 
     if (alreadyChecked) continue;
 
@@ -295,7 +306,115 @@ async function readAuthHeading(page: Page, signal?: AbortSignal): Promise<string
   });
   if (!isVisible) return '';
   signal?.throwIfAborted();
-  return (await heading.textContent())?.replace(/\s+/g, ' ').trim() ?? '';
+  const headingText = signal
+    ? await boundedDomRead(() => heading.textContent(), 'signup:heading-text', 5000, signal)
+    : await heading.textContent();
+  return headingText?.replace(/\s+/g, ' ').trim() ?? '';
+}
+
+export function assertBirthdayMatches(
+  actual: Pick<BirthdayInfo, 'year' | 'month' | 'day'>,
+  intended: BirthdayInfo
+): void {
+  if (actual.year !== intended.year || actual.month !== intended.month || actual.day !== intended.day) {
+    throw new Error('SIGNUP_BIRTHDAY_READBACK_MISMATCH');
+  }
+}
+
+async function selectBirthdayDropdownOption(
+  page: Page,
+  selector: Locator,
+  pattern: RegExp,
+  ownerType: 'month' | 'day',
+  targetDisplay: string,
+  log: LogFn,
+  ui: AccountUiInteraction,
+  signal: AbortSignal
+): Promise<void> {
+  signal.throwIfAborted();
+  await foregroundPage(page, { signal, stage: `signup:birthday-${ownerType}-open`, ui }, () =>
+    selector.click()
+  );
+  await abortableDelay(600, signal);
+
+  // Scope to the active dropdown container
+  const ariaControls = await boundedDomRead(
+    () => selector.getAttribute('aria-controls'),
+    `signup:birthday-${ownerType}-aria-controls`,
+    2000,
+    signal
+  );
+
+  let container: Locator;
+  if (ariaControls) {
+    const escapedId = ariaControls.replace(/["\\]/g, '\\$&');
+    container = page.locator(`[id="${escapedId}"]`).first();
+  } else {
+    const fallbackPanels = page.locator(
+      '.lv-select-dropdown:visible, [role="listbox"]:visible, .semi-select-option-list:visible'
+    );
+    const panelCount = await boundedDomRead(
+      () => fallbackPanels.count(),
+      `signup:birthday-${ownerType}-panels-count`,
+      2000,
+      signal
+    );
+    if (panelCount === 0) {
+      throw new Error(`SIGNUP_BIRTHDAY_${ownerType.toUpperCase()}_OWNER_MISSING: ${targetDisplay}`);
+    }
+    if (panelCount > 1) {
+      throw new Error(`SIGNUP_BIRTHDAY_${ownerType.toUpperCase()}_OWNER_AMBIGUOUS: ${targetDisplay}`);
+    }
+    container = fallbackPanels.first();
+  }
+
+  // Scoped options list inside the container
+  const scopedOptions = container.locator('.lv-select-option, [role="option"]');
+  const matchingOptions = typeof scopedOptions.filter === 'function'
+    ? scopedOptions.filter({ hasText: pattern })
+    : scopedOptions;
+
+  const count = await boundedDomRead(
+    () => matchingOptions.count(),
+    `signup:birthday-${ownerType}-count`,
+    3000,
+    signal
+  );
+
+  signal.throwIfAborted();
+
+  // Enforce visible uniqueness: inspect matching candidates for actual visibility
+  const visibleMatches: Locator[] = [];
+  for (let i = 0; i < count; i++) {
+    signal.throwIfAborted();
+    const candidate = matchingOptions.nth(i);
+    const isVis = await boundedDomRead(
+      () => candidate.isVisible({ timeout: 1000 }),
+      `signup:birthday-${ownerType}-opt-vis-${i}`,
+      1500,
+      signal
+    );
+    if (isVis) {
+      visibleMatches.push(candidate);
+    }
+  }
+
+  if (visibleMatches.length === 0) {
+    const errCode = ownerType === 'month' ? 'SIGNUP_BIRTHDAY_MONTH_OPTION_MISSING' : 'SIGNUP_BIRTHDAY_DAY_OPTION_MISSING';
+    throw new Error(`${errCode}: ${targetDisplay}`);
+  }
+
+  if (visibleMatches.length > 1) {
+    const errCode = ownerType === 'month' ? 'SIGNUP_BIRTHDAY_MONTH_OPTION_DUPLICATE' : 'SIGNUP_BIRTHDAY_DAY_OPTION_DUPLICATE';
+    throw new Error(`${errCode}: ${targetDisplay}`);
+  }
+
+  const chosenOpt = visibleMatches[0];
+  await foregroundPage(page, { signal, stage: `signup:birthday-${ownerType}-select`, ui }, () =>
+    chosenOpt.click()
+  );
+  await abortableDelay(400, signal);
+  log(`   → Đã chọn ${ownerType === 'month' ? 'Month' : 'Day'}: ${targetDisplay}`);
 }
 
 /** Xử lý màn hình "When's your birthday?" nếu CapCut yêu cầu */
@@ -304,103 +423,202 @@ async function handleBirthdayIfPresent(
   log: LogFn,
   ui: AccountUiInteraction,
   signal: AbortSignal,
-  birthday: BirthdayInfo
-): Promise<void> {
+  birthday?: BirthdayInfo
+): Promise<BirthdayInfo | undefined> {
   const isBirthday =
-    (await page.getByRole('heading', { name: /birthday/i }).isVisible({ timeout: 12000 }).catch(() => false)) ||
-    (await page.locator('.gate_birthday-picker-input, input[placeholder="Year"], .gate_birthday-picker-selector').first().isVisible({ timeout: 4000 }).catch(() => false));
+    (await boundedDomRead(
+      () => page.getByRole('heading', { name: /birthday|ngày sinh/i }).isVisible({ timeout: 12000 }),
+      'signup:birthday-heading-visible',
+      14000,
+      signal
+    ).catch((err: unknown) => {
+      signal.throwIfAborted();
+      if (isDomReadTimeout(err)) throw err;
+      return false;
+    })) ||
+    (await boundedDomRead(
+      () => page.locator('.gate_birthday-picker-input, input[placeholder="Year"], .gate_birthday-picker-selector').first().isVisible({ timeout: 4000 }),
+      'signup:birthday-input-visible',
+      6000,
+      signal
+    ).catch((err: unknown) => {
+      signal.throwIfAborted();
+      if (isDomReadTimeout(err)) throw err;
+      return false;
+    }));
 
   if (!isBirthday) {
-    return;
+    return birthday;
   }
 
-  log(`   🎂 Phát hiện màn hình "When's your birthday?" -> đang điền thông tin (${birthday.year}-${birthday.month}-${birthday.day})...`);
+  // Lazy generate only after birthday presence is confirmed
+  const resolvedBirthday: BirthdayInfo = birthday ?? generateBirthday({ startYear: 1990, endYear: 2004 });
+
+  if (birthday) {
+    log(
+      `   🎂 Phát hiện màn hình "When's your birthday?" -> dùng birthday được chỉ định (${resolvedBirthday.year}-${resolvedBirthday.month}-${resolvedBirthday.day})...`
+    );
+  } else {
+    log(
+      `   🎂 Phát hiện màn hình "When's your birthday?" -> đang điền thông tin ngẫu nhiên (${resolvedBirthday.year}-${resolvedBirthday.month}-${resolvedBirthday.day})...`
+    );
+  }
 
   // 1. Điền Year
   const yearInput = page
     .locator('input[placeholder="Year"], .gate_birthday-picker-input')
     .first();
-  if (await yearInput.isVisible({ timeout: 5000 }).catch(() => false)) {
+  const isYearVisible = await boundedDomRead(
+    () => yearInput.isVisible({ timeout: 5000 }),
+    'signup:birthday-year-visible',
+    5000,
+    signal
+  ).catch((err: unknown) => {
+    signal.throwIfAborted();
+    if (isDomReadTimeout(err)) throw err;
+    return false;
+  });
+
+  if (isYearVisible) {
     await foregroundPage(page, { signal, stage: 'signup:birthday-year', ui }, async () => {
       await yearInput.click();
-      await yearInput.fill(String(birthday.year));
+      await yearInput.fill(String(resolvedBirthday.year));
     });
     await abortableDelay(400, signal);
-    log(`   → Đã điền Year: ${birthday.year}`);
+    log(`   → Đã điền Year: ${resolvedBirthday.year}`);
   }
 
   // 2. Chọn Month
   const monthSelector = page.locator('.gate_birthday-picker-selector').first();
-  if (await monthSelector.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await foregroundPage(page, { signal, stage: 'signup:birthday-month-open', ui }, () =>
-      monthSelector.click()
+  const isMonthVisible = await boundedDomRead(
+    () => monthSelector.isVisible({ timeout: 3000 }),
+    'signup:birthday-month-visible',
+    3000,
+    signal
+  ).catch((err: unknown) => {
+    signal.throwIfAborted();
+    if (isDomReadTimeout(err)) throw err;
+    return false;
+  });
+
+  if (isMonthVisible) {
+    const monthPattern = new RegExp(`^0?${resolvedBirthday.month}$|^${resolvedBirthday.monthName}$`, 'i');
+    await selectBirthdayDropdownOption(
+      page,
+      monthSelector,
+      monthPattern,
+      'month',
+      resolvedBirthday.monthName,
+      log,
+      ui,
+      signal
     );
-    await abortableDelay(600, signal);
-    const monthOpt = page.locator('.lv-select-option, [role="option"]').nth(birthday.monthIndex);
-    const targetMonthOpt = (await monthOpt.isVisible({ timeout: 3000 }).catch(() => false))
-      ? monthOpt
-      : page.locator('.lv-select-option, [role="option"]').first();
-    if (await targetMonthOpt.isVisible({ timeout: 3000 }).catch(() => false)) {
-      await foregroundPage(page, { signal, stage: 'signup:birthday-month-select', ui }, () =>
-        targetMonthOpt.click()
-      );
-      await abortableDelay(400, signal);
-      log(`   → Đã chọn Month: ${birthday.month} (${birthday.monthName})`);
-    }
   }
 
   // 3. Chọn Day
   const daySelector = page.locator('.gate_birthday-picker-selector').last();
-  if (await daySelector.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await foregroundPage(page, { signal, stage: 'signup:birthday-day-open', ui }, () =>
-      daySelector.click()
+  const isDayVisible = await boundedDomRead(
+    () => daySelector.isVisible({ timeout: 3000 }),
+    'signup:birthday-day-visible',
+    3000,
+    signal
+  ).catch((err: unknown) => {
+    signal.throwIfAborted();
+    if (isDomReadTimeout(err)) throw err;
+    return false;
+  });
+
+  if (isDayVisible) {
+    const dayPattern = new RegExp(`^0?${resolvedBirthday.day}$`);
+    await selectBirthdayDropdownOption(
+      page,
+      daySelector,
+      dayPattern,
+      'day',
+      String(resolvedBirthday.day),
+      log,
+      ui,
+      signal
     );
-    await abortableDelay(600, signal);
-    const dayOpt = page.locator('.lv-select-option, [role="option"]').nth(birthday.dayIndex);
-    if (await dayOpt.isVisible({ timeout: 3000 }).catch(() => false)) {
-      await foregroundPage(page, { signal, stage: 'signup:birthday-day-select', ui }, () =>
-        dayOpt.click()
-      );
-    } else {
-      await foregroundPage(page, { signal, stage: 'signup:birthday-day-select-fallback', ui }, async () => {
-        await page.locator('.lv-select-option, [role="option"]').first().click().catch((error: unknown) => {
-          rethrowInterrupted(error, signal);
-        });
-      });
-    }
-    await abortableDelay(400, signal);
-    log(`   → Đã chọn Day: ${birthday.day}`);
   }
 
-  // 4. Bấm Continue
+  // 4. Đọc lại để kiểm chứng khớp ngày trước khi bấm Continue
+  const actualYearStr = await boundedDomRead(
+    () => yearInput.inputValue(),
+    'signup:birthday-readback-year',
+    3000,
+    signal
+  );
+  const actualYear = parseInt(actualYearStr, 10);
+
+  const actualMonthText = (
+    await boundedDomRead(
+      () => monthSelector.textContent(),
+      'signup:birthday-readback-month',
+      3000,
+      signal
+    )
+  )?.trim() ?? '';
+  let actualMonth = parseInt(actualMonthText, 10);
+  if (isNaN(actualMonth)) {
+    const foundIdx = MONTH_NAMES.findIndex(
+      m => m.toLowerCase() === actualMonthText.toLowerCase()
+    );
+    if (foundIdx !== -1) actualMonth = foundIdx + 1;
+  }
+
+  const actualDayText = (
+    await boundedDomRead(
+      () => daySelector.textContent(),
+      'signup:birthday-readback-day',
+      3000,
+      signal
+    )
+  )?.trim() ?? '';
+  const actualDay = parseInt(actualDayText, 10);
+
+  assertBirthdayMatches(
+    { year: actualYear, month: actualMonth, day: actualDay },
+    resolvedBirthday
+  );
+
+  // 5. Bấm Continue
   const continueBtn = page
     .locator(
       '.lv_sign_in_panel_wide-birthday-next, button:has-text("Continue"), div[role="button"]:has-text("Continue")'
     )
     .first();
-  if (await continueBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+  const isContinueVisible = await boundedDomRead(
+    () => continueBtn.isVisible({ timeout: 5000 }),
+    'signup:birthday-continue-visible',
+    5000,
+    signal
+  ).catch((err: unknown) => {
+    signal.throwIfAborted();
+    if (isDomReadTimeout(err)) throw err;
+    return false;
+  });
+
+  if (isContinueVisible) {
     await foregroundPage(page, { signal, stage: 'signup:birthday-continue', ui }, () =>
       continueBtn.click({ timeout: 10000 })
     );
     log('   → Đã bấm Continue ở màn hình Birthday');
     await abortableDelay(5000, signal);
   }
+
+  return resolvedBirthday;
 }
 
 /** Kiểm tra đã vào được app chưa */
 export async function isInsideApp(page: Page, signal?: AbortSignal): Promise<boolean> {
-  signal?.throwIfAborted();
-  const url = page.url();
-  if (url.includes('/login') || url.includes('/signup')) return false;
-  if (url.includes('/my-edit') || url.includes('/ai-design') || url.includes('/ai-creator')) return true;
-
-  const btn = page
-    .locator('button:has-text("Free credits"), .credit-section, button[class*="credit"], [class*="avatar"]')
-    .first();
+  const effectiveSignal = signal ?? new AbortController().signal;
+  effectiveSignal.throwIfAborted();
   try {
-    return await withinDeadline(btn.isVisible({ timeout: 10000 }), 10000, signal);
-  } catch {
-    signal?.throwIfAborted();
+    const state = await readAuthFinalState(page, effectiveSignal);
+    return hasAuthenticatedWorkspace(state);
+  } catch (error) {
+    rethrowInterrupted(error, effectiveSignal);
     return false;
   }
 }
@@ -416,7 +634,17 @@ async function dismissOnboarding(
   const openCapcutBtn = page
     .locator('.lv-create-teamspace-confirm, button:has-text("Open CapCut")')
     .first();
-  if (await openCapcutBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+  const openCapcutVisible = await boundedDomRead(
+    () => openCapcutBtn.isVisible({ timeout: 5000 }),
+    'signup:open-capcut-visible',
+    7000,
+    signal
+  ).catch((err: unknown) => {
+    signal.throwIfAborted();
+    if (isDomReadTimeout(err)) throw err;
+    return false;
+  });
+  if (openCapcutVisible) {
     await foregroundPage(page, { signal, stage: 'signup:open-capcut-space', ui }, async () => {
       await openCapcutBtn.click({ timeout: 8000 }).catch((error: unknown) => {
         rethrowInterrupted(error, signal);
@@ -430,11 +658,22 @@ async function dismissOnboarding(
   // Bản cũ bấm một lần, nuốt lỗi, in "Đã bấm Skip khảo sát" vô điều kiện — nên
   // modal phủ trang suốt phiên mà không ai biết (xem `onboarding.ts`).
   await skipOnboardingSurvey(page, log, ui, signal);
+  await dismissOperationFeatureModal(page, log, ui, signal);
 
   const close = page
     .locator('button[aria-label="Close"], div[aria-label="Close"], .semi-modal-close')
     .first();
-  if (await close.isVisible({ timeout: 3000 }).catch(() => false)) {
+  const closeVisible = await boundedDomRead(
+    () => close.isVisible({ timeout: 3000 }),
+    'signup:close-onboarding-visible',
+    5000,
+    signal
+  ).catch((err: unknown) => {
+    signal.throwIfAborted();
+    if (isDomReadTimeout(err)) throw err;
+    return false;
+  });
+  if (closeVisible) {
     await foregroundPage(page, { signal, stage: 'signup:close-onboarding-modal', ui }, async () => {
       await close.click({ timeout: 5000 }).catch((error: unknown) => {
         rethrowInterrupted(error, signal);
@@ -465,8 +704,6 @@ export async function signupCapcut(
   if (!opts.signal) throw new Error('ABORT_SIGNAL_REQUIRED');
   const { signal, ui } = opts;
   signal.throwIfAborted();
-
-  const birthday = opts.birthday ?? generateBirthday({ startYear: 1990, endYear: 2004 });
 
   log('\n============================================================');
   log('📝 ĐĂNG KÝ TÀI KHOẢN CAPCUT WEB');
@@ -506,7 +743,12 @@ export async function signupCapcut(
   await fillVerified(emailInput, creds.email, 'Email', log, ui, signal, 'signup:fill-email');
 
   const continueBtn = page.getByRole('button', { name: /^(Continue|Tiếp tục|Next)$/ }).first();
-  await continueBtn.waitFor({ state: 'visible', timeout: 25000 });
+  await boundedDomRead(
+    () => continueBtn.waitFor({ state: 'visible', timeout: 25000 }),
+    'signup:continue-email-visible',
+    25000,
+    signal
+  );
   await foregroundPage(page, { signal, stage: 'signup:continue-email', ui }, () =>
     continueBtn.click({ timeout: 25000 })
   );
@@ -550,7 +792,12 @@ export async function signupCapcut(
   const submitBtn = page
     .getByRole('button', { name: /^(Sign up|Continue|Create account|Đăng ký|Tiếp tục|Next)$/ })
     .first();
-  await submitBtn.waitFor({ state: 'visible', timeout: 25000 });
+  await boundedDomRead(
+    () => submitBtn.waitFor({ state: 'visible', timeout: 25000 }),
+    'signup:submit-visible',
+    25000,
+    signal
+  );
   await foregroundPage(page, { signal, stage: 'signup:submit-account', ui }, () =>
     submitBtn.click({ timeout: 25000 })
   );
@@ -558,7 +805,7 @@ export async function signupCapcut(
   await abortableDelay(5000, signal);
 
   // --- Bước 5: màn hình "When's your birthday?" (nếu có) ---
-  await handleBirthdayIfPresent(page, log, ui, signal, birthday);
+  await handleBirthdayIfPresent(page, log, ui, signal, opts.birthday);
 
   // --- Bước 6: màn hình "Confirm your Email" (OTP) ---
   const isConfirmEmail =
@@ -607,7 +854,13 @@ export async function signupCapcut(
   await abortableDelay(5000, signal);
   await dismissOnboarding(page, log, ui, signal);
 
-  if (!(await isInsideApp(page, signal))) {
+  let finalState = await readAuthFinalState(page, signal);
+  log(
+    `   🔍 Trạng thái trang sau đăng ký: kind=${finalState.kind}, path=${finalState.path}, workspace=${finalState.workspaceMarker}, authForm=${finalState.authFormVisible}, landing=${finalState.publicLandingVisible}`
+  );
+
+  if (!hasAuthenticatedWorkspace(finalState)) {
+    log('   ℹ️ Chưa thấy workspace marker, thử chuyển trang tới /my-edit...');
     try {
       await abortable(
         page.goto('https://www.capcut.com/my-edit?start_tab=video', {
@@ -617,21 +870,40 @@ export async function signupCapcut(
         signal
       ).catch((error: unknown) => {
         rethrowInterrupted(error, signal);
+        log(`   ⚠️ Lỗi fallback goto /my-edit: ${(error as Error)?.message || String(error)}`);
       });
     } catch (error) {
       rethrowInterrupted(error, signal);
+      log(`   ⚠️ Lỗi fallback goto /my-edit: ${(error as Error)?.message || String(error)}`);
     }
     signal.throwIfAborted();
     await abortableDelay(5000, signal);
     await dismissOnboarding(page, log, ui, signal);
+    finalState = await readAuthFinalState(page, signal);
+    log(
+      `   🔍 Trạng thái trang sau fallback goto: kind=${finalState.kind}, path=${finalState.path}, workspace=${finalState.workspaceMarker}, authForm=${finalState.authFormVisible}, landing=${finalState.publicLandingVisible}`
+    );
   }
 
-  if (!(await isInsideApp(page, signal))) {
+  if (!hasAuthenticatedWorkspace(finalState)) {
     // Đăng ký hỏng ở bước cuối là mất một hộp thư đã trả tiền — bắt buộc phải có
     // hiện trường, không thì lần sau vẫn không biết vì sao.
+    const shot = await dump(page, 'dang_ky_chua_hoan_tat');
+    if (finalState.kind === 'public-landing') {
+      throw new StepError(
+        `Đăng ký chưa hoàn tất [AUTH_FINAL_PUBLIC_LANDING]: kết thúc ở public-landing (path: ${finalState.path}), chưa vào workspace.`,
+        shot
+      );
+    }
+    if (finalState.kind === 'auth-form') {
+      throw new StepError(
+        `Đăng ký chưa hoàn tất [AUTH_FINAL_FORM]: form xác thực vẫn mở (path: ${finalState.path}). Có thể mã sai hoặc email bị chặn.`,
+        shot
+      );
+    }
     throw new StepError(
-      `Đăng ký chưa hoàn tất (URL: ${page.url()}). Có thể mã sai, bị captcha, hoặc email bị chặn.`,
-      await dump(page, 'dang_ky_chua_hoan_tat')
+      `Đăng ký chưa hoàn tất [AUTH_FINAL_${finalState.kind.toUpperCase()}]: kết thúc ở ${finalState.kind} (path: ${finalState.path}), chưa vào workspace.`,
+      shot
     );
   }
 

@@ -33,7 +33,7 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 
 declare const __APP_VERSION__: string | undefined;
 
-const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '3.0.2';
+const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '3.0.3';
 
 const bridge: ElectronBridge = {
   platform: process.platform,

@@ -226,6 +226,7 @@ export const DashboardPage: React.FC = () => {
           browserName={state.config.browser}
           isRunning={isRunning || hasOwnedProfiles}
           isStopping={state.isStopping}
+          isSubmitting={state.isSubmitting}
           workerTarget={state.progress.workerTarget}
           workersActive={state.progress.workersActive}
           accountsAccepted={state.progress.accountsAccepted}

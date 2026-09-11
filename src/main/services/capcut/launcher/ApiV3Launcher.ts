@@ -36,7 +36,13 @@ import {
 } from '../../browserRuntime';
 import { seedPreferences } from '../prefs';
 import { checkRendererHealth } from '../rendererHealth';
-import { withinDeadline } from '../cancellation';
+import { withinDeadline, OperationDeadlineError } from '../cancellation';
+import {
+  ProfileStopError,
+  type ProfileStopDiagnostic,
+  type ProfileStopObservation,
+  type StopOptions
+} from './ProfileStopError';
 import {
   attachOverCdp,
   defaultSleep,
@@ -83,6 +89,12 @@ function toProxyConnection(proxy: LauncherProxy): MultiloginProxyConnection {
   return connection;
 }
 
+interface StoppingOperation {
+  readonly promise: Promise<void>;
+  readonly observers: Set<(obs: ProfileStopObservation) => void>;
+  latestObservation: ProfileStopObservation;
+}
+
 export class ApiV3Launcher implements BrowserLauncher {
   readonly name = 'api-v3' as const;
 
@@ -94,7 +106,7 @@ export class ApiV3Launcher implements BrowserLauncher {
 
   /** Handle CDP theo profileId — `stop()` nhả nó trước khi gọi API dừng profile. */
   private readonly attached = new Map<string, Browser>();
-  private readonly stopping = new Map<string, Promise<void>>();
+  private readonly stopping = new Map<string, StoppingOperation>();
 
   /**
    * `auth` và `api` được INJECT: `MultiloginAuthService` giữ vòng đời token,
@@ -236,47 +248,168 @@ export class ApiV3Launcher implements BrowserLauncher {
    * profile là lời gọi `/profile/stop/p/:id` ngay sau đó — nếu thiếu, launcher
    * vẫn coi profile là đang chạy.
    */
-  async stop(profileId: string): Promise<void> {
-    const existing = this.stopping.get(profileId);
-    if (existing) return existing;
+  async stop(profileId: string, options?: StopOptions): Promise<void> {
+    if (!profileId) return;
 
-    const operation = (async (): Promise<void> => {
-      const token = await this.auth.getAccessToken();
-      await this.stopProfile(token, profileId);
-      const browser = this.attached.get(profileId);
-      this.attached.delete(profileId);
-      if (browser) await browser.close().catch(() => {});
-    })();
+    const existing = this.stopping.get(profileId);
+    if (existing) {
+      if (options?.onPhase) {
+        existing.observers.add(options.onPhase);
+        try {
+          options.onPhase(existing.latestObservation);
+        } catch {
+          // Guard observer callbacks
+        }
+      }
+      return existing.promise;
+    }
+
+    const observers = new Set<(obs: ProfileStopObservation) => void>();
+    if (options?.onPhase) {
+      observers.add(options.onPhase);
+    }
+
+    let opResolve!: () => void;
+    let opReject!: (reason: unknown) => void;
+    const promise = new Promise<void>((resolve, reject) => {
+      opResolve = resolve;
+      opReject = reject;
+    });
+
+    const operation: StoppingOperation = {
+      promise,
+      observers,
+      latestObservation: { phase: 'token', remoteConfirmed: false }
+    };
     this.stopping.set(profileId, operation);
-    try {
-      await operation;
-    } finally {
+
+    let remoteConfirmed = false;
+    const emit = (phase: ProfileStopObservation['phase'], confirmed?: boolean): void => {
+      if (confirmed !== undefined) {
+        remoteConfirmed = remoteConfirmed || confirmed;
+      }
+      this.emitObservation(operation, { phase, remoteConfirmed });
+    };
+
+    emit('token');
+
+    const execute = async (): Promise<void> => {
+      let token: string;
+      try {
+        token = await this.auth.getAccessToken();
+      } catch (error) {
+        throw this.toProfileStopError('token', error, profileId, remoteConfirmed);
+      }
+
+      emit('stop-request');
+      try {
+        await withinDeadline(this.api.stopProfile(token, profileId, 10_000), 10_000);
+      } catch (error) {
+        this.safeLog(`Không dừng được profile ${profileId}.`);
+        throw this.toProfileStopError('stop-request', error, profileId, remoteConfirmed);
+      }
+
+      emit('confirm-status');
+      try {
+        const deadline = Date.now() + 5000;
+        for (;;) {
+          if (Date.now() >= deadline) throw new Error('Profile stop confirmation timed out');
+          const remaining = deadline - Date.now();
+          const statuses = await withinDeadline(this.api.getQuickProfileStatuses(token, remaining), remaining);
+          const own = statuses.find((entry) => entry.profileId === profileId);
+          if (!own || own.status === 'stopped') break;
+          await this.sleep(250);
+        }
+        remoteConfirmed = true;
+        this.safeLog(`Đã dừng profile ${profileId}`);
+      } catch (error) {
+        this.safeLog(`Không xác nhận được trạng thái dừng của profile ${profileId}.`);
+        throw this.toProfileStopError('confirm-status', error, profileId, remoteConfirmed);
+      }
+
+      emit('cdp-close', true);
+      const browser = this.attached.get(profileId);
+      if (browser) {
+        try {
+          await browser.close();
+        } catch (error) {
+          throw this.toProfileStopError('cdp-close', error, profileId, remoteConfirmed);
+        }
+      }
+      this.attached.delete(profileId);
+    };
+
+    execute().then(
+      () => opResolve(),
+      (err) => opReject(err)
+    ).finally(() => {
       if (this.stopping.get(profileId) === operation) this.stopping.delete(profileId);
+    });
+
+    return operation.promise;
+  }
+
+  private safeLog(msg: string): void {
+    try {
+      this.log(msg);
+    } catch {
+      // Guard log reporter from throwing during stop observation
     }
   }
 
-  /** Dừng ĐÚNG một profile. Không có stop-all ở bất cứ đâu. */
-  private async stopProfile(token: string, profileId: string): Promise<void> {
-    if (!profileId) return;
-    try {
-      await withinDeadline(this.api.stopProfile(token, profileId, 10_000), 10_000);
-      const deadline = Date.now() + 5000;
-      for (;;) {
-        if (Date.now() >= deadline) throw new Error('Profile stop confirmation timed out');
-        const remaining = deadline - Date.now();
-        const statuses = await withinDeadline(this.api.getQuickProfileStatuses(token, remaining), remaining);
-        const own = statuses.find((entry) => entry.profileId === profileId);
-        if (!own || own.status === 'stopped') break;
-        await this.sleep(250);
+  private emitObservation(operation: StoppingOperation, obs: ProfileStopObservation): void {
+    operation.latestObservation = obs;
+    for (const observer of operation.observers) {
+      try {
+        observer(obs);
+      } catch {
+        // Guard observer callbacks
       }
-      this.log(`Đã dừng profile ${profileId}`);
-    } catch {
-      this.log(`Không dừng được profile ${profileId}.`);
-      throw new ProviderError(
-        'NETWORK_ERROR',
-        'Không dừng được Multilogin profile ' + profileId + '.',
-        MULTILOGIN_SERVICE_NAME
-      );
     }
+  }
+
+  private toProfileStopError(
+    phase: ProfileStopDiagnostic['phase'],
+    error: unknown,
+    profileId: string,
+    remoteConfirmed?: boolean
+  ): ProfileStopError {
+    if (error instanceof ProfileStopError) {
+      if (remoteConfirmed && !error.diagnostic.remoteConfirmed) {
+        return new ProfileStopError(
+          { ...error.diagnostic, remoteConfirmed: true },
+          error.cause,
+          error.message
+        );
+      }
+      return error;
+    }
+
+    let kind: ProfileStopDiagnostic['kind'] = 'unexpected';
+    let providerCode: string | undefined;
+    let httpStatus: number | undefined;
+
+    if (error instanceof ProviderError) {
+      kind = 'provider-error';
+      providerCode = error.code;
+      httpStatus = error.httpStatus;
+    } else if (error instanceof OperationDeadlineError) {
+      kind = phase === 'confirm-status' ? 'confirmation-timeout' : 'deadline';
+    } else if (error instanceof Error && error.message.includes('Profile stop confirmation timed out')) {
+      kind = 'confirmation-timeout';
+    }
+
+    return new ProfileStopError(
+      {
+        phase,
+        kind,
+        providerCode,
+        httpStatus,
+        ...(remoteConfirmed !== undefined ? { remoteConfirmed } : {})
+      },
+      error,
+      `Không dừng được Multilogin profile ${profileId}.`
+    );
   }
 }
+

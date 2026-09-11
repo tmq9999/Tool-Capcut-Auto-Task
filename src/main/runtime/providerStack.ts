@@ -109,22 +109,40 @@ export function createTaskProgressSink(
             isFinal: checkpoint.receipt.final
           }
         });
-      } catch {
+      } catch (error: unknown) {
+        const cause = error instanceof Error ? error : new Error('TASK_CHECKPOINT_RECORD_FAILED');
         throw new AutomationTerminalError(
           'failed',
           { code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED' },
-          'Không lưu được checkpoint nhiệm vụ.'
+          'Không lưu được checkpoint nhiệm vụ.',
+          cause
         );
       }
     },
     recordUnsettled: async (accountId, runId, proofs) => {
-      try {
-        repo.recordUnsettledProofs?.(accountId, runId, proofs);
-      } catch {
+      if (typeof repo.recordUnsettledProofs !== 'function') {
         throw new AutomationTerminalError(
           'failed',
-          { code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED' },
-          'Không lưu được checkpoint nhiệm vụ.'
+          {
+            code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED',
+            details: { failure: 'ACK_PROOF_PERSISTENCE_FAILED' }
+          },
+          'Không lưu được bằng chứng nhiệm vụ đã được xác nhận.',
+          new Error('MISSING_RECORD_UNSETTLED_PROOFS')
+        );
+      }
+      try {
+        repo.recordUnsettledProofs(accountId, runId, proofs);
+      } catch (error: unknown) {
+        const cause = error instanceof Error ? error : new Error('UNSETTLED_PROOFS_RECORD_FAILED');
+        throw new AutomationTerminalError(
+          'failed',
+          {
+            code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED',
+            details: { failure: 'ACK_PROOF_PERSISTENCE_FAILED' }
+          },
+          'Không lưu được bằng chứng nhiệm vụ đã được xác nhận.',
+          cause
         );
       }
     },
@@ -193,7 +211,15 @@ export function createProviderStack(
     observation
   );
 
-  const logBus = new LogBus(repositories.logRepo);
+  const logBus = new LogBus(
+    repositories.logRepo,
+    {},
+    {
+      onPersistenceNotice: ({ kind, pending }) => {
+        console.error('[LogPersistence]', kind, 'pending=' + pending);
+      }
+    }
+  );
   const activeServiceHolder: { current: AutomationRunService | null } = { current: null };
   const accountService = new AccountService(repositories.accountRepo, vault, {
     isAccountActive: (accountId) => activeServiceHolder.current?.isAccountActive(accountId) ?? false

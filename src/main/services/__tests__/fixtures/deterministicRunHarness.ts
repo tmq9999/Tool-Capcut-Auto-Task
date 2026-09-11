@@ -61,6 +61,25 @@ export interface FinalState {
   activeMailReservations: number;
 }
 
+export function releaseOwned(owned: Set<string>, released: Set<string>, id: string): void {
+  if (!owned.delete(id)) throw new Error('DUPLICATE_OR_UNKNOWN_RELEASE:' + id);
+  released.add(id);
+}
+
+export function acquireResource(owned: Set<string>, id: string): void {
+  if (owned.has(id)) throw new Error('DUPLICATE_ACQUIRE:' + id);
+  owned.add(id);
+}
+
+export interface ResourceOwnership {
+  ownedProfiles: Set<string>;
+  releasedProfiles: Set<string>;
+  ownedProxies: Set<string>;
+  releasedProxies: Set<string>;
+  ownedMailReservations: Set<string>;
+  releasedMailReservations: Set<string>;
+}
+
 export interface DeterministicHarnessResult {
   peaks: ResourcePeaks;
   counters: ResourceCounters;
@@ -69,6 +88,7 @@ export interface DeterministicHarnessResult {
   summary: AutomationRunSummary;
   service: AutomationRunService;
   faultReached: Record<string, number>;
+  ownership: ResourceOwnership;
 }
 
 class QuietSink implements ILogSink {
@@ -127,9 +147,12 @@ export async function runDeterministicSimulation(
   };
 
   let activeWorkers = 0;
-  let activeProfiles = 0;
-  let activeProxies = 0;
-  let activeMailReservations = 0;
+  const ownedProfiles = new Set<string>();
+  const releasedProfiles = new Set<string>();
+  const ownedProxies = new Set<string>();
+  const releasedProxies = new Set<string>();
+  const ownedMailReservations = new Set<string>();
+  const releasedMailReservations = new Set<string>();
 
   const events: string[] = [];
   const faultReached: Record<string, number> = {};
@@ -170,8 +193,8 @@ export async function runDeterministicSimulation(
           await yieldTurns(3);
           const item = items.shift();
           if (item) {
-            activeMailReservations++;
-            peaks.mailReservations = Math.max(peaks.mailReservations, activeMailReservations);
+            acquireResource(ownedMailReservations, item.sourceId);
+            peaks.mailReservations = Math.max(peaks.mailReservations, ownedMailReservations.size);
             events.push(`mail:reserve:${item.sourceId}`);
           }
           if (item) return item;
@@ -181,12 +204,12 @@ export async function runDeterministicSimulation(
           });
         },
         commit: (item) => {
-          activeMailReservations = Math.max(0, activeMailReservations - 1);
+          releaseOwned(ownedMailReservations, releasedMailReservations, item.sourceId);
           events.push(`mail:commit:${item.sourceId}`);
           if (faults.mailReleaseError) { reach('mailReleaseError'); throw faults.mailReleaseError; }
         },
         release: (item) => {
-          activeMailReservations = Math.max(0, activeMailReservations - 1);
+          releaseOwned(ownedMailReservations, releasedMailReservations, item.sourceId);
           events.push(`mail:release:${item.sourceId}`);
           if (faults.mailReleaseError) { reach('mailReleaseError'); throw faults.mailReleaseError; }
         }
@@ -203,11 +226,12 @@ export async function runDeterministicSimulation(
       await yieldTurns(3);
       if (faults.proxyAcquireError) { reach('proxyAcquireError'); throw faults.proxyAcquireError; }
       proxyCounter++;
-      activeProxies++;
-      peaks.proxies = Math.max(peaks.proxies, activeProxies);
-      events.push(`proxy:acquire:lease-${proxyCounter}`);
+      const leaseId = `lease-${proxyCounter}`;
+      acquireResource(ownedProxies, leaseId);
+      peaks.proxies = Math.max(peaks.proxies, ownedProxies.size);
+      events.push(`proxy:acquire:${leaseId}`);
       return {
-        leaseId: `lease-${proxyCounter}`,
+        leaseId,
         keyValue: `K${proxyCounter}`,
         ip: `10.0.0.${proxyCounter}`,
         host: `10.0.0.${proxyCounter}`,
@@ -220,12 +244,14 @@ export async function runDeterministicSimulation(
     },
     release: async (lease) => {
       await yieldTurns(2);
-      activeProxies = Math.max(0, activeProxies - 1);
+      releaseOwned(ownedProxies, releasedProxies, lease.leaseId);
       events.push(`proxy:release:${lease.leaseId}`);
       if (faults.proxyReleaseError) { reach('proxyReleaseError'); throw faults.proxyReleaseError; }
     },
     releaseAll: async () => {
-      activeProxies = 0;
+      for (const id of Array.from(ownedProxies)) {
+        releaseOwned(ownedProxies, releasedProxies, id);
+      }
     }
   };
 
@@ -261,8 +287,8 @@ export async function runDeterministicSimulation(
       }
       profileCounter++;
       const profileId = `profile-${profileCounter}`;
-      activeProfiles++;
-      peaks.profiles = Math.max(peaks.profiles, activeProfiles);
+      acquireResource(ownedProfiles, profileId);
+      peaks.profiles = Math.max(peaks.profiles, ownedProfiles.size);
       events.push(`profile:launch:${profileId}`);
       const proxyKey = input.proxy?.host ?? 'direct';
       const proxyLaunchCount = (launchesByProxy.get(proxyKey) ?? 0) + 1;
@@ -299,7 +325,7 @@ export async function runDeterministicSimulation(
     stop: async (profileId) => {
       await yieldTurns(2);
       if (faults.oldStopError) { reach('oldStopError'); throw faults.oldStopError; }
-      activeProfiles = Math.max(0, activeProfiles - 1);
+      releaseOwned(ownedProfiles, releasedProfiles, profileId);
       events.push(`profile:stop:${profileId}`);
     }
   };
@@ -519,9 +545,9 @@ export async function runDeterministicSimulation(
     schedulerEditorActive: schedulerSnapshots.reduce((sum, snapshot) => sum + snapshot.editorActive, 0),
     schedulerForegroundOwner: schedulerSnapshots.find((snapshot) => snapshot.foregroundOwner)?.foregroundOwner,
     quarantinedSessionAliases: schedulerSnapshots.flatMap((snapshot) => snapshot.quarantinedSessionAliases),
-    activeProfiles: terminalSnapshot.activeProfiles,
-    activeProxies: terminalSnapshot.activeProxies,
-    activeMailReservations: terminalSnapshot.activeMailReservations
+    activeProfiles: ownedProfiles.size,
+    activeProxies: ownedProxies.size,
+    activeMailReservations: ownedMailReservations.size
   };
 
   const counters: ResourceCounters = {
@@ -541,6 +567,14 @@ export async function runDeterministicSimulation(
     events,
     summary,
     service,
-    faultReached
+    faultReached,
+    ownership: {
+      ownedProfiles,
+      releasedProfiles,
+      ownedProxies,
+      releasedProxies,
+      ownedMailReservations,
+      releasedMailReservations
+    }
   };
 }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { RotateCcw, Save, Check, AlertTriangle } from 'lucide-react';
 import { AppHeader } from '@renderer/layouts/AppHeader';
 import { Button } from '@renderer/components/ui/Button';
@@ -48,14 +48,17 @@ export const SettingsPage: React.FC = () => {
   const controller = useMemo(() => new SettingsController(bridge), [bridge]);
   const [state, setState] = useState<SettingsState>(() => controller.getState());
   const [testResult, setTestResult] = useState<{ service: string; code: string; message: string } | null>(null);
+  const effectEpoch = useRef(0);
 
   useEffect(() => {
+    effectEpoch.current += 1;
     const unsubscribe = controller.subscribe((newState) => {
       setState({ ...newState });
     });
     controller.load();
 
     return () => {
+      effectEpoch.current += 1;
       unsubscribe();
       controller.dispose();
     };
@@ -81,8 +84,9 @@ export const SettingsPage: React.FC = () => {
   };
 
   const handleSaveSettings = async () => {
+    const saveEpoch = effectEpoch.current;
     const saved = await controller.save();
-    if (!saved) return;
+    if (!saved || effectEpoch.current !== saveEpoch) return;
     const committed = controller.getLastCommittedGeneral();
     if (committed) {
       writeBootPreferences(window.localStorage, committed.general);
@@ -260,6 +264,14 @@ export const SettingsPage: React.FC = () => {
             <div className="p-3 bg-error/10 border border-error/30 rounded text-error text-xs font-body-sm flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 shrink-0" />
               <span>[{state.error.code}] {state.error.message}</span>
+            </div>
+          )}
+
+          {/* Warning Banner */}
+          {state.warning && (
+            <div className="p-3 bg-warning/10 border border-warning/30 rounded text-warning text-xs font-body-sm flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>{state.warning}</span>
             </div>
           )}
 

@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
 
 const require = createRequire(import.meta.url);
 const { pollGmailOtp, performDiagnosticCleanup } = require('../legacy-diagnostic-helpers.cjs');
@@ -159,6 +162,24 @@ describe('legacy diagnostic helpers', () => {
 
       expect(launcher.stop).toHaveBeenCalledTimes(1);
       expect(fakeProc.exitCode).toBe(1);
+      expect(exit).toHaveBeenCalledWith(1);
+    });
+  });
+
+  describe('live-onboarding-probe (AG14)', () => {
+    it('initializes onboarding and rejects missing approval before effects', async () => {
+      const source = readFileSync('scripts/live-onboarding-probe.cjs', 'utf8');
+      const stderr = vi.fn();
+      const exit = vi.fn();
+      const proc = { env: {}, argv: [], exitCode: undefined, stderr: { write: stderr }, exit };
+      expect(() => vm.runInNewContext(source, {
+        __dirname: path.resolve('scripts'),
+        require: id => id === 'node:path' ? path : {},
+        process: proc
+      }, { timeout: 1000 })).not.toThrow();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('PROBE_APPROVAL_REQUIRED'));
       expect(exit).toHaveBeenCalledWith(1);
     });
   });

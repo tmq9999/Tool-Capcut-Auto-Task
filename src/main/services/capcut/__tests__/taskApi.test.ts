@@ -97,6 +97,43 @@ describe('parseTaskList', () => {
     expect(parseTaskList('{"data":{}}')).toBe(null);
     expect(parseTaskList('khong phai json')).toBe(null);
   });
+
+  it.each([8001003, '0', null, undefined])('rejects snapshot envelope err_no=%s', errNo => {
+    const payload = JSON.parse(RAW);
+    if (errNo === undefined) delete payload.err_no;
+    else payload.err_no = errNo;
+    expect(parseTaskList(JSON.stringify(payload))).toBeNull();
+  });
+
+  it('rejects a malformed row instead of accepting surviving good rows', () => {
+    const value = JSON.parse(RAW);
+    value.data.task_list.push(null);
+    expect(parseTaskList(JSON.stringify(value))).toBeNull();
+  });
+
+  it('rejects a task_list containing non-object items or bad fields', () => {
+    const value1 = JSON.parse(RAW);
+    value1.data.task_list[0].task_id = 'bad';
+    expect(parseTaskList(JSON.stringify(value1))).toBeNull();
+
+    const value2 = JSON.parse(RAW);
+    value2.data.task_list[0].task_key = '';
+    expect(parseTaskList(JSON.stringify(value2))).toBeNull();
+
+    const value3 = JSON.parse(RAW);
+    value3.data.task_list[0].task_status = 'invalid';
+    expect(parseTaskList(JSON.stringify(value3))).toBeNull();
+  });
+
+  it('rejects a task_list containing duplicate task_keys or duplicate task_ids', () => {
+    const value1 = JSON.parse(RAW);
+    value1.data.task_list.push({ ...value1.data.task_list[0] });
+    expect(parseTaskList(JSON.stringify(value1))).toBeNull();
+
+    const value2 = JSON.parse(RAW);
+    value2.data.task_list.push({ ...value2.data.task_list[0], task_key: 'unique_key_different' });
+    expect(parseTaskList(JSON.stringify(value2))).toBeNull();
+  });
 });
 
 describe('parseDoAction', () => {
@@ -267,6 +304,42 @@ describe('TaskStore', () => {
       reasonCode: 'REWARD_VERIFIED',
     });
     expect(verified.evidenceRefs.join(' ')).not.toContain('current-job');
+  });
+
+  it('rejects fresh snapshot with err_no !== 0 and does not verify reward step', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100);
+    const context = new FakeContext();
+    const store = new TaskStore();
+    attachTaskMonitor(context as unknown as BrowserContext, store, MONITOR_IDENTITY);
+    const rewardAttempt = attempt('attempt-current');
+    store.beginAttempt(rewardAttempt);
+    store.registerActionContract({
+      taskKey: rewardAttempt.taskKey,
+      requestActionKey: rewardAttempt.taskKey,
+    });
+    const actionRequest = request(
+      'https://edit-api-sg.capcut.com/luckycat/i18n/capcut/task/v1/do_action',
+      '{"action_key":"capcut_web_pwa_install","op_id":"current-job"}'
+    );
+    context.emit('request', actionRequest);
+    vi.setSystemTime(110);
+    context.emit('response', response(actionRequest, '{"err_no":0,"err_tips":""}'));
+    await settleMonitor();
+    vi.setSystemTime(120);
+    const freshSnapshotRequest = request(
+      'https://edit-api-sg.capcut.com/luckycat/i18n/capcut/task/v1/task_list'
+    );
+    context.emit('request', freshSnapshotRequest);
+    vi.setSystemTime(130);
+
+    const payload = JSON.parse(RAW);
+    payload.err_no = 8001003;
+    context.emit('response', response(freshSnapshotRequest, JSON.stringify(payload)));
+    await settleMonitor();
+
+    const verification = await store.verifyRewardStep(rewardAttempt, Date.now());
+    expect(verification.verdict).not.toBe('pass');
   });
 
   it('keeps temporal-only same-key request origin unknown without a confirmed causal contract', async () => {

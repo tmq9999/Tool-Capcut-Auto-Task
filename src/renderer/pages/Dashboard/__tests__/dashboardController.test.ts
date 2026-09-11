@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { DashboardController, type IDashboardBridge } from '../dashboardController';
 import { DEFAULT_AUTOMATION_CONFIG } from '../automationConfig';
 import type { IpcEnvelope } from '../../../../shared/schemas/ipc-envelope.schema';
@@ -73,6 +73,11 @@ class FakeBridge implements IDashboardBridge {
   public savedAutomationSettings: AutomationConfigSettingsDTO[] = [];
   public storedSettings: AppSettingsDTO = JSON.parse(JSON.stringify(DEFAULT_APP_SETTINGS)) as AppSettingsDTO;
   public saveFails = false;
+  public useDeferredSaveAutomation = false;
+  public saveAutomationDeferred: Array<{
+    resolve: (val: IpcEnvelope<{ success: boolean }>) => void;
+    reject: (err: unknown) => void;
+  }> = [];
 
   settings = {
     get: async (): Promise<IpcEnvelope<{ settings: AppSettingsDTO; credentials: [] }>> => ({
@@ -88,10 +93,15 @@ class FakeBridge implements IDashboardBridge {
       return { success: true, data: { success: true } };
     },
     saveAutomation: async (req: AutomationConfigSettingsDTO): Promise<IpcEnvelope<{ success: boolean }>> => {
+      this.savedAutomationSettings.push(req);
+      if (this.useDeferredSaveAutomation) {
+        return new Promise((resolve, reject) => {
+          this.saveAutomationDeferred.push({ resolve, reject });
+        });
+      }
       if (this.saveFails) {
         return { success: false, error: { code: 'ERR_PERSISTENCE_FAILED', message: 'đĩa lỗi' } };
       }
-      this.savedAutomationSettings.push(req);
       this.storedSettings.automation = req;
       return { success: true, data: { success: true } };
     }
@@ -142,6 +152,11 @@ class FakeBridge implements IDashboardBridge {
   };
 
   public clearLogsCalls = 0;
+  public useDeferredRunStart = false;
+  public startDeferred: Array<{
+    resolve: (val: IpcEnvelope<{ runId: string; artifactBasename?: string; clearedThrough?: number }>) => void;
+    reject: (err: unknown) => void;
+  }> = [];
   logs = {
     list: async (): Promise<IpcEnvelope<{ items: CanonicalRuntimeLog[]; total: number }>> => ({
       success: true,
@@ -174,6 +189,11 @@ class FakeBridge implements IDashboardBridge {
       config: AutomationRunConfigDTO
     ): Promise<IpcEnvelope<{ runId: string; artifactBasename?: string; clearedThrough?: number }>> => {
       this.startedConfigs.push(config);
+      if (this.useDeferredRunStart) {
+        return new Promise((resolve, reject) => {
+          this.startDeferred.push({ resolve, reject });
+        });
+      }
       return this.startEnvelope;
     },
     stop: async (): Promise<IpcEnvelope<{ success: boolean }>> => {
@@ -245,6 +265,20 @@ describe('DashboardController.load', () => {
     expect(state.error).toBeNull();
   });
 
+  it('hydrates untouched fields without overwriting an early Dashboard edit', async () => {
+    type Reply = Awaited<ReturnType<typeof bridge.settings.get>>;
+    let resolve!: (r: Reply) => void;
+    bridge.settings.get = () => new Promise((done) => { resolve = done; });
+    const controller = new DashboardController(bridge);
+    const loading = controller.load();
+    controller.updateConfig({ threadCount: 17, customPassword: 'DEMO-PLAIN' });
+    resolve({ success: true, data: { settings: bridge.storedSettings, credentials: [] } });
+    await loading;
+    expect(controller.getState().config.threadCount).toBe(17);
+    expect(controller.getState().config.customPassword).toBe('DEMO-PLAIN');
+    expect(controller.getState().isLoading).toBe(false);
+  });
+
   it('surfaces a failed envelope as an error message', async () => {
     bridge.listFails = true;
     const controller = new DashboardController(bridge);
@@ -262,6 +296,111 @@ describe('DashboardController.load', () => {
     await controller.load();
 
     expect(notifications).toBeGreaterThan(0);
+  });
+
+  it('F04 (AG04): old load aborted by newer load does not overwrite newer state', async () => {
+    type Reply = Awaited<ReturnType<typeof bridge.settings.get>>;
+    let resolveOld!: (r: Reply) => void;
+    let callCount = 0;
+    bridge.settings.get = () => {
+      callCount++;
+      if (callCount === 1) {
+        return new Promise((done) => { resolveOld = done; });
+      }
+      return Promise.resolve({
+        success: true,
+        data: {
+          settings: {
+            ...bridge.storedSettings,
+            automation: { ...bridge.storedSettings.automation, threadCount: 55 }
+          },
+          credentials: []
+        }
+      });
+    };
+
+    const controller = new DashboardController(bridge);
+    const load1 = controller.load();
+    const load2 = controller.load();
+    await load2;
+    expect(controller.getState().config.threadCount).toBe(55);
+
+    // Old load1 finishes late with threadCount 99
+    resolveOld({
+      success: true,
+      data: {
+        settings: {
+          ...bridge.storedSettings,
+          automation: { ...bridge.storedSettings.automation, threadCount: 99 }
+        },
+        credentials: []
+      }
+    });
+    await load1;
+
+    // Must still be 55, not overwritten by load1
+    expect(controller.getState().config.threadCount).toBe(55);
+  });
+
+  it('F04 (AG04): live push progress arriving during load() progress fetch is not overwritten by stale idle snapshot', async () => {
+    type ProgressReply = Awaited<ReturnType<typeof bridge.run.progress>>;
+    let resolveProgress!: (r: ProgressReply) => void;
+    const progressCalled = new Promise<void>((r) => {
+      bridge.run.progress = () => {
+        r();
+        return new Promise((done) => { resolveProgress = done; });
+      };
+    });
+
+    const controller = new DashboardController(bridge);
+    controller.attach();
+    const loading = controller.load();
+    await progressCalled;
+
+    // While progress fetch is pending, a push event arrives
+    bridge.pushProgress({
+      runId: 'live-1',
+      state: 'running',
+      workerTarget: 4,
+      workersActive: 4,
+      accountsAccepted: 10,
+      accountsCompleted: 2,
+      accountsFailed: 0,
+      accountsStopped: 0,
+      message: 'Running live'
+    });
+
+    expect(controller.getState().progress.state).toBe('running');
+
+    // Stale idle progress response arrives
+    resolveProgress({
+      success: true,
+      data: {
+        runId: 'old-idle',
+        state: 'idle',
+        workerTarget: 0,
+        workersActive: 0,
+        accountsAccepted: 0,
+        accountsCompleted: 0,
+        accountsFailed: 0,
+        accountsStopped: 0,
+        message: 'Chưa chạy'
+      }
+    });
+
+    await loading;
+    // Progress must NOT be reverted to idle!
+    expect(controller.getState().progress.state).toBe('running');
+    expect(controller.getState().progress.runId).toBe('live-1');
+  });
+
+  it('F04 (AG04): load bridge rejection gracefully sets isLoading: false and error without unhandled rejection', async () => {
+    bridge.settings.get = () => Promise.reject(new Error('IPC transport disconnected'));
+    const controller = new DashboardController(bridge);
+
+    await expect(controller.load()).resolves.toBeUndefined();
+    expect(controller.getState().isLoading).toBe(false);
+    expect(controller.getState().error).toBe('IPC transport disconnected');
   });
 });
 
@@ -313,17 +452,81 @@ describe('DashboardController.start', () => {
     expect(controller.getState().error).toBeNull();
   });
 
-  it('xóa logs runtime và gọi bridge.logs.clear khi bắt đầu phiên mới', async () => {
+  it('F03 (AG02): single-flight Start barrier coalesces concurrent start calls', async () => {
+    bridge.useDeferredRunStart = true;
     const controller = new DashboardController(bridge);
     await controller.load();
-    expect(controller.getState().logs).toHaveLength(1);
+    controller.updateConfig({ emailList: 'a@x.com|p' });
+
+    const p1 = controller.start();
+    const p2 = controller.start();
+
+    // Single-flight barrier returns identical in-flight promise
+    expect(p1).toBe(p2);
+    expect(controller.getState().isSubmitting).toBe(true);
+
+    await flush();
+    expect(bridge.startedConfigs).toHaveLength(1);
+
+    bridge.startDeferred[0].resolve({ success: true, data: { runId: 'run-1' } });
+    const [res1, res2] = await Promise.all([p1, p2]);
+
+    expect(res1).toBe(true);
+    expect(res2).toBe(true);
+    expect(bridge.startedConfigs).toHaveLength(1);
+    expect(controller.getState().isSubmitting).toBe(false);
+  });
+
+  it('F03 (AG02): clones snapshot at click and does not use newer edits made while start is in-flight', async () => {
+    bridge.useDeferredRunStart = true;
+    const controller = new DashboardController(bridge);
+    await controller.load();
+    controller.updateConfig({ emailList: 'a@x.com|p', threadCount: 3 });
+
+    const startPromise = controller.start();
+    controller.updateConfig({ threadCount: 9 });
+
+    await flush();
+    bridge.startDeferred[0].resolve({ success: true, data: { runId: 'run-1' } });
+    await startPromise;
+
+    expect(bridge.startedConfigs[0].threadCount).toBe(3);
+  });
+
+  it('F03 (AG02): when autoSave is enabled, pinned snapshot failure aborts start without calling run.start', async () => {
+    bridge.storedSettings.general.autoSaveConfig = true;
+    const controller = new DashboardController(bridge);
+    await controller.load();
+    bridge.saveFails = true;
 
     controller.updateConfig({ emailList: 'a@x.com|p' });
     const started = await controller.start();
 
+    expect(started).toBe(false);
+    expect(bridge.startedConfigs).toHaveLength(0);
+    expect(controller.getState().error).toContain('đĩa lỗi');
+  });
+
+  it('F03 (AG02): zero renderer logs.clear on Start', async () => {
+    const controller = new DashboardController(bridge);
+    await controller.load();
+    controller.updateConfig({ emailList: 'a@x.com|p' });
+
+    const started = await controller.start();
     expect(started).toBe(true);
-    expect(controller.getState().logs).toHaveLength(0);
-    expect(bridge.clearLogsCalls).toBe(1);
+    expect(bridge.clearLogsCalls).toBe(0);
+  });
+
+  it('F03 (AG02): releases isSubmitting when run.start throws or returns failure', async () => {
+    bridge.startEnvelope = { success: false, error: { code: 'ERR_FAIL', message: 'crash' } };
+    const controller = new DashboardController(bridge);
+    await controller.load();
+    controller.updateConfig({ emailList: 'a@x.com|p' });
+
+    const started = await controller.start();
+    expect(started).toBe(false);
+    expect(controller.getState().isSubmitting).toBe(false);
+    expect(controller.getState().error).toContain('crash');
   });
 });
 
@@ -1054,6 +1257,140 @@ describe('T08: Settings Revision & Save Queue', () => {
 
     expect(controller.getState().error).toContain('đĩa lỗi');
   });
+
+  it('F02 (AG03): does not label newer edits saved or retry failed save implicitly', async () => {
+    bridge.storedSettings.general.autoSaveConfig = true;
+    const controller = new DashboardController(bridge);
+    await controller.load();
+
+    bridge.useDeferredSaveAutomation = true;
+    // Step 1: rev 1 starts saving
+    controller.updateConfig({ threadCount: 11 });
+    expect(bridge.savedAutomationSettings).toHaveLength(1);
+    expect(bridge.savedAutomationSettings[0].threadCount).toBe(11);
+    expect(controller.getState().isSavingConfig).toBe(true);
+
+    // Step 2: while rev 1 is in flight, rev 2 is edited
+    controller.updateConfig({ threadCount: 12 });
+    expect(bridge.savedAutomationSettings).toHaveLength(1);
+
+    // Step 3: rev 1 succeeds
+    bridge.saveAutomationDeferred[0].resolve({ success: true, data: { success: true } });
+    await flush();
+
+    // Rev 1 succeeded, but current state is rev 2. configSavedAt MUST BE null!
+    expect(controller.getState().configSavedAt).toBeNull();
+    // Rev 2 has been dispatched
+    expect(bridge.savedAutomationSettings).toHaveLength(2);
+    expect(bridge.savedAutomationSettings[1].threadCount).toBe(12);
+
+    // Step 4: rev 2 fails
+    bridge.saveAutomationDeferred[1].resolve({
+      success: false,
+      error: { code: 'ERR_PERSISTENCE_FAILED', message: 'lỗi lưu rev12' }
+    });
+    await flush();
+
+    // State after rev 2 failed:
+    expect(controller.getState().configSavedAt).toBeNull();
+    expect(controller.getState().error).toContain('lỗi lưu rev12');
+    expect(controller.getState().isSavingConfig).toBe(false);
+    // Crucial: NO 3rd request sent! Does not retry implicitly
+    expect(bridge.savedAutomationSettings).toHaveLength(2);
+
+    // Calling flushPendingSave now returns false without making a 3rd request
+    const flushRes = await controller.flushPendingSave();
+    expect(flushRes).toBe(false);
+    expect(bridge.savedAutomationSettings).toHaveLength(2);
+  });
+
+  it('F02 (AG03): settles superseded pending save waiters with false and does not unhandled reject', async () => {
+    bridge.storedSettings.general.autoSaveConfig = true;
+    const controller = new DashboardController(bridge);
+    await controller.load();
+
+    bridge.useDeferredSaveAutomation = true;
+    controller.updateConfig({ threadCount: 1 }); // rev 1 in flight
+    expect(bridge.savedAutomationSettings).toHaveLength(1);
+
+    controller.updateConfig({ threadCount: 2 }); // rev 2 pending background
+    const p2 = controller.flushPendingSave(2);
+
+    controller.updateConfig({ threadCount: 3 }); // rev 3 replaces rev 2
+    const p3 = controller.flushPendingSave(3);
+
+    await flush();
+    expect(await p2).toBe(false); // rev 2 superseded
+
+    bridge.saveAutomationDeferred[0].resolve({ success: true, data: { success: true } }); // rev 1 resolves
+    await flush();
+
+    expect(bridge.savedAutomationSettings).toHaveLength(2); // rev 1 and rev 3
+    expect(bridge.savedAutomationSettings[1].threadCount).toBe(3);
+
+    bridge.saveAutomationDeferred[1].resolve({ success: true, data: { success: true } }); // rev 3 resolves
+    await flush();
+
+    expect(await p3).toBe(true);
+    expect(controller.getState().configSavedAt).not.toBeNull();
+  });
+
+  it('F02 (AG03): missing saveAutomation does not fallback to stale storedSettings, reports bridge not ready', async () => {
+    delete (bridge.settings as Record<string, unknown>).saveAutomation;
+    bridge.storedSettings.general.autoSaveConfig = true;
+    const controller = new DashboardController(bridge);
+    await controller.load();
+
+    controller.updateConfig({ threadCount: 99 });
+    const ok = await controller.flushPendingSave();
+
+    expect(ok).toBe(false);
+    expect(bridge.savedSettings).toHaveLength(0);
+    expect(controller.getState().error).toContain('chưa hỗ trợ');
+  });
+
+  it('F02 (AG03): handles rejected promise or data.success=false as failure, releases isSavingConfig', async () => {
+    bridge.useDeferredSaveAutomation = true;
+    bridge.storedSettings.general.autoSaveConfig = true;
+    const controller = new DashboardController(bridge);
+    await controller.load();
+
+    controller.updateConfig({ threadCount: 50 });
+    bridge.saveAutomationDeferred[0].reject(new Error('IPC crash'));
+    await flush();
+
+    expect(controller.getState().isSavingConfig).toBe(false);
+    expect(controller.getState().error).toContain('IPC crash');
+    const ok = await controller.flushPendingSave();
+    expect(ok).toBe(false);
+  });
+
+  it('F02 (AG03): 100 rapid edits while save 1 in flight -> only 1 trailing save happens', async () => {
+    bridge.useDeferredSaveAutomation = true;
+    bridge.storedSettings.general.autoSaveConfig = true;
+    const controller = new DashboardController(bridge);
+    await controller.load();
+
+    controller.updateConfig({ threadCount: 1 });
+    expect(bridge.savedAutomationSettings).toHaveLength(1);
+
+    for (let i = 2; i <= 100; i++) {
+      controller.updateConfig({ threadCount: i });
+    }
+    expect(bridge.savedAutomationSettings).toHaveLength(1);
+
+    bridge.saveAutomationDeferred[0].resolve({ success: true, data: { success: true } });
+    await flush();
+
+    expect(bridge.savedAutomationSettings).toHaveLength(2);
+    expect(bridge.savedAutomationSettings[1].threadCount).toBe(100);
+
+    bridge.saveAutomationDeferred[1].resolve({ success: true, data: { success: true } });
+    await flush();
+
+    expect(controller.getState().configSavedAt).not.toBeNull();
+    expect(controller.getState().isSavingConfig).toBe(false);
+  });
 });
 
 describe('T07-B: Logs Reset Synchronization', () => {
@@ -1119,5 +1456,184 @@ describe('T07-B: Logs Reset Synchronization', () => {
     controller.dispose();
     expect(bridge.resetListeners).toHaveLength(0);
   });
+
+  it('F05 (AG05): drops late pre-reset SQL logs and late pushes <= clearedThrough', async () => {
+    type Reply = Awaited<ReturnType<typeof bridge.logs.list>>;
+    let resolveList!: (r: Reply) => void;
+    let listCalls = 0;
+    const listCalled = new Promise<void>((r) => {
+      bridge.logs.list = () => {
+        listCalls++;
+        if (listCalls === 1) {
+          r();
+          return new Promise((done) => { resolveList = done; });
+        }
+        return Promise.resolve({ success: true, data: { items: [], total: 0 } });
+      };
+    });
+
+    const controller = new DashboardController(bridge);
+    controller.attach();
+    const loading = controller.load();
+    await listCalled;
+
+    // Reset occurs while SQL load is pending
+    bridge.pushReset({ clearedThrough: 15 });
+
+    // Late push with seq 10 (should be discarded) and seq 20 (should be kept)
+    bridge.pushLog({ ...log('late-10'), streamSequence: 10 });
+    bridge.pushLog({ ...log('new-20'), streamSequence: 20 });
+
+    expect(controller.getState().logs.map((l) => l.id)).toEqual(['new-20']);
+
+    // Stale SQL response returns
+    resolveList({
+      success: true,
+      data: { items: [{ ...log('old-sql'), streamSequence: undefined }], total: 1 }
+    });
+
+    await loading;
+    // Old SQL should not overwrite or resurrect
+    expect(controller.getState().logs.map((l) => l.id)).toEqual(['new-20']);
+    controller.dispose();
+  });
+
+  it('F05 (AG05): duplicate reset event does not discard fresh post-reset state', () => {
+    const controller = new DashboardController(bridge);
+    controller.attach();
+    bridge.pushReset({ clearedThrough: 10 });
+
+    bridge.pushLog({ ...log('fresh-12'), streamSequence: 12 });
+    expect(controller.getState().logs.map((l) => l.id)).toEqual(['fresh-12']);
+
+    // Duplicate reset with same or lower clearedThrough
+    bridge.pushReset({ clearedThrough: 10 });
+    expect(controller.getState().logs.map((l) => l.id)).toEqual(['fresh-12']);
+
+    controller.dispose();
+  });
+
+  it('keeps one owned Start across dispose/attach', async () => {
+    bridge.storedSettings.general.autoSaveConfig = true;
+    bridge.useDeferredSaveAutomation = true;
+    bridge.useDeferredRunStart = true;
+    const controller = new DashboardController(bridge);
+    controller.attach();
+    await controller.load();
+    controller.updateConfig({ emailList: 'demo@example.test|demo' });
+    const first = controller.start();
+    controller.dispose();
+    controller.attach();
+    const second = controller.start();
+    try {
+      bridge.saveAutomationDeferred[0].resolve({
+        success: true,
+        data: { success: true }
+      });
+      await flush();
+      expect(bridge.startedConfigs).toHaveLength(1);
+      expect(controller.getState().isSubmitting).toBe(true);
+    } finally {
+      for (const pending of bridge.startDeferred) {
+        pending.resolve({ success: true, data: { runId: 'fixture-run' } });
+      }
+      await Promise.all([first, second]);
+      controller.dispose();
+    }
+  });
+
+  describe('N06: history reconciliation and generation-safe publication', () => {
+    it('does not let a full old buffer hide newer SQL history', async () => {
+      const old = [log('old-1'), log('old-2')];
+      const fresh = [log('new-1'), log('new-2')].map((row) => ({
+        ...row,
+        createdAt: '2026-09-11T01:00:00.000Z'
+      }));
+      let reads = 0;
+      bridge.logs.list = async () => ({
+        success: true,
+        data: { items: ++reads === 1 ? old : fresh, total: 2 }
+      });
+      const controller = new DashboardController(bridge, { maxLogs: 2 });
+      await controller.load();
+      await controller.load();
+      expect(controller.getState().logs.map((row) => row.id)).toEqual(['new-1', 'new-2']);
+    });
+
+    it('enqueues replacement log read on reset and ignores old deferred log response', async () => {
+      let resolveOldList!: (res: unknown) => void;
+      const oldListPromise = new Promise((r) => { resolveOldList = r; });
+      let listCalls = 0;
+      bridge.logs.list = vi.fn(async () => {
+        listCalls++;
+        if (listCalls === 1) {
+          return oldListPromise as never;
+        }
+        return {
+          success: true as const,
+          data: {
+            items: [{ ...log('fresh-post-reset'), streamSequence: undefined }],
+            total: 1
+          }
+        };
+      });
+      const controller = new DashboardController(bridge);
+      controller.attach();
+      const loading = controller.load();
+      bridge.pushReset({ clearedThrough: 5 });
+      await flush();
+      expect(controller.getState().logs.map((l) => l.id)).toEqual(['fresh-post-reset']);
+      resolveOldList({
+        success: true,
+        data: { items: [log('old-stale')], total: 1 }
+      });
+      await loading;
+      expect(controller.getState().logs.map((l) => l.id)).toEqual(['fresh-post-reset']);
+      controller.dispose();
+    });
+
+    it('does not let old save failure overwrite newer state.error after attach session change', async () => {
+      bridge.storedSettings.general.autoSaveConfig = true;
+      bridge.useDeferredSaveAutomation = true;
+      const controller = new DashboardController(bridge);
+      controller.attach();
+      await controller.load();
+      controller.updateConfig({ emailList: 'demo@example.test|demo' });
+      controller.dispose();
+      controller.attach();
+      bridge.pushProgress({ ...IDLE, state: 'failed', message: 'NEW-RUN-ERROR' });
+      expect(controller.getState().error).toBe('NEW-RUN-ERROR');
+      bridge.saveAutomationDeferred[0].resolve({
+        success: false,
+        error: { code: 'ERR_PERSISTENCE_FAILED', message: 'OLD_SAVE_ERROR' }
+      });
+      await flush();
+      expect(controller.getState().error).toBe('NEW-RUN-ERROR');
+      controller.dispose();
+    });
+
+    it('does not let old start success clear newer state.error after attach session change', async () => {
+      bridge.storedSettings.general.autoSaveConfig = false;
+      bridge.useDeferredRunStart = true;
+      const controller = new DashboardController(bridge);
+      controller.attach();
+      await controller.load();
+      controller.updateConfig({ emailList: 'demo@example.test|demo' });
+      const starting = controller.start();
+      controller.dispose();
+      controller.attach();
+      bridge.pushProgress({ ...IDLE, state: 'failed', message: 'NEW-RUN-ERROR' });
+      expect(controller.getState().error).toBe('NEW-RUN-ERROR');
+      bridge.startDeferred[0].resolve({
+        success: true,
+        data: { runId: 'old-run' }
+      });
+      await starting;
+      await flush();
+      expect(controller.getState().error).toBe('NEW-RUN-ERROR');
+      controller.dispose();
+    });
+  });
 });
+
 
