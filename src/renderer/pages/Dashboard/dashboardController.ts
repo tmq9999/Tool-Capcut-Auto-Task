@@ -143,6 +143,9 @@ export class DashboardController {
   private progressPushRevision = 0;
   private logResetEpoch = 0;
   private logClearedThrough: number | null = null;
+  private logHistoryToken = 0;
+  private readonly unconfirmedLogs = new Map<string, CanonicalRuntimeLog>();
+  private readonly knownSequences = new Map<string, number>();
   private readonly editedConfigKeys = new Set<keyof AutomationConfigState>();
   private currentCompletion: { promise: Promise<void>; resolve: () => void } | null = null;
   private nextCompletion: { promise: Promise<void>; resolve: () => void } | null = null;
@@ -534,18 +537,23 @@ export class DashboardController {
 
   /** Stops one account browser and leaves every other thread running. */
   async stopThread(accountId: string): Promise<boolean> {
-    const response = await this.bridge.run.stopThread(accountId);
-    if (!response.success) {
-      this.setState({ error: response.error.message });
-      return false;
-    }
+    try {
+      const response = await this.bridge.run.stopThread(accountId);
+      if (!response.success) {
+        this.setState({ error: response.error.message });
+        return false;
+      }
 
-    await this.requestSnapshotRefresh();
-    if (!response.data.stopped) {
-      this.setState({ error: 'Không thể dừng phiên trình duyệt. Hãy thử lại hoặc kiểm tra cửa sổ Multilogin.' });
+      await this.requestSnapshotRefresh();
+      if (!response.data.stopped) {
+        this.setState({ error: 'Không thể dừng phiên trình duyệt. Hãy thử lại hoặc kiểm tra cửa sổ Multilogin.' });
+        return false;
+      }
+      return response.data.stopped;
+    } catch (err: unknown) {
+      this.setState({ error: err instanceof Error ? err.message : 'Không thể dừng phiên trình duyệt.' });
       return false;
     }
-    return response.data.stopped;
   }
 
   async load(): Promise<void> {
@@ -628,6 +636,11 @@ export class DashboardController {
         ) {
           return;
         }
+        const idKey = entry.id ? String(entry.id) : `${entry.createdAt}-${entry.message}`;
+        if (entry.streamSequence !== undefined) {
+          this.knownSequences.set(idKey, entry.streamSequence);
+        }
+        this.unconfirmedLogs.set(idKey, entry);
         const next = [entry, ...this.state.logs].slice(0, this.maxLogs);
         this.setState({ logs: next });
       })
@@ -744,6 +757,18 @@ export class DashboardController {
     this.logResetEpoch += 1;
     this.logClearedThrough = Math.max(this.logClearedThrough ?? 0, clearedThrough);
     const cutoff = this.logClearedThrough;
+
+    for (const [key, entry] of this.unconfirmedLogs.entries()) {
+      if (entry.streamSequence !== undefined && entry.streamSequence <= cutoff) {
+        this.unconfirmedLogs.delete(key);
+      }
+    }
+    for (const [key, seq] of this.knownSequences.entries()) {
+      if (seq <= cutoff) {
+        this.knownSequences.delete(key);
+      }
+    }
+
     this.setState({
       logs: this.state.logs.filter((l) => l.streamSequence !== undefined && l.streamSequence > cutoff)
     });
@@ -751,33 +776,73 @@ export class DashboardController {
   }
 
   private async refreshLogs(): Promise<void> {
+    const token = ++this.logHistoryToken;
     const requestEpoch = this.logResetEpoch;
     const requestGen = this.generation;
 
     try {
       const logsResponse = await this.bridge.logs.list({ page: 1, pageSize: this.maxLogs });
-      if (this.isDisposed || this.generation !== requestGen || this.logResetEpoch !== requestEpoch) {
+      if (
+        this.isDisposed ||
+        this.generation !== requestGen ||
+        this.logResetEpoch !== requestEpoch ||
+        token !== this.logHistoryToken
+      ) {
         return;
       }
       if (!logsResponse.success) {
         return;
       }
 
-      const visibleLogs = logsResponse.data.items.filter((l) =>
-        this.logClearedThrough === null ||
-        l.streamSequence === undefined ||
-        l.streamSequence > this.logClearedThrough
-      );
+      const sqlItems = logsResponse.data.items;
+      const authoritativeKeys = new Set<string>();
 
-      const survivingBuffer = this.state.logs.filter((l) =>
-        this.logClearedThrough === null ||
-        l.streamSequence === undefined ||
-        l.streamSequence > this.logClearedThrough
-      );
+      const visibleSqlLogs: CanonicalRuntimeLog[] = [];
+      for (let row of sqlItems) {
+        const idKey = row.id ? String(row.id) : `${row.createdAt}-${row.message}`;
+        authoritativeKeys.add(idKey);
+        this.unconfirmedLogs.delete(idKey);
+
+        const knownSeq = this.knownSequences.get(idKey);
+        if (knownSeq !== undefined) {
+          if (row.streamSequence === undefined || row.streamSequence < knownSeq) {
+            row = { ...row, streamSequence: knownSeq };
+          } else if (row.streamSequence > knownSeq) {
+            this.knownSequences.set(idKey, row.streamSequence);
+          }
+        } else if (row.streamSequence !== undefined) {
+          this.knownSequences.set(idKey, row.streamSequence);
+        }
+
+        if (
+          this.logClearedThrough === null ||
+          row.streamSequence === undefined ||
+          row.streamSequence > this.logClearedThrough
+        ) {
+          visibleSqlLogs.push(row);
+        }
+      }
+
+      for (const [key] of this.knownSequences.entries()) {
+        if (!authoritativeKeys.has(key) && !this.unconfirmedLogs.has(key)) {
+          this.knownSequences.delete(key);
+        }
+      }
+
+      const survivingLive: CanonicalRuntimeLog[] = [];
+      for (const entry of this.unconfirmedLogs.values()) {
+        if (
+          this.logClearedThrough === null ||
+          entry.streamSequence === undefined ||
+          entry.streamSequence > this.logClearedThrough
+        ) {
+          survivingLive.push(entry);
+        }
+      }
 
       const seenIds = new Set<string>();
       const merged: CanonicalRuntimeLog[] = [];
-      for (const l of [...visibleLogs, ...survivingBuffer]) {
+      for (const l of [...survivingLive, ...visibleSqlLogs]) {
         const idKey = l.id ? String(l.id) : `${l.createdAt}-${l.message}`;
         if (!seenIds.has(idKey)) {
           seenIds.add(idKey);
@@ -811,14 +876,19 @@ export class DashboardController {
   async removeAccounts(ids: string[]): Promise<boolean> {
     if (ids.length === 0) return false;
 
-    const response = await this.bridge.accounts.remove(ids);
-    if (!response.success) {
-      this.setState({ error: response.error.message });
+    try {
+      const response = await this.bridge.accounts.remove(ids);
+      if (!response.success) {
+        this.setState({ error: response.error.message });
+        return false;
+      }
+
+      await this.requestSnapshotRefresh();
+      return true;
+    } catch (err: unknown) {
+      this.setState({ error: err instanceof Error ? err.message : 'Không thể xóa tài khoản.' });
       return false;
     }
-
-    await this.requestSnapshotRefresh();
-    return true;
   }
 
   stop(): Promise<boolean> {

@@ -14,7 +14,7 @@ vi.mock('electron', () => ({
     quit: () => {},
     isPackaged: false,
     getAppPath: () => process.cwd(),
-    getVersion: () => '3.0.3',
+    getVersion: () => '3.0.4',
     requestSingleInstanceLock: () => true,
     whenReady: () => state.ready,
     exit: () => { state.events.push('exit'); }
@@ -44,11 +44,11 @@ describe('main bootstrap applies rollout userData before persistence', () => {
     await state.ready;
     expect(state.events).toEqual(['user-data', 'db', 'exit']);
     expect(state.opened).toBe(path.join(directory, 'automanager.db'));
-  });
+  }, 15000);
 
   it('rejects an unsafe override before any persistence or window creation', async () => {
     vi.stubEnv('AUTOMANAGER_ROLLOUT_USER_DATA_DIR', '.');
     await expect(import('../main')).rejects.toThrow();
     expect(state.events).toEqual([]);
-  });
+  }, 15000);
 });

@@ -45,8 +45,8 @@ class TestAccounts implements IAccountSink {
     return { success: true };
   }
 
-  findByEmail(): null {
-    return null;
+  findByEmail(): [] {
+    return [];
   }
 }
 

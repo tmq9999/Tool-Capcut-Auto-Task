@@ -58,6 +58,14 @@ export class LazyProxyLeaseSource implements IProxyLeaseSource {
     this.manager = null;
   }
 
+  resetIdlePreflightCache(): void {
+    if (this.cleanupState !== 'idle' || this.ownedLeases.size > 0 ||
+        this.acquisitionsInFlight > 0 || this.releaseAllPromise) {
+      throw new Error('CANNOT_RESET_PROXY_PREFLIGHT_WHILE_OWNED');
+    }
+    this.manager = null;
+  }
+
   private ensureManager(): IProxyLeaseSource {
     if (!this.manager) {
       const apiToken = this.secrets.readSimpleKey(KIOTPROXY_SERVICE_NAME);

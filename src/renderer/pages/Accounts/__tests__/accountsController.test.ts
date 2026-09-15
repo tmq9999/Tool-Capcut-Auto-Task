@@ -707,4 +707,101 @@ describe('AccountsController.exportAccounts', () => {
     expect(c.getState().accounts[0].id).toBe('p3');
     expect(c.getState().page).toBe(3);
   });
+
+  it('F13 (G10): preserves exact whitespace in passwords for create and update', async () => {
+    const controller = new AccountsController(bridge);
+    await controller.create({
+      email: '  whitespace@x.com  ',
+      provider: 'gmail94',
+      password: '  A|B  ',
+      emailPassword: '  C D  ',
+      status: 'active',
+      createdAt: '',
+      updatedAt: ''
+    });
+    expect(bridge.created[0].email).toBe('whitespace@x.com');
+    expect(bridge.created[0].passwordCapcut).toBe('  A|B  ');
+    expect(bridge.created[0].emailPassword).toBe('  C D  ');
+
+    await controller.update('acc-1', {
+      id: 'acc-1',
+      stt: 1,
+      email: '  whitespace@x.com  ',
+      provider: 'gmail94',
+      password: '  NEW PWD  ',
+      emailPassword: '  NEW MAIL PWD  ',
+      status: 'active',
+      createdAt: '',
+      updatedAt: ''
+    });
+    expect(bridge.updated[0].data.passwordCapcutOp).toEqual({ action: 'replace', value: '  NEW PWD  ' });
+    expect(bridge.updated[0].data.emailPasswordOp).toEqual({ action: 'replace', value: '  NEW MAIL PWD  ' });
+  });
+
+  it('F14 (G10): catches rejected IPC promises on create, update, remove and sets error', async () => {
+    bridge.accounts.create = async () => { throw new Error('DEMO_IPC_DOWN'); };
+    bridge.accounts.update = async () => { throw new Error('DEMO_IPC_DOWN'); };
+    bridge.accounts.remove = async () => { throw new Error('DEMO_IPC_DOWN'); };
+
+    const controller = new AccountsController(bridge);
+    const createResult = await controller.create({
+      email: 'a@x.com',
+      provider: 'gmail94',
+      status: 'active',
+      createdAt: '',
+      updatedAt: ''
+    });
+    expect(createResult).toBe(false);
+    expect(controller.getState().error).toBe('DEMO_IPC_DOWN');
+
+    const updateResult = await controller.update('acc-1', {
+      id: 'acc-1',
+      stt: 1,
+      email: 'a@x.com',
+      provider: 'gmail94',
+      status: 'active',
+      createdAt: '',
+      updatedAt: ''
+    });
+    expect(updateResult).toBe(false);
+    expect(controller.getState().error).toBe('DEMO_IPC_DOWN');
+
+    const removeResult = await controller.remove(['acc-1']);
+    expect(removeResult).toBe(false);
+    expect(controller.getState().error).toBe('DEMO_IPC_DOWN');
+  });
+
+  it('F14 (G10): sets warning when mutation succeeds but subsequent load fails', async () => {
+    const controller = new AccountsController(bridge);
+    bridge.listFails = true;
+
+    // create succeeds, but subsequent load fails
+    const createResult = await controller.create({
+      email: 'a@x.com',
+      provider: 'gmail94',
+      status: 'active',
+      createdAt: '',
+      updatedAt: ''
+    });
+    expect(createResult).toBe(true);
+    expect(controller.getState().warning).toContain('chưa tải lại được danh sách');
+
+    // update succeeds, but subsequent load fails
+    const updateResult = await controller.update('acc-1', {
+      id: 'acc-1',
+      stt: 1,
+      email: 'a@x.com',
+      provider: 'gmail94',
+      status: 'active',
+      createdAt: '',
+      updatedAt: ''
+    });
+    expect(updateResult).toBe(true);
+    expect(controller.getState().warning).toContain('chưa tải lại được danh sách');
+
+    // remove succeeds, but subsequent load fails
+    const removeResult = await controller.remove(['acc-1']);
+    expect(removeResult).toBe(true);
+    expect(controller.getState().warning).toContain('chưa tải lại được danh sách');
+  });
 });

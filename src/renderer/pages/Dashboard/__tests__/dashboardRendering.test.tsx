@@ -148,4 +148,81 @@ describe('Dashboard continuous-run rendering', () => {
     expect(html).not.toContain('••••••••');
     if (value !== null) expect(html).toContain('select-all');
   });
+
+  it('renders pasted capcut accounts UI panel title, placeholder, and per-account password notice in manual mode', () => {
+    const html = renderToStaticMarkup(
+      <AutomationConfigGrid
+        config={{
+          ...DEFAULT_AUTOMATION_CONFIG,
+          emailSourceMode: 'manual',
+          emailList: ''
+        }}
+        onChange={() => {}}
+        emailProviders={[]}
+        customEmail={{ domain: 'test.com', apiBaseUrl: '', senderFilter: '' }}
+      />
+    );
+
+    expect(html).toContain('Tài khoản CapCut');
+    expect(html).toContain('Dán tài khoản có sẵn');
+    expect(html).toContain('email|mật khẩu CapCut — mỗi dòng một tài khoản...');
+    expect(html).toContain('Dữ liệu trong bảng Tài khoản là dữ liệu đã lưu và không tự ghi đè.');
+    expect(html).toContain('Dùng mật khẩu CapCut ở từng dòng dán; không tạo mật khẩu mới.');
+    expect(html).not.toContain('Ngẫu nhiên (Random)');
+  });
+
+  it('renders realtime parser issues when pasted text has invalid format', () => {
+    const html = renderToStaticMarkup(
+      <AutomationConfigGrid
+        config={{
+          ...DEFAULT_AUTOMATION_CONFIG,
+          emailSourceMode: 'manual',
+          emailList: 'bad-email-without-pipe'
+        }}
+        onChange={() => {}}
+        emailProviders={[]}
+        customEmail={{ domain: 'test.com', apiBaseUrl: '', senderFilter: '' }}
+      />
+    );
+
+    expect(html).toContain('Dòng 1: thiếu dấu');
+    expect(html).toContain('phân cách giữa email và mật khẩu');
+  });
+
+  it('renders valid parsed count and deduplication summary when valid lines are pasted', () => {
+    const html = renderToStaticMarkup(
+      <AutomationConfigGrid
+        config={{
+          ...DEFAULT_AUTOMATION_CONFIG,
+          emailSourceMode: 'manual',
+          emailList: 'user1@gmail.com|pass1\nuser1@gmail.com|pass1\nuser2@gmail.com|pass2'
+        }}
+        onChange={() => {}}
+        emailProviders={[]}
+        customEmail={{ domain: 'test.com', apiBaseUrl: '', senderFilter: '' }}
+      />
+    );
+
+    expect(html).toContain('Đã nhận 2 tài khoản hợp lệ');
+    expect(html).toContain('đã lọc 1 dòng trùng');
+  });
+
+  it('renders API source title and password generator controls in api mode', () => {
+    const html = renderToStaticMarkup(
+      <AutomationConfigGrid
+        config={{
+          ...DEFAULT_AUTOMATION_CONFIG,
+          emailSourceMode: 'api'
+        }}
+        onChange={() => {}}
+        emailProviders={[]}
+        customEmail={{ domain: 'test.com', apiBaseUrl: '', senderFilter: '' }}
+      />
+    );
+
+    expect(html).toContain('Nguồn Email');
+    expect(html).toContain('Ngẫu nhiên (Random)');
+    expect(html).toContain('Tự đặt');
+    expect(html).not.toContain('Dùng mật khẩu CapCut ở từng dòng dán');
+  });
 });

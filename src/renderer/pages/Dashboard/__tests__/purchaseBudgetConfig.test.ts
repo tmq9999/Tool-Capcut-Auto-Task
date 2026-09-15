@@ -16,7 +16,7 @@ describe('dashboard explicit purchase budget', () => {
 
   it('never transfers a remembered paid budget to a manual source', () => {
     const result = toRunConfig({ ...DEFAULT_AUTOMATION_CONFIG, emailSourceMode: 'manual',
-      emailList: 'fake@example.com', maxBillablePurchases: 5 });
+      emailList: 'fake@example.com|pass123', maxBillablePurchases: 5 });
     expect(result).toMatchObject({ ok: true, config: { maxBillablePurchases: 0 } });
   });
 });

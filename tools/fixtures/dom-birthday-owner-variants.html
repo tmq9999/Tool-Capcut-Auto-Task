@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Birthday Dropdown Owner Variants</title>
+</head>
+<body>
+  <!-- Trigger with aria-controls -->
+  <div id="month-trigger-1" role="combobox" aria-controls="month-panel-controlled" aria-haspopup="listbox">
+    <span>Month</span>
+  </div>
+  <div id="month-panel-controlled" role="listbox" style="display: block;">
+    <div role="option" class="lv-select-option">July</div>
+  </div>
+
+  <!-- Unrelated standalone listbox (e.g. language or category picker) -->
+  <div id="unrelated-trigger" role="combobox" aria-haspopup="listbox"></div>
+  <div id="unrelated-listbox" role="listbox" aria-labelledby="unrelated-trigger" style="display: block;">
+    <div role="option" class="lv-select-option">June</div>
+  </div>
+
+  <!-- Trigger without aria-controls, owning listbox via aria-labelledby -->
+  <div id="month-trigger-labelledby" role="combobox" aria-haspopup="listbox">
+    <span>Month</span>
+  </div>
+  <div id="month-panel-labelledby" role="listbox" aria-labelledby="month-trigger-labelledby" style="display: block;">
+    <div role="option" class="lv-select-option">July</div>
+  </div>
+
+  <!-- Ambiguous trigger with two matching panels -->
+  <div id="month-trigger-ambiguous" role="combobox" aria-haspopup="listbox"></div>
+  <div id="ambiguous-panel-1" role="listbox" aria-labelledby="month-trigger-ambiguous" style="display: block;"></div>
+  <div id="ambiguous-panel-2" role="listbox" aria-labelledby="month-trigger-ambiguous" style="display: block;"></div>
+</body>
+</html>

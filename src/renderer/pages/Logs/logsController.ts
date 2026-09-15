@@ -421,6 +421,24 @@ export class LogsController {
     }
 
     const cutoff = response.data.clearedThrough;
+    if (clearEpoch !== this.resetEpoch) {
+      if (cutoff !== undefined && (this.clearedThrough === null || cutoff > this.clearedThrough)) {
+        this.applyLogReset(cutoff);
+      } else {
+        const currentCutoff = this.clearedThrough;
+        const survivingPushes = this.clearPushes.filter(
+          (item) => currentCutoff === null || item.streamSequence === undefined || item.streamSequence > currentCutoff
+        );
+        for (const item of survivingPushes) {
+          if (this.matchesFilter(item)) {
+            this.canonicalRows = this.upsertSorted(this.canonicalRows, item);
+          }
+        }
+        this.setState({ logs: this.canonicalRows.map((row) => this.normalize(row).view) });
+      }
+      return true;
+    }
+
     if (cutoff !== undefined) {
       this.clearedThrough = Math.max(this.clearedThrough ?? 0, cutoff);
       const committedCutoff = this.clearedThrough;
@@ -436,11 +454,7 @@ export class LogsController {
       this.unconfirmedPushes = [];
       this.clearSurvivors = [];
     }
-    if (clearEpoch === this.resetEpoch) {
-      this.publishRows(this.clearSurvivors, { isLoading: false, error: null });
-    } else {
-      this.publishRows(this.canonicalRows, { isLoading: false, error: null });
-    }
+    this.publishRows(this.clearSurvivors, { isLoading: false, error: null });
 
     if (cutoff === undefined && !this.disposed && clearEpoch === this.resetEpoch) {
       // Private read cannot await this clearPromise; it owns the latest query now.

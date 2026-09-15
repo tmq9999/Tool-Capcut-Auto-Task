@@ -1446,3 +1446,306 @@ describe('Task 8: Recovery state machine and single-recycle resume', () => {
     expect(writeCount).toBe(4);
   });
 });
+
+describe('G07: Proof ownership, drain, and failure priority (F08/F09)', () => {
+  it('G07.1: rejects onTaskCheckpoint after invocation has closed / owner retired', async () => {
+    let capturedCheckpoint: ((cp: Parameters<NonNullable<RunAccountInput['onTaskCheckpoint']>>[0]) => Promise<void>) | undefined;
+    const runner: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        capturedCheckpoint = input.onTaskCheckpoint;
+        return fullCompleteResult();
+      }
+    };
+    let sinkRecordCalls = 0;
+    const progressSink: ICapcutTaskProgressSink = {
+      record: async () => { sinkRecordCalls++; }
+    };
+    const service = createService(runner, progressSink);
+    await service.start(baseConfig());
+    await service.waitForCompletion();
+
+    expect(capturedCheckpoint).toBeDefined();
+    await expect(
+      capturedCheckpoint!({
+        rows: TASKS,
+        receipt: fullResult().verification!,
+        unsettledProofs: []
+      })
+    ).rejects.toThrow(/INVOCATION_CLOSED|STALE_ACK_PROOF_OWNER/);
+    expect(sinkRecordCalls).toBe(0);
+  });
+
+  it('G07.2: rejects memo-hit onAcceptedProof when iterationOwner has been replaced', async () => {
+    let capturedCallback: ((p: UnsettledTaskProof) => Promise<void>) | undefined;
+    let runnerRelease!: () => void;
+    const runnerPending = new Promise<void>((resolve) => { runnerRelease = resolve; });
+
+    const runner: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        capturedCallback = input.onAcceptedProof;
+        await runnerPending;
+        return fullCompleteResult();
+      }
+    };
+
+    let writeCount = 0;
+    const progressSink: ICapcutTaskProgressSink = {
+      record: async () => {},
+      recordUnsettled: async () => { writeCount++; }
+    };
+
+    const service = createService(runner, progressSink);
+    await service.start(baseConfig());
+
+    while (!capturedCallback) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const proof = {
+      key: 'task-1',
+      proof: { actionKey: 'task-1', opId: 'op-1', errNo: 0 as const, errTips: '', at: 1000 }
+    };
+
+    // First write succeeds
+    await capturedCallback(proof);
+    expect(writeCount).toBe(1);
+
+    // Replace owner token
+    const privateService = service as unknown as { iterationOwners: Map<string, unknown> };
+    const accountId = Array.from(privateService.iterationOwners.keys())[0] as string;
+    privateService.iterationOwners.set(accountId, {});
+
+    // Same proof (memo hit) must reject because owner changed
+    await expect(capturedCallback(proof)).rejects.toThrow('STALE_ACK_PROOF_OWNER');
+    expect(writeCount).toBe(1);
+
+    runnerRelease();
+    await service.waitForCompletion();
+  });
+
+  it('G07.3: awaits all writes in persistAcceptedProofs before rejecting when one write fails', async () => {
+    let bSettled = false;
+    const proofA: UnsettledTaskProof = {
+      key: 'task-fail',
+      proof: { actionKey: 'task-fail', opId: 'op-fail', errNo: 0 as const, errTips: '', at: 1000 }
+    };
+    const proofB: UnsettledTaskProof = {
+      key: 'task-slow',
+      proof: { actionKey: 'task-slow', opId: 'op-slow', errNo: 0 as const, errTips: '', at: 2000 }
+    };
+
+    let capturedCallback: ((p: UnsettledTaskProof) => Promise<void>) | undefined;
+    let runnerRelease!: () => void;
+    const runnerPending = new Promise<void>((resolve) => { runnerRelease = resolve; });
+
+    const runner: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        capturedCallback = input.onAcceptedProof;
+        await runnerPending;
+        return fullCompleteResult();
+      }
+    };
+
+    const progressSink: ICapcutTaskProgressSink = {
+      record: async () => {},
+      recordUnsettled: async (_acc, _run, proofs) => {
+        if (proofs.some((p) => p.key === 'task-fail')) {
+          throw new Error('WRITE_A_FAILED');
+        }
+        if (proofs.some((p) => p.key === 'task-slow')) {
+          await new Promise((r) => setTimeout(r, 40));
+          bSettled = true;
+        }
+      }
+    };
+
+    const service = createService(runner, progressSink);
+    await service.start(baseConfig());
+
+    while (!capturedCallback) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const privateService = service as unknown as {
+      persistAcceptedProofs: (thread: unknown, proofs: readonly UnsettledTaskProof[]) => Promise<void>;
+      activeThreads: Map<string, unknown>;
+    };
+    const thread = Array.from(privateService.activeThreads.values())[0];
+
+    let errorThrown: unknown = null;
+    try {
+      await privateService.persistAcceptedProofs(thread, [proofA, proofB]);
+    } catch (e) {
+      errorThrown = e;
+    }
+
+    expect(errorThrown).toBeDefined();
+    // B must have settled by the time the outer promise rejected!
+    expect(bSettled).toBe(true);
+
+    runnerRelease();
+    await service.waitForCompletion();
+  });
+
+  it('G07.4: memoizes settled checkpoint rows so fallback sameproof does not duplicate write', async () => {
+    const provedRow = {
+      key: 'task_memo',
+      title: 'Task Memo',
+      reward: 30,
+      status: 4 as const,
+      opId: 'op-memo-123',
+      provedAt: '2026-09-03T01:00:00.000Z'
+    };
+    const proof: UnsettledTaskProof = {
+      key: 'task_memo',
+      proof: {
+        actionKey: 'task_memo',
+        opId: 'op-memo-123',
+        errNo: 0 as const,
+        errTips: '',
+        at: Date.parse('2026-09-03T01:00:00.000Z')
+      }
+    };
+
+    let writeCount = 0;
+    const progressSink: ICapcutTaskProgressSink = {
+      record: async () => {},
+      recordUnsettled: async () => {
+        writeCount++;
+      }
+    };
+
+    const runner: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        await input.onTaskCheckpoint?.({
+          rows: [provedRow],
+          receipt: { ...fullResult().verification!, complete: false, final: false },
+          unsettledProofs: []
+        });
+        // Checkpoint succeeded, now fallback with same proof
+        throw new TaskEvidenceError('Fallback with same proof', [proof]);
+      }
+    };
+
+    const service = createService(runner, progressSink);
+    await service.start(baseConfig());
+    await service.waitForCompletion();
+
+    // writeCount should be 0 because row proof was already memoized by successful onTaskCheckpoint!
+    expect(writeCount).toBe(0);
+  });
+
+  it('G07.5: persists new proof when key matches but opId or timestamp differs', async () => {
+    const provedRow = {
+      key: 'task_memo',
+      title: 'Task Memo',
+      reward: 30,
+      status: 4 as const,
+      opId: 'op-memo-123',
+      provedAt: '2026-09-03T01:00:00.000Z'
+    };
+    const differentProof: UnsettledTaskProof = {
+      key: 'task_memo',
+      proof: {
+        actionKey: 'task_memo',
+        opId: 'op-memo-DIFFERENT',
+        errNo: 0 as const,
+        errTips: '',
+        at: Date.parse('2026-09-03T01:00:00.000Z')
+      }
+    };
+
+    let writeCount = 0;
+    const progressSink: ICapcutTaskProgressSink = {
+      record: async () => {},
+      recordUnsettled: async () => {
+        writeCount++;
+      }
+    };
+
+    const runner: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        await input.onTaskCheckpoint?.({
+          rows: [provedRow],
+          receipt: { ...fullResult().verification!, complete: false, final: false },
+          unsettledProofs: []
+        });
+        throw new TaskEvidenceError('Fallback with different proof', [differentProof]);
+      }
+    };
+
+    const service = createService(runner, progressSink);
+    await service.start(baseConfig());
+    await service.waitForCompletion();
+
+    // writeCount should be 1 because opId differs
+    expect(writeCount).toBe(1);
+  });
+
+  it('G07.6: prioritizes independent persistence failure over stop for failing thread while peer reports stopped', async () => {
+    let unblockPeer!: () => void;
+    const peerWait = new Promise<void>((resolve) => { unblockPeer = resolve; });
+
+    let threadCounter = 0;
+    const runner: CapcutTaskRunner = {
+      runAccount: async (input) => {
+        const id = ++threadCounter;
+        if (id === 1) {
+          // Thread 1: gets aborted then throws TaskEvidenceError which fails in recordUnsettled
+          await new Promise<void>((resolve) => {
+            if (input.signal.aborted) return resolve();
+            input.signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+          throw new TaskEvidenceError('Thread 1 abort', [{
+            key: 'task-fail',
+            proof: { actionKey: 'task-fail', opId: 'op-fail', errNo: 0 as const, errTips: '', at: 1000 }
+          }]);
+        } else {
+          // Thread 2 (peer): merely waits and gets aborted
+          await new Promise<void>((resolve) => {
+            if (input.signal.aborted) return resolve();
+            input.signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+          await peerWait;
+          throw new Error('USER_STOP');
+        }
+      }
+    };
+
+    const progressSink: ICapcutTaskProgressSink = {
+      record: async () => {},
+      recordUnsettled: async (_acc, _run, proofs) => {
+        if (proofs.some((p) => p.key === 'task-fail')) {
+          throw new AutomationTerminalError(
+            'failed',
+            { code: 'TASK_CHECKPOINT_PERSISTENCE_FAILED' },
+            'Failed persistence'
+          );
+        }
+      }
+    };
+
+    const service = createService(runner, progressSink);
+    await service.start(baseConfig({
+      threadCount: 2,
+      emailSource: { mode: 'manual', entries: ['peer1@test.com|p', 'peer2@test.com|p'] }
+    }));
+
+    await new Promise((r) => setTimeout(r, 20));
+    const privateService = service as unknown as { iterationAbort: Map<string, AbortController> };
+    const cleanupError = new AutomationTerminalError(
+      'failed',
+      { code: 'RESOURCE_CLEANUP_FAILED' },
+      'Cleanup failed'
+    );
+    for (const ctrl of privateService.iterationAbort.values()) {
+      ctrl.abort(cleanupError);
+    }
+    unblockPeer();
+    const summary = await service.waitForCompletion();
+
+    // Exactly 1 failed (thread 1 with persistence failure) and 1 stopped (peer 2)
+    expect(summary.accountsFailed).toBe(1);
+    expect(summary.accountsStopped).toBe(1);
+  });
+});

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Trial Owner Variants Test Fixture</title>
+</head>
+<body>
+  <!-- Unrelated CTA outside pricing modal -->
+  <div class="unrelated-banner">
+    <button type="button" class="banner-cta">Start free trial</button>
+  </div>
+
+  <!-- Stale hidden pricing owner with 7 days -->
+  <div class="lv-modal-wrapper subscriptionModal-wrapper" style="display: none;" hidden>
+    <div class="subscriptionModal-content">
+      <section class="subscriptionProductSection subscriptionProductSection-pro">
+        <div class="subscriptionProductSection-title">Pro</div>
+        <div class="subscriptionProductSection-price">0₫</div>
+        <div class="subscriptionProductSection-listPrice">222,000₫</div>
+        <div class="subscriptionProductSection-duration">for 7 days</div>
+        <button type="button" class="subscribe-btn">Start free trial</button>
+      </section>
+    </div>
+  </div>
+
+  <!-- Active visible pricing owner with 3 days -->
+  <div class="lv-modal-wrapper subscriptionModal-wrapper" style="display: block;">
+    <div class="subscriptionModal-content">
+      <section class="subscriptionProductSection subscriptionProductSection-free">
+        <div class="subscriptionProductSection-title">Free</div>
+        <div class="subscriptionProductSection-price">0₫</div>
+      </section>
+      <section class="subscriptionProductSection subscriptionProductSection-pro">
+        <div class="subscriptionProductSection-title">Pro</div>
+        <div class="subscriptionProductSection-listPrice">222,000₫</div>
+        <div class="subscriptionProductSection-price">0₫</div>
+        <div class="subscriptionProductSection-duration">for 3 days</div>
+        <button type="button" class="subscribe-btn">Start free trial</button>
+      </section>
+      <section class="subscriptionProductSection subscriptionProductSection-team">
+        <div class="subscriptionProductSection-title">Team</div>
+      </section>
+    </div>
+  </div>
+</body>
+</html>

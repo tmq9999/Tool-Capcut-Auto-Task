@@ -89,6 +89,7 @@ export type ExportOutcome =
 export interface AccountsState {
   isLoading: boolean;
   error: string | null;
+  warning: string | null;
   accounts: Account[];
   total: number;
   globalTotal: number;
@@ -148,16 +149,18 @@ export function parseBrowserProfile(value: string | undefined): {
 }
 
 function secretOp(value: string | undefined): SecretOperation {
-  const trimmed = (value ?? '').trim();
-  if (trimmed.length === 0 || trimmed === MASKED_SECRET) {
+  const raw = value ?? '';
+  const probe = raw.trim();
+  if (probe.length === 0 || probe === MASKED_SECRET) {
     return { action: 'keep' };
   }
-  return { action: 'replace', value: trimmed };
+  return { action: 'replace', value: raw };
 }
 
 function optionalSecret(value: string | undefined): string | undefined {
-  const trimmed = (value ?? '').trim();
-  return trimmed.length === 0 || trimmed === MASKED_SECRET ? undefined : trimmed;
+  const raw = value ?? '';
+  const probe = raw.trim();
+  return probe.length === 0 || probe === MASKED_SECRET ? undefined : raw;
 }
 
 /** Owns the Accounts page data. All persistence goes through the preload bridge. */
@@ -165,6 +168,7 @@ export class AccountsController {
   private state: AccountsState = {
     isLoading: true,
     error: null,
+    warning: null,
     accounts: [],
     total: 0,
     globalTotal: 0,
@@ -200,7 +204,7 @@ export class AccountsController {
     }
   }
 
-  async load(filter?: AccountsQuery, page?: number): Promise<void> {
+  async load(filter?: AccountsQuery, page?: number): Promise<'loaded' | 'failed' | 'superseded'> {
     /**
      * Lọc chạy Ở SERVER. SQL đã viết đủ từ đầu (`AccountRepository.queryAccounts`)
      * nhưng bản cũ không gửi gì và lọc phía client trên 500 dòng đầu — có 2000
@@ -218,13 +222,13 @@ export class AccountsController {
     const clean = cleanFilter(this.filter);
     const hasFilter = Object.keys(clean).length > 0;
 
-    this.setState({ isLoading: true, error: null });
+    this.setState({ isLoading: true, error: null, warning: null });
 
     try {
       let globalTotal = this.state.globalTotal;
       if (hasFilter) {
         const globalResponse = await this.bridge.accounts.list({ page: 1, pageSize: 1 });
-        if (token !== this.requestToken) return;
+        if (token !== this.requestToken) return 'superseded';
         if (globalResponse.success) {
           globalTotal = globalResponse.data.total;
         }
@@ -237,12 +241,12 @@ export class AccountsController {
       });
 
       if (token !== this.requestToken) {
-        return;
+        return 'superseded';
       }
 
       if (!response.success) {
         this.setState({ isLoading: false, error: 'Không tải được danh sách tài khoản.' });
-        return;
+        return 'failed';
       }
 
       const total = response.data.total;
@@ -252,8 +256,7 @@ export class AccountsController {
 
       const maxPage = Math.max(1, Math.ceil(total / this.pageSize));
       if (total > 0 && requestedPage > maxPage) {
-        await this.load(undefined, maxPage);
-        return;
+        return await this.load(undefined, maxPage);
       }
 
       this.currentPage = requestedPage;
@@ -265,17 +268,21 @@ export class AccountsController {
         globalTotal,
         page: requestedPage
       });
+      return 'loaded';
     } catch (err: unknown) {
       if (token === this.requestToken) {
         this.setState({
           isLoading: false,
           error: err instanceof Error ? err.message : 'Không tải được danh sách tài khoản.'
         });
+        return 'failed';
       }
+      return 'superseded';
     }
   }
 
   async create(input: Omit<Account, 'id' | 'stt'>): Promise<boolean> {
+    this.setState({ warning: null });
     const browser = parseBrowserProfile(input.browserProfile);
     const payload: AccountCreateInputDTO = {
       email: input.email.trim(),
@@ -297,17 +304,26 @@ export class AccountsController {
       notes: input.notes
     };
 
-    const response = await this.bridge.accounts.create(payload);
-    if (!response.success || !response.data?.id) {
-      this.setState({ error: !response.success ? response.error.message : 'Thêm tài khoản thất bại.' });
+    try {
+      const response = await this.bridge.accounts.create(payload);
+      if (!response.success || !response.data?.id) {
+        this.setState({ error: !response.success ? response.error.message : 'Thêm tài khoản thất bại.' });
+        return false;
+      }
+    } catch (err: unknown) {
+      this.setState({ error: err instanceof Error ? err.message : 'Thêm tài khoản thất bại.' });
       return false;
     }
 
-    await this.load();
+    const refresh = await this.load();
+    if (refresh === 'failed') {
+      this.setState({ warning: 'Đã thêm tài khoản nhưng chưa tải lại được danh sách.' });
+    }
     return true;
   }
 
   async update(id: string, updated: Account): Promise<boolean> {
+    this.setState({ warning: null });
     const browser = parseBrowserProfile(updated.browserProfile);
     const payload: AccountUpdateInputDTO = {
       email: updated.email.trim(),
@@ -324,27 +340,44 @@ export class AccountsController {
       notes: updated.notes ?? null
     };
 
-    const response = await this.bridge.accounts.update(id, payload);
-    if (!response.success || !response.data?.success) {
-      this.setState({ error: !response.success ? response.error.message : 'Cập nhật thất bại.' });
+    try {
+      const response = await this.bridge.accounts.update(id, payload);
+      if (!response.success || !response.data?.success) {
+        this.setState({ error: !response.success ? response.error.message : 'Cập nhật thất bại.' });
+        return false;
+      }
+    } catch (err: unknown) {
+      this.setState({ error: err instanceof Error ? err.message : 'Cập nhật thất bại.' });
       return false;
     }
 
-    await this.load();
+    const refresh = await this.load();
+    if (refresh === 'failed') {
+      this.setState({ warning: 'Đã cập nhật tài khoản nhưng chưa tải lại được danh sách.' });
+    }
     return true;
   }
 
 
   async remove(ids: string[]): Promise<boolean> {
     if (ids.length === 0) return false;
+    this.setState({ warning: null });
 
-    const response = await this.bridge.accounts.remove(ids);
-    if (!response.success) {
-      this.setState({ error: response.error.message });
+    try {
+      const response = await this.bridge.accounts.remove(ids);
+      if (!response.success) {
+        this.setState({ error: response.error.message });
+        return false;
+      }
+    } catch (err: unknown) {
+      this.setState({ error: err instanceof Error ? err.message : 'Không thể xóa tài khoản.' });
       return false;
     }
 
-    await this.load();
+    const refresh = await this.load();
+    if (refresh === 'failed') {
+      this.setState({ warning: 'Đã xóa tài khoản nhưng chưa tải lại được danh sách.' });
+    }
     return true;
   }
 

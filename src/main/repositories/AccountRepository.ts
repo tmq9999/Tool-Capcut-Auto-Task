@@ -364,6 +364,16 @@ export class AccountRepository {
     return { items, total: totalRow.count };
   }
 
+  findByEmail(email: string): AccountIdentity[] {
+    const normalized = email.trim().toLowerCase();
+    const rows = this.db.prepare(`
+      SELECT id, email FROM accounts
+      WHERE LOWER(TRIM(email)) = ?
+      ORDER BY id ASC
+    `).all(normalized) as Array<{ id: string; email: string }>;
+    return rows.map((r) => ({ id: r.id, email: r.email }));
+  }
+
   deleteAccounts(ids: string[]): number {
     if (ids.length === 0) return 0;
     const tasks = new AccountTaskRepository(this.db);
@@ -377,4 +387,9 @@ export class AccountRepository {
       return deleted;
     })();
   }
+}
+
+export interface AccountIdentity {
+  id: string;
+  email: string;
 }

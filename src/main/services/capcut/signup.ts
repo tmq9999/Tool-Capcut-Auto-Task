@@ -350,11 +350,21 @@ async function selectBirthdayDropdownOption(
     const escapedId = ariaControls.replace(/["\\]/g, '\\$&');
     container = page.locator(`[id="${escapedId}"]`).first();
   } else {
-    const fallbackPanels = page.locator(
-      '.lv-select-dropdown:visible, [role="listbox"]:visible, .semi-select-option-list:visible'
+    const triggerId = await boundedDomRead(
+      () => selector.getAttribute('id'),
+      `signup:birthday-${ownerType}-trigger-id`,
+      2000,
+      signal
+    );
+    if (!triggerId) {
+      throw new Error(`SIGNUP_BIRTHDAY_${ownerType.toUpperCase()}_OWNER_MISSING: ${targetDisplay}`);
+    }
+    const escapedTriggerId = triggerId.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, '\\$1');
+    const panels = page.locator(
+      `[role="listbox"]:visible[aria-labelledby~="${escapedTriggerId}"], .lv-select-dropdown:visible[aria-labelledby~="${escapedTriggerId}"], .semi-select-option-list:visible[aria-labelledby~="${escapedTriggerId}"]`
     );
     const panelCount = await boundedDomRead(
-      () => fallbackPanels.count(),
+      () => panels.count(),
       `signup:birthday-${ownerType}-panels-count`,
       2000,
       signal
@@ -365,7 +375,7 @@ async function selectBirthdayDropdownOption(
     if (panelCount > 1) {
       throw new Error(`SIGNUP_BIRTHDAY_${ownerType.toUpperCase()}_OWNER_AMBIGUOUS: ${targetDisplay}`);
     }
-    container = fallbackPanels.first();
+    container = panels.first();
   }
 
   // Scoped options list inside the container

@@ -1,154 +1,116 @@
-# ToolCapCut — Spec đóng phần còn lại sau review P01–P06
+# Spec — Remaining bugs sau Antigravity, 15/09/2026
 
-## Baseline và phạm vi
+**Baseline:** HEAD3bb6b72 + dirty pasted-existing implementation;457JS/TSfiles,21changed/new. [Audit/evidence](../reports/2026-09-15-antigravity-project-review.md), [Coverage](../reports/2026-09-15-antigravity-review-coverage.md), [Plan](../plans/2026-09-10-tool-bugfix-plan.md), [Runbook](../plans/2026-09-10-tool-bugfix-runbook.md).
 
-Ngày11/09/2026. Source: **7ba6d231e2a876bfa0b51376fb57dc750d5b5e88 + dirty Antigravity**,453JS/TSfiles. Lượt review gần nhất xác nhận8nhóm lỗi còn lại; các task V01–V08 dưới đây map trực tiếp8nhóm đó.
-
-Bộ hiện hành: [Plan](../plans/2026-09-10-tool-bugfix-plan.md), [Runbook](../plans/2026-09-10-tool-bugfix-runbook.md), spec này. Viết lại trực tiếp bộ cũ, không cộng thêm lớp “đính chính”. Báo cáo trước giữ lịch sử; không áp lại toàn P01–P06.
-
-Đã kiểm chứng đúng và phải giữ: span Close của modal thật;4acks→Stop giữ4proof không action5; expected tab-close và system-stop labels; selective same-run proof settlement trên timestamp canonical. **Chưa có full Node/live evidence cho mọi edge.** Baseline review339tests/9files, typecheck/lint/buildPASS, selectors95PASS; không lấy counts này làm nghiệm thu fix mới.
+**Mục tiêu:** Khép các lỗi còn tái hiện được sau đợt paste, không làm lại flow đã đúng. F01–F15 là code/contract findings; F16 là thiếu kiểm chứng. Các scenario contract-only được ghi rõ, không đồng nhất với incident live.
 
 ## Global Constraints
 
-- Giữ do_action → task_list → claim/đối soát, trial gate, endpoints, op_id, thứ tự, pacing và normal restock; không thêm product_mission/media gate hoặc mutation retry.
-- API key/password/proxy trên Dashboard vẫn hiện plaintext để xem/copy; không masking, reveal toggle, vault hoặc storage redesign.
-- Giữ dirty patches đã đúng; không reset source, user DB, account, mailbox, receipt hoặc proof.
-- Không tự retry Stop, stop-all, kill process hoặc giải phóng route/profile chưa đủ xác nhận theo owner hiện hành.
-- Chỉ patch lỗi đã review; không rewrite subsystem, thêm framework/dependency hay generic IPC.
-- Chỉ tạo proof từ ack đã quan sát và kiểm err_no=0; request chưa biết kết quả không được tính proof.
-- Mỗi fix cần behavioral RED → minimal patch → GREEN và review; fixture dựng sẵn kết quả không thay runtime/repository evidence.
-- Không live purchase/trial/provider mutation, commit/push/deploy ngoài quyền được giao. Tests dùng DEMO và DB/profile tạm.
-- Log chỉ chứa phase/code/count an toàn; cause gốc giữ main-only. Quy tắc này không thay plaintext Dashboard.
+- Giữ do_action → task_list → claim/đối soát, endpoints, op_id, thứ tự, pacing, trial gate và normal restock.
+- API key/password/proxy trên Dashboard vẫn plaintext/selectable; không masking, vault redesign hoặc reveal toggle mới.
+- Pasted-existing dùng password từng dòng, existing-only auth; không signup/fallback, OTP, mua mailbox hoặc HTTP-only.
+- Giữ UI/persisted manual và legacy runtime manual/API/custom/existing; không đổi ngầm contract hoặc mở feature đang khóa.
+- Không auto-overwrite mật khẩu row đã có từ pasted login; Add/Edit explicit vẫn là nơi người dùng chủ động đổi.
+- Chỉ fix đúng boundary và tests; không đổi framework, thêm dependency, refactor toàn controller/runtime hoặc thêm business retry.
+- Không reset DB, xóa account/proof/lease, sửa migration checksum hay auto-release tài nguyên chưa xác nhận thu hồi.
+- Fixtures dùng DEMO và DB/profile tạm; không live purchase/signup/trial, commit/push/deploy nếu chưa được cấp quyền riêng.
 
-## Tóm tắt bằng chứng và mapping
+## Hợp đồng đã đạt — giữ làm regression
 
-| Task | Lỗi đã tái hiện | Bằng chứng |
-|---|---|---|
-| V01 | Malformed quick statuses thành “đã stop” | HTTP200 data{} hoặc ownrownull → provider[] → stop resolves |
-| V02 | Proof-bearing error sau abort bị bỏ lưu | 4knownproofs, currentthread/session, aborted → saves0/stopped |
-| V03 | Owner không đúng và missing sink silent-success | Đổi iterationOwners token vẫn writes1; missing sink resolves/writes0 |
-| V04 | Proof error mất cause và chiếm account-terminal priority | Publicmessage chứa raw sinkerror; causeundefined; ACK rồi accountwritefail vẫn ACKreason |
-| V05 | Modal readerror/ambiguity bị bypass | Presenceerror→true;2visibleowners đóng1; ambiguousClose→CSSfirstclick |
-| V06 | Stop reporting/state thiếu chính xác | Loggerthrow thay cause; CDPclosefail mất remoteconfirmed; outerdeadline mấtphase |
-| V07 | Timestamp text comparison sai timezone | observed10:00+07 < proof04:00Z nhưng SQL textdeleteproof |
-| V08 | Incidenttest chưa đi hết producer/repo | Manualcallbacks, arraysink, rows9 nhưng receipt12, dedupSet che repeatedwrites |
+UI manual gửi emailSource.mode=pasted-existing, password.mode=per-account. PastedCapcutCredential gồm line:number, email:string, capcutPassword:string. Password là exact remainder sau first pipe; email trim, identity lowercase. Same credentials dedup trước mailLimit; conflicting same-email chặn toàn input kể cả dòng ngoài limit; không cap row200 (concurrency vẫn1..200).
 
-## V01 — Chỉ snapshot statuses hợp lệ mới chứng minh absence
+PastedExistingWorkSource finite, prepare readonly một lần, workerTarget=min(threadCount,selectedCount). Preflight lookup selected emails no writes; multiple matches/active owner/missing lookup capability chặn. Worker rechecks sau proxy/cancel, sync bind local row→register owner. Zero row tạo local tracking; one row reuse; never remote signup. Password supplied transient cho known row, không sửa stored password. Mailbox reservation/acquisition counters chỉ cho kind=new. Trial/do_action tiếp tục như existing-account path.
 
-- V01.1: getQuickProfileStatuses phải yêu cầu envelope/data/states là object hợp lệ khôngarray; missing/null/scalar/arraystates → typed ProviderError, không trả[].
-- V01.2: valid states:{} vẫn hợp lệ. Không silent flatMap bỏ malformedrow; snapshot có badrow phải reject trước khi launcher suy ownprofile absent.
-- V01.3: map key là profileidentity; field profile_id nếu có phải stringnonempty và khớp map key. Mismatch không được đổi targetid rồi giảabsent. Không épstatusunknownthànhstopped; statusnonempty string nhưng lạ vẫn “chưa confirmed stopped”.
-- V01.4: giữ port parsing và message-port fallback đang hỗ trợ, không thay launcherstart flow. Nếu optionalfield malformed ảnh hưởng identity/confirmation thì reject, khônginventdefaultstopped.
-- V01.5: test actual FakeHttpClient→MultiloginProvider→ApiV3Launcher, không fakeapi trả[] sẵn. Malformed→reject confirm-status, validempty/stopped→success, validrunning→existingwaitpolicy. Zero route release trên confirmationinvalid.
+## G01 — Paste boundary hoàn chỉnh (F04/F05)
 
-## V03 — Writer theo iteration token, sink không được optional-success
+- **G01.1:** Nonblank all-malformed text chỉ báo lỗi thực ở original lines, không EMPTY_INPUT giả. Blank/BOM-only mới EMPTY_INPUT line1.
+- **G01.2:** Text và structured normalizer cùng trim email, validate, preserve first spelling và exact password. PastedCapcutSourceSchema và AutomationRunConfig source dùng chung conflict validation. Không throw raw TypeError với IPC malformed fields.
+- **G01.3:** Service admission kiểm cả pasted-existing và per-account misuse, trước log reset/telemetry/source/provider/account mutation. Validate source-policy iff, unsupported transport/rollout/approvedMailboxes/stopAfter, budget0, line hợp lệ và input toàn batch.
+- **G01.4:** Invalid request không làm hỏng owner/summary của run đang active. Valid pasted parse không sửa legacy runtime modes. Lỗi chỉ line/code, không whole credential row.
 
-V03 thực thi sau V04 và trước V02. Thêm state nội bộ vào ThreadRuntime, không schema/IPC:
+## G02 — Auth state nhất quán (F01)
 
-~~~ts
-interface IterationProofState {
-  readonly ownerToken: object;
-  readonly acceptedProofWrites: Map<string, Promise<void>>;
-}
-~~~
+- **G02.1:** Origin và marker facts lấy cùng document; chỉ auth nếu document identity/navigation epoch vẫn current. Navigation external hoặc same-URL replacement trong read không được dùng facts cũ.
+- **G02.2:** Tìm visible workspace/auth/landing matches, không first-hidden wins. Auth-form phải thuộc auth UI, unrelated newsletter/settings email không tự phủ nhận workspace.
+- **G02.3:** Visible auth-form/landing conflict không bị URLshortcut hoặc workspace marker override. Absent khác unreadable; preserve original AbortSignal reason và typed deadline.
+- **G02.4:** Shared predicate dùng ở login/signup/ensureInApp; tests caller không cho nhiệm vụ bắt đầu khi auth invalid. Không thêm fallback/retry.
 
-- V03.1: ownerToken là chính object đã lưu trong iterationOwners khi createThreadRecord. Không dùng sessionSequence thay quyền sở hữu iteration. Capture immutable accountId/runId.
-- V03.2: một private persistAcceptedProofs(thread,proofs):Promise<void> dùng chung cho callback/fallback. Kiểm iterationOwners.get(accountId)===ownerToken trước ghi; staleowner reject, không silently resolve và không publish lỗi lên successor run.
-- V03.3: missing taskProgress.recordUnsettled ở runtime hoặc missing repo.recordUnsettledProofs ở production composition phải typed persistencefailure; không optionalchain thànhsaved.
-- V03.4: callback chỉ mở trong invocation hiện hành; sauseal oldcallback reject, kể cả iteration còn sống vì recycle. Writer fallback nội bộ được phép sau invocationseal nhưng trước iteration release, vì nó được gọi từ trusted catch của invocation đãawait.
-- V03.5: versionidentity=JSON.stringify([key,opId,at]); tạo và giữ writepromise trước dispatch bằng microtask. Cache cả success lẫn failure; repeatedversion không ghi lại/retry khi fallback. Map chỉ tồn tại một accountiteration, không backgroundqueue/framework.
-- V03.6: không gate localpersistence bằng AbortSignal/browserliveness/activeThreads/current session. Sau abort, knownproof vẫn được ghi nếu owner hợp lệ. Ownerrelease/notifyDone chỉ sau awaited writes.
-- V03.7: register exact identities được checkpointcommit thành công vào memo để fallback không reinsert settledproof. Không mark trước transaction success, không memoclaim acknowledgedversion khác.
-- V03.8: tests retired/replacedowner, sealedinvocation, missingsink, concurrentduplicate, rejectedpromise reused, browserclosedwhileowneractive; no false “saved”.
+## G03 — Trial read có deadline và owner (F02)
 
-## V02 — Fallback drain sau cancellation không mất proof
+- **G03.1:** Trial evaluate/presence/count paths bound bởi signal/deadline; abort sau entered read phải settle bằng chính reason, late reply không log/return eligible.
+- **G03.2:** Card được đọc là unique visible Procard trong unique active pricing wrapper. Hidden stale card ngoài/đầu DOM không thắng current card; missing/ambiguous owner = unknown, không chọn arbitrary.
+- **G03.3:** Giữ MIN_TRIAL_DAYS=7, canTrial/status rule và skipWithoutTrial hiện có. Price/CTA là thông tin đọc, không thêm business gate. Tuyệt đối không click Start free trial.
+- **G03.4:** Dump/diagnostic không làm Stop treo; read failure không được trả eligible. Tests có actual READ_TRIAL chạy trên DOM fixture, không chỉ evaluate trả object dựng sẵn.
 
-- V02.1: TaskEvidenceError từ awaited session chứa knownproofs phải qua V03writer trước generic aborted→stopped; bỏ browserliveness/!aborted gates nhưng **giữ iteration owner fence**.
-- V02.2: không dùng callback đãsealed đểdrain. Dùng internal writer được authorizedbởi threadowner; old-session arbitrary callback bị reject ở V03.
-- V02.3: producer streaming4proof + fallbacksame4 → tổng4physicalwrites, không8. Legacyrunner khôngstream + fallback4 sauabort →4writes trướcterminal/notifyDone.
-- V02.4: checkpoint đãsettle version rồi fallback lặp → không reinsert. Failedwrite version lặp → cùng failure, không retry.
-- V02.5: proof-persistence error đi V04 trước aborted classification; không bọc thành TaskEvidenceError rồi thửghi lần nữa. Original stopreason vẫn phân biệt user/system; không giả extra taskfailure hoặc mutationretry.
-- V02.6: cancel khi action5pending sau4acks không tínhproof5, late response không checkpoint/navigation/claim. Preserve hiện case4ack→Stop noaction5.
+## G04 — DOB đúng owner (F03)
 
-## V04 — Cause và ưu tiên persistence tách biệt
+- **G04.1:** aria-controls exact target hoặc quan hệ ownership được chứng minh; unique global panel không đủ. Panel đã mở từ trước/unrelated phải không nhận option click.
+- **G04.2:** Không owner/ambiguous = lỗi cụ thể trước chọn/Continue; Stop/timeout giữ identity.
+- **G04.3:** Giữ lazy random một lần khi DOB hiện, semantic option match, leap-date validation và readback intended date trước Continue.
+- **G04.4:** Production range1990–2004 chưa có lựa chọn thay thế được duyệt: WAITING-DOB-POLICY. Không hardcode range mới, không bỏ random; owner fix không phụ thuộc quyết định range.
 
-- V04.1: terminalPersistenceFailure giữ riêng account-terminal DB write; thêm proofPersistenceFailure riêng. Cảhai reset chỉ khi accepted newrun, không reset khi concurrentStartbịreject.
-- V04.2: helper acceptProofPersistenceFailure(error):AutomationTerminalError giữ firstprooferror; fixedpublicmessage “Không lưu được bằng chứng nhiệm vụ đã được xác nhận.”; reason TASK_CHECKPOINT_PERSISTENCE_FAILED/details.failure ACK_PROOF_PERSISTENCE_FAILED.
-- V04.3: createTaskProgressSink record/recordUnsettled catch(error) truyền originalError vào cause; runtime không biến originalDBcause thành textwrapper. Non-Error cause wrapmain-only fixedError. No raw cause text/public keypayload.
-- V04.4: finalization/Stop ưu tiên account-terminalfailure → prooffailure → ordinaryterminalpolicy hiện có. Giữ secondaryproofcause main-only khiaccountfailurewins; cleanupdetailsappend, không thay reasonroot.
-- V04.5: authorityprooffailure đặt trước observer/cleanup/abortclassification, không đợi stopProfile thành công mớinhậnfailure. Cleanup vẫnchạy; firstaccount/proofcauseskhông ghi đè.
-- V04.6: tests ACKDBfailure + user/systemabort + cleanupfail; ACKfail rồi accountupdatefail; logger/observerthrow. Countersoneoutcome/account, khôngfakesuccess/doublewrite/retry.
+## G05 — Proxy preflight cache theo attempt (F06)
 
-## V05 — Modal fail-closed khi read/owner/control mơ hồ
+- **G05.1:** Sau preflight AUTH/capacity fail, Start tiếp với cùng keys/region phải đọc token/inventory hiện tại.
+- **G05.2:** Idle invalidation không gọi provider release, không xóa DB lease và không discard active/acquiring/releasing/failed-cleanup manager.
+- **G05.3:** Trong cùng run, manager được reuse, rotation/cooldown/exclusivity giữ nguyên. Test settings token update và provider key inventory increase qua same service start hai lần.
+- **G05.4:** Abort pending capacity read phải được observe; future attempt không reuse kết quả manager cũ; giữ existing terminal state/summary normalization.
 
-- V05.1: initial count/visibility ordinaryerror phải reject, khôngconvert0/false→absent. Typedtimeout/abort giữexactreason. Finalread đãsửa phảigiữ.
-- V05.2: canonical owner parent/child mộtmodal, collect visibleowners trước action. Two visibleowners → explicitambiguity trướcclick; hidden+visible → visibleđúng.
-- V05.3: accessibleClose count/readerror/strictambiguity không cho phép CSSfallback.first bypass. Fallback chỉ dùng khi confirmedabsence và exactownedvariantđược chứngminh.
-- V05.4: require unambiguous visiblecontrol, no arbitraryfirst. SpanClose, outsideGotit vàTrynow behaviorsđãđạt giữnguyên.
-- V05.5: Browser4000/host6000 budget và maxattempt/pacing không đổi. TestactualDOM role + separateclickcounters, repeatedinvocationafterclosed0action/dump.
+## G06 — Log observer isolation (F07)
 
-## V06 — Stop state/phase quan sát được, reporter không đổi outcome
+- **G06.1:** Một subscriber throw không làm emit throw, không chặn subscriber sau hoặc threshold flush.
+- **G06.2:** Emit vẫn trả stamped entry; sink fail giữ queue, notice failure/recovery và retry cadence hiện có.
+- **G06.3:** Reporter không gọi recursive emit; reset ticket/exact-ID deletion và stream sequence không đổi.
 
-Additive internal contracts tại launcher/ProfileStopError.ts và BrowserLauncher.ts:
+## G07 — Proof ownership, drain, outcome priority (F08/F09)
 
-~~~ts
-export interface ProfileStopObservation {
-  phase: 'token' | 'stop-request' | 'confirm-status' | 'cdp-close';
-  remoteConfirmed: boolean;
-}
-export interface StopOptions {
-  onPhase?: (observation: ProfileStopObservation) => void;
-}
-// BrowserLauncher method:
-// stop(profileId: string, options?: StopOptions): Promise<void>;
-~~~
+- **G07.1:** Accepted-proof và checkpoint callbacks cùng invocation/session/iteration owner guards. Closed/replaced owner không DB write hoặc mark memo; checkpoint retained session cũng bị chặn.
+- **G07.2:** persistAcceptedProofs check owner trước memo lookup và trước dispatch. Memo-hit không chấp nhận stale owner; snapshot proof copy trước async.
+- **G07.3:** All owned writes, gồm checkpoint đã entered nhưng chưa memoized, settle trước propagate batch failure/retire owner. Account-terminal persistence > proof persistence > ordinary error/cleanup abort; giữ primary cause/evidence, không abandon sibling hoặc swallow rejected promise.
+- **G07.4:** Chỉ sau successful checkpoint, memo durable versions từ unsettled và rows có valid opId/provedAt. Settled proof không bị fallback cùng version dựng lại pending; proof mới hơn vẫn ghi. Không dùng task-key-only dedup.
+- **G07.5:** Actual independent persistence failure = failed/error dù signal cleanup-aborted. Peer chỉ bị cleanup ngắt = stopped. Cả runThreadWorkload/workerLoop nhất quán; tổng run vẫn ưu tiên proof/account persistence theo policy hiện tại.
+- **G07.6:** Real DB regression checkpoint→duplicate fallback→unsettled empty; terminal throw/false paths giữ original cause, no retry do_action. Không ép default flow phải media/product_mission.
 
-- V06.1: ApiV3 emit observation trước mỗi awaitedphase; remoteConfirmed chỉtrue sau validconfirmation củaV01. Optionscallback/LauncherLog đều guarded; reporterthrow không đổi originalerror hoặc turnconfirmed-success thànhfailure.
-- V06.2: session giữ latestphase và remoteConfirmedmonotonic; runtime outerdeadline lưu deadlinecause và phaseknownhoặcunknown, không đoán. Fallback browserruntime khôngcóobserver thìunknown.
-- V06.3: ProfileStopDiagnostic.phase cho phép unknown ở runtime wrapper, thêm optional remoteConfirmed; reporter không được serializecause. Phasecallback làread-only observation, không quyền stop/release.
-- V06.4: remoteconfirmed + CDPclosefailed → ghi remoteconfirmed/localattachmentfailed; giữ attachedhandle cho failedlocalcleanup, không deletebeforeawaitsuccess. Giữ conservativeowner/routesretention và no-autoretry hiện có; không tự release vì mới cóboolean.
-- V06.5: latecompletion/phase sau stopOutcomeLocked không đổi finalverdict/tựrelease. CoalescedStop vẫn1vendorcall; callerobserveoperationshared nhậnlatestphase mà khôngstartoperationmới.
-- V06.6: không đổi request10s/confirmation5s/runtime60s hoặc thêmretry. Token/CDPpending được outerdeadlinebound; usefakeclock tests để khôngwaitthật.
-- V06.7: tests loggerthrow request-error/confirm-error/success, observerthrow, tokenhang, CDPhang, cdpcloseerrorafterremoteconfirmed, lockedlatecompletion, unknownfallback.
+## G08 — Freeze stop diagnostics (F10)
 
-## V07 — So sánh thời gian bằng cùng biểu diễn canonical
+- **G08.1:** Khi stopOutcomeLocked, late success/rejection/phase callbacks không đổi cause/diagnostic/phase/remoteConfirmed hoặc counters.
+- **G08.2:** Promise late rejection vẫn được observed. Stop không tự retry, không release proxy của profile chưa confirmed stop.
+- **G08.3:** Unlocked ordinary stop failure vẫn ghi đúng diagnostic; remote-confirmed/local teardown failure giữ distinction đã có, không bị late error rewrite.
 
-- V07.1: parse observedAt/requiredAfter once, requirefinite vàfresh theoinstant, normalize toISOString trước mọi SQLtextcomparison. Store receipt timestamps canonical nếu accepted.
-- V07.2: strict proof.at < observedAt giữnguyên; equal khôngsettle. NoncanonicalvalidISOoffset khôngđượcxóa proofnewer vì lexicalordering.
-- V07.3: preserve existing selective settlement: same-run/coveredstatus4 only; omitted/newer/other-run retained; no accountwideDELETE quaylại; upsertnewer-only.
-- V07.4: actualrepo isolatedDB tests timezoneoffset, UTCcanonical, equal, invalidtime rollback, omitA/staleA/otherRun; no migration/DBreset.
+## G09 — Log history/read/reset ordering (F11/F12)
 
-## V08 — Producer/runtime/repository integration thật
+- **G09.1:** Dashboard mỗi history request có token+generation+reset epoch; old same-epoch reply không ghi đè current response.
+- **G09.2:** Stored history là authoritative read; chỉ merge genuinely live/unconfirmed pushes, không toàn display buffer. Same-ID merge giữ higher streamSequence qua nhiều lần read bằng metadata current IDs; không giữ stale rows để giữ metadata. Sort/cap sau merge.
+- **G09.3:** Clear khi Dashboard detached rồi attach/load SQL[] không phục hồi row cũ. Push after cutoff tồn tại qua snapshot/reset.
+- **G09.4:** Logs stale Clear success/failure settle own promise và drain surviving queued pushes, không xóa new history/error/loading hoặc restore old rows. Cutoff monotonic; nếu reply mang cutoff thực mới hơn, apply reset coherently + replacement read.
+- **G09.5:** Save/Start snapshot singleflight và completion bookkeeping không bị đổi. Không full settings reload hoặc logs.clear để “sửa” race.
 
-- V08.1: existing sixaccounttest phải ghi đúngscope engine-seam nếu cònmanualcallbacks. Newintegration chạy actual executeHttpTasks cho A/B và realAccountTaskRepository sink; no globalfetchrace giữaworkers.
-- V08.2: healthy firstwave:12canonicalrows, receipt totals/sessionalias/runid/timestampskhớp;120creditsfixture nếu12×10, không9rows/receipt12.
-- V08.3: A9acks→missinglist→hydrationpopupdeadline→normalcleanupfail; B4observedacks trướcabort; Ctrialwait. Pendingaction5 nếu đãdispatch phải được ghi riêng attempts5/acks4, không tínhproof5; no requests sauabort. Case abortduringpacing còn4attempts làregressionriêng.
-- V08.4: SQLite rows A9/B4/C0, exactkey/op_id/runownership,0receiptsfailed/stopped,3validreceiptsfirstwave. Countphysicalwrites vàversions, khôngSetcheduplicates/retries.
-- V08.5: observedruntime accepted6/completed3/failed1/stopped2, cleanupFailures3,exactretainedprofile/leaseIDs, exactly1stopattempt/profile,2peerstoppedupdates cósystemreason; subsequentStopkhôngretry/release.
-- V08.6: cleanupfailedassertion không treotests: namedabortcontrollers/allgatesfinally/boundedsettlement, closerepoafterpromisessettle. No newlivecalls.
-- V08.7: final Node/typecheck/lint/build/selectors/roleDOM/Electronharness cùngsource; oneABIowner vàrestoreElectron. Reviewbaseline339/95 không chứngminhnewfixes.
+## G10 — Accounts credential và mutation feedback (F13/F14)
 
-## Không nằm trong đợt fix này
+- **G10.1:** Add/Edit secret replacement giữ exact bytes; trim chỉ kiểm emptiness/sentinel. email normalization không áp lên password. Keep placeholder/empty semantics hiện tại, explicit clear qua operation hiện có.
+- **G10.2:** create/update/remove IPC rejection hoặc failed envelope → false/visible error, input/selection còn, không unhandled rejection.
+- **G10.3:** Delete singleflight pending và chỉ close/clear selection sau committed success. Reply session cũ không đóng dialog mới; no duplicate destructive dispatch.
+- **G10.4:** Mutation committed nhưng refresh failure không giả mutation failed và không tự re-dispatch; visible warning nêu chưa tải lại.
+- **G10.5:** Dashboard removeAccounts/stopThread cùng rejection/session boundary; failed Stop không hiện “đã dừng”. Existing Start/Stop global flow giữ nguyên.
 
-Chưa biết upstream vì sao task_list thiếuarray và chính xácstoprequest/statuscause của incidentthật; diagnosticfixed không đồng nghĩa vendorissuefixed. Không runlive/purchaseđểlấpchỗtrốngnếuchưađược quyền. Backlogauth/DOB/UI khác giữtrongreports, không tựtuyênbốclosed.
+## G11 — Settings test connection theo draft (F15)
 
-## Definition of done
+- **G11.1:** Mỗi service có request token và draft revision; result chỉ publish nếu invocation, draft và effect generation current.
+- **G11.2:** Edit/clear/reset draft invalidate result của service; late test không đánh dấu credential mới healthy/stale. Test serviceB không làm sai A.
+- **G11.3:** Pending indicator/button theo service; test draft chưa lưu vẫn hoạt động. Không save hoặc thay đổi secret vì bấm Test.
+- **G11.4:** Thực thi mounted SettingsPage A/B out-of-order, edit-only và unmount/reopen; pageerror/unhandled rejection=0. Save lifecycle patch đã đúng phải giữ.
 
-V01–V08 đều có evidence RED/GREEN, no regression cácpatchđúng; owner/settlement/stopstate tests đúngsameinstance+actualrepository. Bàn giao từngtaskstatus/causeunknown vàsourcehash. Lượt viếtplan này chỉsửatài liệu.
+## G12 — Bằng chứng triển khai và release gates (F16)
 
-## Snapshot kiểm tra trước triển khai
+- **G12.1:** Actual DashboardPage/controller/DEMO bridge: paste valid→Start exact typed payload; invalid/conflict→startCalls0; custom-empty không chặn manual; duplicate count và line preserved; edit while save pending không đổi snapshot; double Start=1.
+- **G12.2:** Real factory/runtime/AccountService/SQLite cùng instance≥2runs, distinct IDs, zero/one/multiple identity, active ownership, update false/throw, proxy capacity, cancellation before acceptance. Known secret byte-exact unchanged; new row exact, no mailbox password.
+- **G12.3:** Runtime typed RecoveryLoginError failing one account while peer continues; engine→ensureInApp policy tests assert forceSignup=false/allowSignupFallback=false/getOtp absent; signup/OTP/purchase spies0. Fake returned result không thay thế tests này.
+- **G12.4:** Tail fixture uses current runId/sessionAlias/timestamps; assert exact accepted/completed/failed/stopped, durable proofs13, retained profile/lease IDs, cleanupFailures và do_action attempt counts. Finally abort/settle before DB close; no live/global fetch cross-account leakage.
+- **G12.5:** Full typecheck/lint/2377baseline tests/build/selectors/UI/Electron gates; newtests tăng count và RED đúng symptom. Không dùng số2377 làm target cứng để bỏ test.
+- **G12.6:** Handoff ghi source hash, command/exit, scenario, native ABI, limits; không claim live fixed khi chỉ offline.
 
-453source/script/test hashes không đổi trong lượt lậpplan; chỉ3tài liệu bàn giao được cập nhật. Các hash trọng yếu dưới đây khóa currentdirty, không thay bằng cleanHEAD. Nếu khác thì đọc delta/tái hiện trước áp patch.
+## Trình tự / Definition of Done
 
-| File | SHA-256 |
-|---|---|
-| `src/main/providers/MultiloginProvider.ts` | `4de2253bb6d0ffc5a802e63a444288e3803becf4ec114ecd622b3bf9dc25ac75` |
-| `src/main/services/AutomationRunService.ts` | `3208b8754991a124fb03febfb31aa3f0ec22b1dc47816397ce05acb55159ef50` |
-| `src/main/runtime/providerStack.ts` | `93fb5a78b61baa7ed9d8a1d2e57e79a5567b5a8e0c3a19315c086ad60f3344a6` |
-| `src/main/services/capcut/httpTasks.ts` | `1a2ba597040da1525a19fa1e52bd7a2a59d93dec01d99bcbba7af93135ff060f` |
-| `src/main/services/capcut/overlays.ts` | `f37e2df0ce39523ce41929a36fb0d7fbcdc2297ba1a9a39442d28e0d690df5b5` |
-| `src/main/services/capcut/launcher/ApiV3Launcher.ts` | `9dedc9cc913d585e5cd862e8bbb71eba9d8c10aacc6118b78f12fff06ada5e54` |
-| `src/main/services/capcut/launcher/ProfileStopError.ts` | `e74d8c8dd53dc4c767c080b8a066ce906d7188a114347e2775364be5f63eafdd` |
-| `src/main/repositories/AccountTaskRepository.ts` | `ca21b2b04cb9b2bea8af8b103a2087ae4fabf54489a133fdc2411721b8067403` |
+G01,G02,G03,G04,G05,G06,G09,G10,G11 là các sửa độc lập theo domain; G07/G08 cùng runtime owner, tránh edit song song một file. G12 gom cuối sau focused gates. Tất cả F01–F16 có task/test mapping.
 
-Kiểm tra tài liệu:5local links tồn tại,15codeblocks kiểm cú pháp,48acceptancecriteria map đủ8tasks; diffcheck docs PASS. Lượt này không sửa code, không chạy lại live/DB/native rebuild và không tuyên bố cácfix đã hoàn tất.
+Mỗi task đạt khi assertion hành vi fail trước fix và pass sau fix, compatible regressions giữ xanh, code diff tối thiểu, reviewer kiểm source thay vì chỉ đọc agent summary. Release không chỉ dựa fullsuite green; cần mounted Start và tail tests đúng boundary. Không tự chạy/live account để “chứng minh” khi chưa có quyền.

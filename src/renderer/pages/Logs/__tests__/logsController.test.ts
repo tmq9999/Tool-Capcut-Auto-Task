@@ -74,6 +74,18 @@ class FakeBridge implements ILogsBridge {
 
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+type ClearReply = Awaited<ReturnType<ILogsBridge['logs']['clear']>>;
+type ListReply = Awaited<ReturnType<ILogsBridge['logs']['list']>>;
+const listReply = (...items: CanonicalRuntimeLog[]): ListReply => ({
+  success: true, data: { items, total: items.length }
+});
+
 let bridge: FakeBridge;
 
 beforeEach(() => {
@@ -442,18 +454,6 @@ describe('LogsController', () => {
     finishClear({ success: true, data: { success: true, clearedThrough: 5 } });
     await clearing;
     expect(c.getState().logs).toEqual([]);
-  });
-
-  function deferred<T>() {
-    let resolve!: (value: T) => void;
-    let reject!: (reason: unknown) => void;
-    const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
-    return { promise, resolve, reject };
-  }
-  type ClearReply = Awaited<ReturnType<ILogsBridge['logs']['clear']>>;
-  type ListReply = Awaited<ReturnType<ILogsBridge['logs']['list']>>;
-  const listReply = (...items: CanonicalRuntimeLog[]): ListReply => ({
-    success: true, data: { items, total: items.length }
   });
 
   it('S02 only normalizes incoming logs and retains existing views', async () => {
@@ -916,5 +916,47 @@ describe('T07-B: onReset sync in LogsController', () => {
     expect(controller.getState().logs.map((row) => row.id)).toContain('fresh-db');
     expect(controller.getState().error).not.toBe('OLD_CLEAR');
     controller.dispose();
+  });
+
+  it('F12 (G09): stale Clear success does not wipe newer error or loading state', async () => {
+    const clearReply = deferred<ClearReply>();
+    const historyReply = deferred<ListReply>();
+    bridge.logs.clear = () => clearReply.promise;
+    const c = new LogsController(bridge);
+    c.attach();
+    await c.load();
+    const clearing = c.clear();
+    bridge.logs.list = () => historyReply.promise;
+    bridge.pushReset({ clearedThrough: 20 });
+    historyReply.resolve({
+      success: false,
+      error: { code: 'ERR_PERSISTENCE_FAILED', message: 'NEW-HISTORY-FAIL' }
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const currentError = c.getState().error;
+    expect(currentError).not.toBeNull();
+    clearReply.resolve({ success: true, data: { success: true, clearedThrough: 10 } });
+    await clearing;
+    expect(c.getState().error).toBe(currentError);
+    c.dispose();
+  });
+
+  it('F12 (G09): stale Clear success drains surviving pushes whose sequence > current cutoff', async () => {
+    const clearReply = deferred<ClearReply>();
+    bridge.logs.clear = () => clearReply.promise;
+    const c = new LogsController(bridge);
+    c.attach();
+    await c.load();
+    const clearing = c.clear();
+    bridge.pushReset({ clearedThrough: 20 });
+    // Live push arrives during clear collection with streamSequence 21 (> 20)
+    bridge.push(log('push-21', { streamSequence: 21 }));
+    // Old clear resolves with clearedThrough 10 (which is <= 20)
+    clearReply.resolve({ success: true, data: { success: true, clearedThrough: 10 } });
+    await clearing;
+    // push-21 must be visible
+    expect(c.getState().logs.map((r) => r.id)).toContain('push-21');
+    c.dispose();
   });
 });

@@ -9,16 +9,25 @@ import { ProxyProviderPanel } from './ProxyProviderPanel';
 import { ExportSettingsPanel } from './ExportSettingsPanel';
 import {
   SettingsController,
+  SettingsTestCoordinator,
   type ISettingsBridge,
   type SettingsState,
   type KnownServiceName,
+  type SimpleServiceName,
   type SimpleDraft,
+  type MultiloginDraft,
+  type TestConnectionOutcome,
 } from './settingsController';
 import { DEFAULT_APP_SETTINGS } from '@shared/settings/default-settings';
 import { applyTheme, writeBootPreferences } from '@renderer/app/appPreferences';
 
-export const SettingsPage: React.FC = () => {
+export interface SettingsPageProps {
+  bridge?: ISettingsBridge;
+}
+
+export const SettingsPage: React.FC<SettingsPageProps> = ({ bridge: bridgeProp }) => {
   const bridge = useMemo<ISettingsBridge>(() => {
+    if (bridgeProp) return bridgeProp;
     if (window.electronAPI?.settings) {
       return {
         settings: window.electronAPI.settings,
@@ -43,26 +52,36 @@ export const SettingsPage: React.FC = () => {
         }),
       },
     };
-  }, []);
+  }, [bridgeProp]);
 
   const controller = useMemo(() => new SettingsController(bridge), [bridge]);
+  const coordinator = useMemo(() => new SettingsTestCoordinator(bridge), [bridge]);
   const [state, setState] = useState<SettingsState>(() => controller.getState());
-  const [testResult, setTestResult] = useState<{ service: string; code: string; message: string } | null>(null);
+  const [testResult, setTestResult] = useState<TestConnectionOutcome | null>(() => coordinator.getResult());
+  const [testingServices, setTestingServices] = useState<Partial<Record<KnownServiceName, boolean>>>(() => coordinator.getTesting());
   const effectEpoch = useRef(0);
 
   useEffect(() => {
     effectEpoch.current += 1;
-    const unsubscribe = controller.subscribe((newState) => {
+    coordinator.setEpoch(effectEpoch.current);
+
+    const unsubscribeController = controller.subscribe((newState) => {
       setState({ ...newState });
+    });
+    const unsubscribeCoordinator = coordinator.subscribe(() => {
+      setTestResult(coordinator.getResult());
+      setTestingServices(coordinator.getTesting());
     });
     controller.load();
 
     return () => {
       effectEpoch.current += 1;
-      unsubscribe();
+      coordinator.setEpoch(effectEpoch.current);
+      unsubscribeController();
+      unsubscribeCoordinator();
       controller.dispose();
     };
-  }, [controller]);
+  }, [controller, coordinator]);
 
   /**
    * Khôi phục mặc định CHỈ những mục trang này hiện ra.
@@ -73,6 +92,7 @@ export const SettingsPage: React.FC = () => {
    * trang khác (audit 04/09/2026).
    */
   const handleResetDefaults = () => {
+    coordinator.invalidateAll();
     const defaults = JSON.parse(JSON.stringify(DEFAULT_APP_SETTINGS)) as typeof DEFAULT_APP_SETTINGS;
     controller.updateSettings((current) => ({
       ...current,
@@ -94,128 +114,21 @@ export const SettingsPage: React.FC = () => {
     }
   };
 
-  const handleTestConnection = async (serviceName: KnownServiceName) => {
-    if (!bridge.credentials?.test) {
-      setTestResult({
-        service: serviceName,
-        code: 'ERR_BRIDGE_UNAVAILABLE',
-        message: 'Dịch vụ kiểm tra không khả dụng.',
-      });
-      return;
-    }
-
-    const status = state.credentialStatuses[serviceName];
-    const simpleDraft =
-      serviceName !== 'multilogin'
-        ? (state.drafts as unknown as Record<string, SimpleDraft>)[serviceName]
-        : undefined;
-    const multiloginDraft = state.drafts.multilogin;
-
-    let draftSecret: string | undefined;
-    let mlDraft:
-      | { mode: 'token' | 'credentials'; automationToken?: string; email?: string; password?: string }
-      | undefined;
-
-    if (serviceName === 'multilogin') {
-      if (multiloginDraft.action === 'replace') {
-        if (multiloginDraft.auth.mode === 'token') {
-          if (!multiloginDraft.auth.automationToken?.trim()) {
-            setTestResult({
-              service: serviceName,
-              code: 'CONFIG_ERROR',
-              message: 'Ô automation token đang trống. Vui lòng nhập token trước khi kiểm tra.',
-            });
-            return;
-          }
-          mlDraft = { mode: 'token', automationToken: multiloginDraft.auth.automationToken.trim() };
-        } else {
-          if (!multiloginDraft.auth.email?.trim() || !multiloginDraft.auth.password?.trim()) {
-            setTestResult({
-              service: serviceName,
-              code: 'CONFIG_ERROR',
-              message: 'Vui lòng nhập đầy đủ Email và Mật khẩu Multilogin trước khi kiểm tra.',
-            });
-            return;
-          }
-          mlDraft = {
-            mode: 'credentials',
-            email: multiloginDraft.auth.email.trim(),
-            password: multiloginDraft.auth.password.trim(),
-          };
-        }
-      } else if (multiloginDraft.action === 'clear') {
-        setTestResult({
-          service: serviceName,
-          code: 'CONFIG_ERROR',
-          message: 'Cấu hình Multilogin đã bị xóa (chưa lưu). Vui lòng nhập thông tin mới.',
-        });
-        return;
-      } else if (!status?.isConfigured) {
-        setTestResult({
-          service: serviceName,
-          code: 'CONFIG_ERROR',
-          message: 'Chưa thiết lập thông tin Multilogin. Vui lòng nhập token hoặc email/mật khẩu.',
-        });
-        return;
-      }
-    } else {
-      if (simpleDraft?.action === 'replace') {
-        draftSecret = simpleDraft.value.trim();
-        if (!draftSecret) {
-          setTestResult({
-            service: serviceName,
-            code: 'CONFIG_ERROR',
-            message: 'Ô nhập API key đang trống. Vui lòng nhập key trước khi kiểm tra.',
-          });
-          return;
-        }
-      } else if (simpleDraft?.action === 'clear') {
-        setTestResult({
-          service: serviceName,
-          code: 'CONFIG_ERROR',
-          message: 'API key đã bị xóa (chưa lưu). Vui lòng nhập key mới trước khi kiểm tra.',
-        });
-        return;
-      } else if (!status?.isConfigured) {
-        setTestResult({
-          service: serviceName,
-          code: 'CONFIG_ERROR',
-          message: 'Chưa thiết lập API key cho dịch vụ này. Vui lòng nhập key vào ô bên cạnh.',
-        });
-        return;
-      }
-    }
-
-    try {
-      const payload = {
-        serviceName,
-        draftSecret,
-        multiloginDraft: mlDraft,
-      };
-      const res = await bridge.credentials.test(payload);
-      if (res.success) {
-        setTestResult({
-          service: serviceName,
-          code: res.data.code,
-          message: res.data.message,
-        });
-      } else {
-        setTestResult({
-          service: serviceName,
-          code: res.error.code,
-          message: res.error.message,
-        });
-      }
-    } catch {
-      setTestResult({
-        service: serviceName,
-        code: 'ERR_PERSISTENCE_FAILED',
-        message: 'Không thể kiểm tra kết nối dịch vụ.',
-      });
-    }
+  const handleSetSimpleDraft = (service: SimpleServiceName, draft: SimpleDraft) => {
+    coordinator.invalidate(service);
+    controller.setSimpleDraft(service, draft);
   };
 
-  const isBridgeAvailable = !!window.electronAPI?.settings;
+  const handleSetMultiloginDraft = (draft: MultiloginDraft) => {
+    coordinator.invalidate('multilogin');
+    controller.setMultiloginDraft(draft);
+  };
+
+  const handleTestConnection = (serviceName: KnownServiceName) => {
+    void coordinator.testConnection(serviceName, controller.getState(), effectEpoch.current);
+  };
+
+  const isBridgeAvailable = !!(bridgeProp || window.electronAPI?.settings);
 
   const headerActions = (
     <div className="flex items-center gap-2">
@@ -307,22 +220,17 @@ export const SettingsPage: React.FC = () => {
                 }
                 credentialStatuses={state.credentialStatuses}
                 drafts={state.drafts}
-                onSetSimpleDraft={(service, draft) =>
-                  controller.setSimpleDraft(service, draft)
-                }
-                onSetMultiloginDraft={(draft) =>
-                  controller.setMultiloginDraft(draft)
-                }
+                onSetSimpleDraft={handleSetSimpleDraft}
+                onSetMultiloginDraft={handleSetMultiloginDraft}
                 onTestConnection={handleTestConnection}
                 testResult={testResult}
+                isTesting={testingServices}
               />
 
               <EmailProviderPanel
                 credentialStatuses={state.credentialStatuses}
                 drafts={state.drafts}
-                onSetSimpleDraft={(service, draft) =>
-                  controller.setSimpleDraft(service, draft)
-                }
+                onSetSimpleDraft={handleSetSimpleDraft}
                 onTestConnection={handleTestConnection}
                 testResult={testResult}
                 customEmail={state.settings.customEmail}
@@ -332,16 +240,16 @@ export const SettingsPage: React.FC = () => {
                     customEmail: { ...prev.customEmail, ...patch },
                   }))
                 }
+                isTesting={testingServices}
               />
 
               <ProxyProviderPanel
                 credentialStatuses={state.credentialStatuses}
                 drafts={state.drafts}
-                onSetSimpleDraft={(service, draft) =>
-                  controller.setSimpleDraft(service, draft)
-                }
+                onSetSimpleDraft={handleSetSimpleDraft}
                 onTestConnection={handleTestConnection}
                 testResult={testResult}
+                isTesting={testingServices}
               />
             </div>
           </div>

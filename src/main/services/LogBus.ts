@@ -124,7 +124,11 @@ export class LogBus implements StartLogResetPort {
 
     this.queue.push(entry);
     for (const listener of this.listeners) {
-      listener(entry);
+      try {
+        listener(entry);
+      } catch {
+        // Observer failure must not disrupt emission or other listeners
+      }
     }
 
     if (this.queue.length >= this.maxBatchSize && this.now() >= this.retryNotBefore) {

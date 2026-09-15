@@ -413,6 +413,19 @@ describe('LogBus resilience and shutdown', () => {
 
       bus.dispose();
     });
+
+    it('continues delivery and flush when one subscriber throws', () => {
+      const stored: CanonicalRuntimeLog[] = [];
+      const bus = createBus({ insertBatch: (rows) => stored.push(...rows) }, 1);
+      let delivered = 0;
+      bus.subscribe(() => { throw new Error('DEMO listener failure'); });
+      bus.subscribe(() => { delivered += 1; });
+      expect(() => bus.emit({
+        email: 'demo@example.test', step: 'Run', status: 'INFO', message: 'entry'
+      })).not.toThrow();
+      expect(delivered).toBe(1);
+      expect(stored).toHaveLength(1);
+    });
   });
 });
 

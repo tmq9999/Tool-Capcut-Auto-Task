@@ -3343,6 +3343,81 @@ describe('session-scoped browser ownership', () => {
     });
   });
 
+  it('G08: freezes stop diagnostic and stopCause after stopOutcomeLocked on late stop rejection', async () => {
+    let rejectLateStop!: (err: Error) => void;
+    const stopDeferred = new Promise<void>((_, reject) => {
+      rejectLateStop = reject;
+    });
+
+    const fakeLauncher: BrowserLauncher = {
+      name: 'api-v3',
+      launch: vi.fn(async (opts) => {
+        opts.onProfileStarted?.('g08-profile');
+        return {
+          page: {} as unknown as LaunchedProfile['page'],
+          context: {} as unknown as LaunchedProfile['context'],
+          port: 9222,
+          profileId: 'g08-profile'
+        };
+      }),
+      stop: vi.fn(async (_profileId, options?: { onPhase?: (obs: { phase: string; remoteConfirmed: boolean }) => void }) => {
+        options?.onPhase?.({ phase: 'confirm-status', remoteConfirmed: true });
+        await stopDeferred;
+      })
+    };
+
+    const service = new AutomationRunService(
+      {
+        workSources: createStubFactory(['user@example.com|pass']),
+        emailOtp: { readOtp: async () => '123456' },
+        proxies: proxySource,
+        browser,
+        accounts,
+        logBus: new LogBus(sink),
+        launcher: () => fakeLauncher
+      },
+      {
+        sleep: async () => {},
+        nextId: () => 'run-g08',
+        profileStopTimeoutMs: 30
+      }
+    );
+
+    await service.start(baseConfig({ threadCount: 1, browser: 'multilogin', testDurationMs: 600_000 }));
+    await service.waitUntilRunning();
+
+    const activeThreads = (service as unknown as { activeThreads: Map<string, { session?: { stopOutcomeLocked?: boolean; stopDiagnostic?: unknown; stopCause?: unknown } }> }).activeThreads;
+    const thread = Array.from(activeThreads.values())[0];
+    const observedSession = thread?.session;
+
+    await service.stop();
+    const summary = await service.waitForCompletion();
+
+    expect(summary.state).toBe('failed');
+    expect(summary.terminalReason?.code).toBe('RESOURCE_CLEANUP_FAILED');
+    expect(observedSession?.stopOutcomeLocked).toBe(true);
+
+    const originalDiagnostic = observedSession?.stopDiagnostic
+      ? { ...observedSession.stopDiagnostic }
+      : undefined;
+    const originalCause = observedSession?.stopCause;
+
+    // Now late rejection occurs in the underlying stopOp
+    rejectLateStop(
+      new ProfileStopError(
+        { phase: 'cdp-close', kind: 'provider-error', providerCode: 'LATE_CRASH' },
+        undefined,
+        'Late crash'
+      )
+    );
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Diagnostics and cause must NOT be overwritten after lock
+    expect(observedSession?.stopDiagnostic).toEqual(originalDiagnostic);
+    expect(observedSession?.stopCause).toBe(originalCause);
+  });
+
+
   it('P02: onAcceptedProof streams proof to taskProgress.recordUnsettled', async () => {
     let capturedProof: unknown;
     const taskProgressSink = {
@@ -5842,6 +5917,116 @@ describe('session-scoped browser ownership', () => {
         code: 'PROVIDER_CONFIG_ERROR', accepted: 0
       });
       expect(createSource).not.toHaveBeenCalled();
+    });
+
+    it('refreshes idle proxy preflight cache across consecutive starts', async () => {
+      let failSlots = true;
+      let factoryCalls = 0;
+      let token = 'TOKEN-OLD';
+      const proxySourceWithCache: IProxyLeaseSource = {
+        acquire: async () => ({ leaseId: '1' } as never),
+        release: async () => {},
+        releaseAll: async () => {},
+        resetIdlePreflightCache: vi.fn(),
+        availableSlots: vi.fn(async () => {
+          factoryCalls += 1;
+          if (failSlots) {
+            throw new ProviderError('AUTH_ERROR', 'Invalid token: ' + token, 'kiotproxy');
+          }
+          return 2;
+        }),
+        configure: vi.fn()
+      };
+
+      const service = new AutomationRunService({
+        workSources: {
+          create: () => ({
+            kind: 'finite',
+            purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
+            prepare: async (c) => ({ workerTarget: c }),
+            next: async () => null,
+            commit: () => {},
+            release: () => {}
+          })
+        },
+        emailOtp: { readOtp: async () => null },
+        proxies: proxySourceWithCache,
+        browser,
+        accounts,
+        logBus
+      }, { nextId: () => 'run-preflight-cache' });
+
+      const runConfig = baseConfig({
+        threadCount: 2,
+        proxy: { mode: 'proxykey', keys: [] },
+        emailSource: { mode: 'manual', entries: ['a@example.com|pass'] }
+      });
+
+      // Run 1 fails during preflight
+      await expect(service.start(runConfig)).rejects.toThrow(ProviderError);
+      expect(service.getProgress().state).toBe('blocked');
+      expect(service.getProgress().terminalReason).toMatchObject({ code: 'PROVIDER_AUTH_REQUIRED' });
+      expect(proxySourceWithCache.resetIdlePreflightCache).toHaveBeenCalledTimes(1);
+
+      // User updates token in settings
+      failSlots = false;
+      token = 'TOKEN-NEW';
+
+      // Run 2 succeeds past preflight
+      await service.start(runConfig);
+      expect(proxySourceWithCache.resetIdlePreflightCache).toHaveBeenCalledTimes(2);
+      const summary2 = await service.waitForCompletion();
+      expect(summary2.state).toBe('completed');
+      expect(factoryCalls).toBe(2);
+    });
+
+    it('stops cleanly when runSignal aborts during proxy preflight availableSlots', async () => {
+      let resolveSlots!: (value: number) => void;
+      const proxySourceHanging: IProxyLeaseSource = {
+        acquire: async () => ({ leaseId: '1' } as never),
+        release: async () => {},
+        releaseAll: async () => {},
+        resetIdlePreflightCache: vi.fn(),
+        availableSlots: vi.fn(() => new Promise<number>((res) => { resolveSlots = res; })),
+        configure: vi.fn()
+      };
+
+      const service = new AutomationRunService({
+        workSources: {
+          create: () => ({
+            kind: 'finite',
+            purchaseStats: () => ({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 }),
+            prepare: async (c) => ({ workerTarget: c }),
+            next: async () => null,
+            commit: () => {},
+            release: () => {}
+          })
+        },
+        emailOtp: { readOtp: async () => null },
+        proxies: proxySourceHanging,
+        browser,
+        accounts,
+        logBus
+      }, { nextId: () => 'run-proxy-abort' });
+
+      const runConfig = baseConfig({
+        threadCount: 1,
+        proxy: { mode: 'proxykey', keys: [] },
+        emailSource: { mode: 'manual', entries: ['a@example.com|pass'] }
+      });
+
+      const startPromise = service.start(runConfig);
+      // Wait a tick for start to enter preflight availableSlots
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Request stop while availableSlots is hanging
+      await service.stop();
+      await startPromise;
+
+      expect(service.isRunning()).toBe(false);
+      const summary = await service.waitForCompletion();
+      expect(summary.state).toBe('stopped');
+      resolveSlots?.(1);
     });
   });
 });

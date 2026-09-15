@@ -268,5 +268,31 @@ describe('AccountService.getAutomationCredential', () => {
       query.mockRestore();
     }
   });
+
+  describe('findByEmail', () => {
+    it('finds exact email identity without returning secrets', () => {
+      const service = createService();
+      const row = service.create({
+        email: 'User@Example.test',
+        emailProvider: 'manual',
+        passwordCapcut: 'STORED-DEMO',
+        credit: 0,
+        status: 'active'
+      });
+      expect(service.findByEmail(' user@example.test ')).toEqual([
+        { id: row.id, email: 'User@Example.test' }
+      ]);
+      expect(service.findByEmail('example.test')).toEqual([]);
+    });
+
+    it('returns all matches when duplicate emails exist in SQLite', () => {
+      const service = createService();
+      const r1 = service.create({ email: 'dup@example.com', emailProvider: 'manual', credit: 0, status: 'active' });
+      const r2 = service.create({ email: 'DUP@EXAMPLE.COM', emailProvider: 'manual', credit: 0, status: 'active' });
+      const found = service.findByEmail('dup@example.com');
+      expect(found).toHaveLength(2);
+      expect(found.map((f) => f.id)).toEqual([r1.id, r2.id]);
+    });
+  });
 });
 

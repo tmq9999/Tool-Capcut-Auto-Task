@@ -48,7 +48,12 @@ vi.mock('../capcut/diag', () => ({
 
 const { CapcutEngineService } = await import('../CapcutEngineService');
 
-type AuthOptions = { forceSignup?: boolean; log: (msg: string) => void };
+type AuthOptions = {
+  forceSignup?: boolean;
+  allowSignupFallback?: boolean;
+  getOtp?: unknown;
+  log: (msg: string) => void;
+};
 
 function runInput(overrides: Record<string, unknown> = {}) {
   const signal = (overrides.signal as AbortSignal | undefined) ?? new AbortController().signal;
@@ -225,6 +230,18 @@ describe('CapcutEngineService.runAccount', () => {
     await engine.runAccount(runInput({ isNewAccount: false }));
 
     expect(lastAuthOptions().forceSignup).toBe(false);
+  });
+
+  it('áp dụng policy existing-only: forceSignup=false, allowSignupFallback=false, getOtp=undefined', async () => {
+    const engine = new CapcutEngineService({ userDataDir: 'C:/tmp/userData' });
+
+    await engine.runAccount(runInput({ isNewAccount: false, authAttempt: 'existing-only' }));
+
+    const options = lastAuthOptions();
+    expect(options).toBeDefined();
+    expect(options.forceSignup).toBe(false);
+    expect(options.allowSignupFallback).toBe(false);
+    expect(options.getOtp).toBeUndefined();
   });
 
   it('vẫn báo account đến từ DB để nhánh fallback đăng nhập không đổi', async () => {

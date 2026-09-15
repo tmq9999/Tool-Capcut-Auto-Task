@@ -1,6 +1,6 @@
-import React, { useState, useMemo, useEffect, useCallback, useSyncExternalStore } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef, useSyncExternalStore } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Download, Trash2, Edit, Plus, AlertCircle } from 'lucide-react';
+import { Download, Trash2, Edit, Plus, AlertCircle, AlertTriangle } from 'lucide-react';
 import { RowSelectionState } from '@tanstack/react-table';
 import { AppHeader } from '@renderer/layouts/AppHeader';
 import { Button } from '@renderer/components/ui/Button';
@@ -104,6 +104,8 @@ export const AccountsPage: React.FC = () => {
   const [isAddDrawerOpen, setIsAddDrawerOpen] = useState(false);
   const [isEditDrawerOpen, setIsEditDrawerOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const deleteLatchRef = useRef(false);
   const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   /** Account đang xem tiến độ 12 nhiệm vụ; null = hộp thoại đóng. */
@@ -193,10 +195,25 @@ export const AccountsPage: React.FC = () => {
     setIsDeleteDialogOpen(true);
   };
 
-  const handleConfirmDelete = () => {
-    void controller.remove(checkedAccountIds);
-    setRowSelection({});
+  const handleCloseDeleteDialog = () => {
+    if (isDeleting) return;
     setIsDeleteDialogOpen(false);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (deleteLatchRef.current || isDeleting) return;
+    deleteLatchRef.current = true;
+    setIsDeleting(true);
+    try {
+      const ok = await controller.remove(checkedAccountIds);
+      if (ok) {
+        setRowSelection({});
+        setIsDeleteDialogOpen(false);
+      }
+    } finally {
+      deleteLatchRef.current = false;
+      setIsDeleting(false);
+    }
   };
 
   const handleLoadTasks = useCallback(
@@ -274,6 +291,12 @@ export const AccountsPage: React.FC = () => {
             <span className="font-body-sm text-body-sm text-error">{controllerState.error}</span>
           </div>
         )}
+        {controllerState.warning && (
+          <div className="flex items-start gap-2 rounded border border-warning/30 bg-warning/10 px-3 py-2">
+            <AlertTriangle className="w-4 h-4 text-warning mt-0.5 shrink-0" />
+            <span className="font-body-sm text-body-sm text-warning">{controllerState.warning}</span>
+          </div>
+        )}
 
         {/* KPI Summary Header */}
         <AccountsSummaryBar accounts={accounts} />
@@ -331,9 +354,10 @@ export const AccountsPage: React.FC = () => {
 
       <DeleteAccountDialog
         isOpen={isDeleteDialogOpen}
-        onClose={() => setIsDeleteDialogOpen(false)}
+        onClose={handleCloseDeleteDialog}
         selectedCount={checkedCount}
         onConfirmDelete={handleConfirmDelete}
+        isDeleting={isDeleting}
       />
 
       <ExportDialog

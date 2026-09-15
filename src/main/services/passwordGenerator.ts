@@ -16,6 +16,10 @@ function pick(alphabet: string): string {
  * shuffles so the guaranteed characters are not always at the front.
  */
 export function generateCapcutPassword(config: PasswordConfig): string {
+  if (config.mode === 'per-account') {
+    throw new Error('PASSWORD_GENERATION_NOT_ALLOWED: Nguồn per-account không được phép sinh mật khẩu ngẫu nhiên.');
+  }
+
   if (config.mode === 'custom') {
     return config.value;
   }

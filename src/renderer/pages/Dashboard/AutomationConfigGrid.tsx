@@ -20,6 +20,10 @@ import { NumberStepper } from '@renderer/components/ui/NumberStepper';
 import { isBrowserImplemented } from '../../../shared/schemas/automation.schema';
 import { clampConfigNumber } from './automationConfig';
 import { Checkbox } from '@renderer/components/ui/Checkbox';
+import {
+  parsePastedCapcutText,
+  formatPastedCapcutIssues
+} from '../../../shared/schemas/pasted-capcut.schema';
 import type { EmailApiProvider, EmailProviderConfigDTO } from '@shared/schemas/provider.schema';
 import type { CustomEmailSettingsDTO } from '@shared/schemas/settings.schema';
 import type { BrowserRuntime } from '@shared/schemas/automation.schema';
@@ -72,6 +76,11 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
     .split(LINE_BREAK)
     .map((line) => line.trim())
     .filter((line) => line.length > 0).length;
+
+  const parsedPasted = React.useMemo(() => {
+    if (config.emailSourceMode !== 'manual') return null;
+    return parsePastedCapcutText(config.emailList);
+  }, [config.emailSourceMode, config.emailList]);
 
   return (
     <div className="flex flex-col gap-1.5 shrink-0">
@@ -297,9 +306,9 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
             </div>
           </Panel>
 
-          {/* Panel 3: Nguồn Email */}
+          {/* Panel 3: Nguồn Email / Tài khoản CapCut */}
           <Panel
-            title="Nguồn Email"
+            title={config.emailSourceMode === 'manual' ? 'Tài khoản CapCut' : 'Nguồn Email'}
             icon={<Mail className="w-4 h-4 text-primary" />}
             className="p-3 flex flex-col justify-between"
           >
@@ -307,7 +316,7 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
               <SegmentedControl
                 options={[
                   { value: 'api', label: 'API Thuê Mail' },
-                  { value: 'manual', label: 'Dán thủ công' },
+                  { value: 'manual', label: 'Dán tài khoản có sẵn' },
                   { value: 'custom', label: 'Custom (Đã khóa)', disabled: true },
                 ]}
                 value={config.emailSourceMode === 'custom' ? 'api' : config.emailSourceMode}
@@ -390,16 +399,46 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
               ) : (
                 <div className="flex flex-col gap-1 flex-1">
                   <Textarea
-                    placeholder="Nhập email|password (mỗi dòng một tài khoản)..."
+                    placeholder="email|mật khẩu CapCut — mỗi dòng một tài khoản..."
                     value={config.emailList}
                     disabled={disabled}
                     onChange={(e) => onChange({ emailList: e.target.value })}
                     className="h-28 min-h-[110px] py-1.5 text-xs font-mono resize-y"
                     rows={5}
                   />
-                  <span className="text-[10px] text-on-surface-variant leading-snug">
-                    {'Xử lý mọi dòng hợp lệ, tối đa ' + config.threadCount + ' dòng cùng lúc.'}
-                  </span>
+                  <div className="flex flex-col gap-1 text-[11px] leading-snug">
+                    {config.emailList.trim().length === 0 ? (
+                      <span className="text-on-surface-variant">
+                        Nhập mỗi dòng một tài khoản theo định dạng: email|mật khẩu CapCut.
+                      </span>
+                    ) : parsedPasted && parsedPasted.issues.length > 0 ? (
+                      <div className="flex items-start gap-1.5 text-warning">
+                        <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                        <span className="line-clamp-2" title={formatPastedCapcutIssues(parsedPasted.issues)}>
+                          {parsedPasted.issues[0]?.code === 'MISSING_SEPARATOR'
+                            ? `Dòng ${parsedPasted.issues[0].line}: thiếu dấu '|' phân cách giữa email và mật khẩu.`
+                            : parsedPasted.issues[0]?.code === 'CONFLICTING_DUPLICATE'
+                            ? `Dòng ${parsedPasted.issues[0].line}: cùng email nhưng mật khẩu khác nhau.`
+                            : `Dòng ${parsedPasted.issues[0].line}: định dạng không hợp lệ.`}
+                          {parsedPasted.issues.length > 1 ? ` (+${parsedPasted.issues.length - 1} lỗi khác)` : ''}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5 text-success">
+                        <ShieldCheck className="w-3.5 h-3.5 text-primary shrink-0" />
+                        <span>
+                          {`Đã nhận ${parsedPasted?.entries.length ?? 0} tài khoản hợp lệ`}
+                          {parsedPasted && parsedPasted.duplicateLines.length > 0
+                            ? ` (đã lọc ${parsedPasted.duplicateLines.length} dòng trùng)`
+                            : ''}
+                          {`, tối đa ${config.threadCount} luồng.`}
+                        </span>
+                      </div>
+                    )}
+                    <span className="text-[10px] text-on-surface-variant/80">
+                      Dữ liệu trong bảng Tài khoản là dữ liệu đã lưu và không tự ghi đè.
+                    </span>
+                  </div>
                 </div>
               )}
             </div>
@@ -559,92 +598,103 @@ export const AutomationConfigGrid: React.FC<AutomationConfigGridProps> = ({
             icon={<KeyRound className="w-4 h-4 text-primary" />}
             className="p-3 flex flex-col justify-between"
           >
-            <div className="space-y-2 mt-1">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <label className="flex items-center gap-1.5 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="pw_mode"
-                      checked={config.passwordMode === 'custom'}
+            {config.emailSourceMode === 'manual' ? (
+              <div className="rounded border border-panel-border bg-surface-container-low p-2.5 flex flex-col gap-1 mt-1">
+                <span className="font-label-xs text-xs text-primary font-medium">
+                  Mật khẩu theo tài khoản
+                </span>
+                <span className="text-[11px] text-on-surface-variant leading-relaxed">
+                  Dùng mật khẩu CapCut ở từng dòng dán; không tạo mật khẩu mới.
+                </span>
+              </div>
+            ) : (
+              <div className="space-y-2 mt-1">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="pw_mode"
+                        checked={config.passwordMode === 'custom'}
+                        disabled={disabled}
+                        onChange={() => onChange({ passwordMode: 'custom' })}
+                        className="w-3.5 h-3.5 text-primary"
+                      />
+                      <span className="text-xs text-on-surface font-medium">Tự đặt</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="pw_mode"
+                        checked={config.passwordMode === 'random'}
+                        disabled={disabled}
+                        onChange={() => onChange({ passwordMode: 'random' })}
+                        className="w-3.5 h-3.5 text-primary"
+                      />
+                      <span className="text-xs text-on-surface font-medium">Ngẫu nhiên (Random)</span>
+                    </label>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-label-xs text-[11px] text-on-surface-variant">Độ dài:</span>
+                    <Input
+                      type="number"
+                      min={6}
+                      max={64}
+                      value={config.passwordLength}
                       disabled={disabled}
-                      onChange={() => onChange({ passwordMode: 'custom' })}
-                      className="w-3.5 h-3.5 text-primary"
+                      onChange={(e) =>
+                        onChange({ passwordLength: clampConfigNumber(e.target.value, 6, 64, config.passwordLength) })
+                      }
+                      controlSize="sm"
+                      className="w-14 text-center py-0.5 h-7 text-xs font-semibold"
+                      fontMono
                     />
-                    <span className="text-xs text-on-surface font-medium">Tự đặt</span>
-                  </label>
-                  <label className="flex items-center gap-1.5 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="pw_mode"
-                      checked={config.passwordMode === 'random'}
-                      disabled={disabled}
-                      onChange={() => onChange({ passwordMode: 'random' })}
-                      className="w-3.5 h-3.5 text-primary"
-                    />
-                    <span className="text-xs text-on-surface font-medium">Ngẫu nhiên (Random)</span>
-                  </label>
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-1.5">
-                  <span className="font-label-xs text-[11px] text-on-surface-variant">Độ dài:</span>
+                {config.passwordMode === 'custom' ? (
                   <Input
-                    type="number"
-                    min={6}
-                    max={64}
-                    value={config.passwordLength}
+                    type="text"
+                    placeholder="Mật khẩu dùng chung cho mọi tài khoản..."
+                    value={config.customPassword}
                     disabled={disabled}
-                    onChange={(e) =>
-                      onChange({ passwordLength: clampConfigNumber(e.target.value, 6, 64, config.passwordLength) })
-                    }
+                    onChange={(e) => onChange({ customPassword: e.target.value })}
                     controlSize="sm"
-                    className="w-14 text-center py-0.5 h-7 text-xs font-semibold"
                     fontMono
                   />
-                </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-2 p-2 bg-surface-container-low rounded border border-panel-border text-xs">
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <Checkbox
+                        checked={config.includeUppercase}
+                        disabled={disabled}
+                        onChange={(e) => onChange({ includeUppercase: e.target.checked })}
+                      />
+                      <span className="text-on-surface-variant text-[11px]">A-Z (Hoa)</span>
+                    </label>
+
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <Checkbox
+                        checked={config.includeNumbers}
+                        disabled={disabled}
+                        onChange={(e) => onChange({ includeNumbers: e.target.checked })}
+                      />
+                      <span className="text-on-surface-variant text-[11px]">0-9 (Số)</span>
+                    </label>
+
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <Checkbox
+                        checked={config.includeSpecial}
+                        disabled={disabled}
+                        onChange={(e) => onChange({ includeSpecial: e.target.checked })}
+                      />
+                      <span className="text-on-surface-variant text-[11px]">!@# (Ký tự)</span>
+                    </label>
+                  </div>
+                )}
               </div>
-
-              {config.passwordMode === 'custom' ? (
-                <Input
-                  type="text"
-                  placeholder="Mật khẩu dùng chung cho mọi tài khoản..."
-                  value={config.customPassword}
-                  disabled={disabled}
-                  onChange={(e) => onChange({ customPassword: e.target.value })}
-                  controlSize="sm"
-                  fontMono
-                />
-              ) : (
-                <div className="grid grid-cols-3 gap-2 p-2 bg-surface-container-low rounded border border-panel-border text-xs">
-                  <label className="flex items-center gap-1.5 cursor-pointer">
-                    <Checkbox
-                      checked={config.includeUppercase}
-                      disabled={disabled}
-                      onChange={(e) => onChange({ includeUppercase: e.target.checked })}
-                    />
-                    <span className="text-on-surface-variant text-[11px]">A-Z (Hoa)</span>
-                  </label>
-
-                  <label className="flex items-center gap-1.5 cursor-pointer">
-                    <Checkbox
-                      checked={config.includeNumbers}
-                      disabled={disabled}
-                      onChange={(e) => onChange({ includeNumbers: e.target.checked })}
-                    />
-                    <span className="text-on-surface-variant text-[11px]">0-9 (Số)</span>
-                  </label>
-
-                  <label className="flex items-center gap-1.5 cursor-pointer">
-                    <Checkbox
-                      checked={config.includeSpecial}
-                      disabled={disabled}
-                      onChange={(e) => onChange({ includeSpecial: e.target.checked })}
-                    />
-                    <span className="text-on-surface-variant text-[11px]">!@# (Ký tự)</span>
-                  </label>
-                </div>
-              )}
-            </div>
+            )}
           </Panel>
         </div>
 

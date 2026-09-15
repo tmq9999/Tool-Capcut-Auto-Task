@@ -15,6 +15,7 @@ export interface ProxyProviderPanelProps {
   onSetSimpleDraft: (service: SimpleServiceName, draft: SimpleDraft) => void;
   onTestConnection: (service: KnownServiceName) => void;
   testResult: { service: string; code: string; message: string } | null;
+  isTesting?: boolean | Partial<Record<KnownServiceName, boolean>>;
 }
 
 export const ProxyProviderPanel: React.FC<ProxyProviderPanelProps> = ({
@@ -23,7 +24,9 @@ export const ProxyProviderPanel: React.FC<ProxyProviderPanelProps> = ({
   onSetSimpleDraft,
   onTestConnection,
   testResult,
+  isTesting,
 }) => {
+  const isKiotTesting = typeof isTesting === 'boolean' ? isTesting : !!isTesting?.kiotproxy;
   const status = credentialStatuses.kiotproxy;
   const kiotTestResult = testResult?.service === 'kiotproxy' ? testResult : null;
   const keyCount = status?.metadata.lastTestResult?.details?.keyCount;
@@ -101,9 +104,10 @@ export const ProxyProviderPanel: React.FC<ProxyProviderPanelProps> = ({
               variant="surface"
               size="md"
               onClick={() => onTestConnection('kiotproxy')}
+              disabled={isKiotTesting}
               className="whitespace-nowrap shrink-0"
             >
-              Kiểm tra API
+              {isKiotTesting ? 'Đang kiểm tra...' : 'Kiểm tra API'}
             </Button>
             {renderStatusBadge()}
           </div>

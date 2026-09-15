@@ -12,7 +12,7 @@ import {
   type ProfileStopDiagnostic,
   type ProfileStopObservation
 } from './capcut/launcher';
-import { abortableDelay, withinDeadline } from './capcut/cancellation';
+import { abortable, abortableDelay, withinDeadline } from './capcut/cancellation';
 import {
   RunUiInteractionScheduler,
   createDirectUiInteraction,
@@ -54,6 +54,7 @@ import type {
   RunHealthResponseDTO
 } from '../../shared/schemas/automation.schema';
 import {
+  AutomationRunConfigSchema,
   IMPLEMENTED_BROWSER_RUNTIMES,
   isBrowserImplemented,
   RunHealthRequestSchema
@@ -62,6 +63,11 @@ import type {
   AccountCreateInputDTO,
   AccountUpdateInputDTO
 } from '../../shared/schemas/account.schema';
+import type { AccountIdentity } from './AccountService';
+import {
+  normalizePastedCapcutEntries,
+  formatPastedCapcutIssues
+} from '../../shared/schemas/pasted-capcut.schema';
 import { TaskEvidenceError } from './capcut/TaskEvidenceError';
 
 /**
@@ -133,11 +139,13 @@ export interface IProxyLeaseSource {
   availableSlots?(): Promise<number | null>;
   /** Narrows the source to the keys — và vùng — lượt chạy này được dùng. */
   configure?(options: { keys?: string[]; region?: string }): void;
+  resetIdlePreflightCache?(): void;
 }
 
 export interface IAccountSink {
   create(input: AccountCreateInputDTO): { id: string };
   update(id: string, data: AccountUpdateInputDTO): { success: boolean };
+  findByEmail?(email: string): AccountIdentity[];
 }
 
 /**
@@ -1186,6 +1194,7 @@ export class AutomationRunService {
         if (!session.stopOutcomeLocked) session.stopFailed = false;
         return true;
       } catch (error: unknown) {
+        if (session.stopOutcomeLocked) return false;
         session.stopFailed = true;
         session.stopCause = error;
         if (error instanceof ProfileStopError) {
@@ -1375,7 +1384,7 @@ export class AutomationRunService {
     directProxyPool?: DirectProxyPool
   ): Promise<void> {
     const cleanupSessionAlias = thread?.session?.alias ?? 'unassigned';
-    if (item && item.kind !== 'existing' && !committed) {
+    if (item && item.kind === 'new' && !committed) {
       try {
         source.release(item);
         if (this.activeMailReservationCount > 0) {
@@ -1470,18 +1479,63 @@ export class AutomationRunService {
   ): ThreadRuntime {
     let accountId: string;
     let capcutPassword: string;
-    const isExisting = item.kind === 'existing';
+    const isExistingAccount = item.kind === 'existing' || item.kind === 'pasted-existing';
 
-    if (isExisting) {
+    if (item.kind === 'existing') {
       accountId = item.accountId;
       capcutPassword = item.capcutPassword;
-      this.deps.accounts.update(accountId, {
+      const updateResult = this.deps.accounts.update(accountId, {
         status: 'processing',
         automationStep: config.missionTransport === 'http-only'
           ? 'Đang khởi chạy HTTP-only'
           : 'Đang khởi chạy browser',
         ...(config.missionTransport === 'http-only' ? {} : { browserProvider: config.browser })
       });
+      if (!updateResult || updateResult.success !== true) {
+        throw new Error(`Không thể cập nhật trạng thái tài khoản ${accountId} trong database.`);
+      }
+    } else if (item.kind === 'pasted-existing') {
+      capcutPassword = item.capcutPassword;
+      const matches = this.deps.accounts.findByEmail
+        ? this.deps.accounts.findByEmail(item.email)
+        : [];
+      if (matches.length > 1) {
+        throw new Error(
+          `Tài khoản ${item.email} (dòng ${item.line}) trùng với ${matches.length} bản ghi trong cơ sở dữ liệu.`
+        );
+      }
+      if (matches.length === 1) {
+        const candidate = matches[0];
+        if (this.isAccountActive(candidate.id)) {
+          throw new Error(
+            `Tài khoản ${item.email} (dòng ${item.line}) hiện đang được xử lý bởi một tác vụ khác.`
+          );
+        }
+        accountId = candidate.id;
+        const updateResult = this.deps.accounts.update(accountId, {
+          status: 'processing',
+          automationStep: config.missionTransport === 'http-only'
+            ? 'Đang khởi chạy HTTP-only'
+            : 'Đang khởi chạy browser',
+          ...(config.missionTransport === 'http-only' ? {} : { browserProvider: config.browser })
+        });
+        if (!updateResult || updateResult.success !== true) {
+          throw new Error(`Không thể cập nhật trạng thái tài khoản ${accountId} trong database.`);
+        }
+      } else {
+        const created = this.deps.accounts.create({
+          email: item.email,
+          emailProvider: 'manual',
+          passwordCapcut: item.capcutPassword,
+          credit: 0,
+          status: 'processing',
+          automationStep: config.missionTransport === 'http-only'
+            ? 'Đang khởi chạy HTTP-only'
+            : 'Đang khởi chạy browser',
+          ...(config.missionTransport === 'http-only' ? {} : { browserProvider: config.browser })
+        });
+        accountId = created.id;
+      }
     } else {
       capcutPassword = generateCapcutPassword(config.password);
       const created = this.deps.accounts.create({
@@ -1522,7 +1576,7 @@ export class AutomationRunService {
       email: item.email,
       emailProvider: item.emailProvider,
       capcutPassword,
-      isExistingAccount: isExisting,
+      isExistingAccount,
       purchasedEmailId: item.kind === 'new' ? item.purchasedEmailId : undefined,
       lease,
       directProxy: slotProxy,
@@ -1821,10 +1875,17 @@ export class AutomationRunService {
     return session;
   }
 
+  private assertProofOwner(thread: ThreadRuntime): void {
+    if (this.iterationOwners.get(thread.accountId) !== thread.ownerToken) {
+      throw new Error('STALE_ACK_PROOF_OWNER');
+    }
+  }
+
   private async persistAcceptedProofs(
     thread: ThreadRuntime,
     proofs: readonly UnsettledTaskProof[]
   ): Promise<void> {
+    this.assertProofOwner(thread);
     const sink = this.deps.taskProgress;
     if (!sink || typeof sink.recordUnsettled !== 'function') {
       const err = new AutomationTerminalError(
@@ -1846,9 +1907,7 @@ export class AutomationRunService {
       if (!write) {
         const copy = structuredClone(item);
         write = Promise.resolve().then(async () => {
-          if (this.iterationOwners.get(thread.accountId) !== thread.ownerToken) {
-            throw new Error('STALE_ACK_PROOF_OWNER');
-          }
+          this.assertProofOwner(thread);
           try {
             if (sink?.recordUnsettled) {
               await sink.recordUnsettled(thread.accountId, thread.runId, [copy]);
@@ -1862,7 +1921,11 @@ export class AutomationRunService {
       }
       writes.push(write);
     }
-    await Promise.all(writes);
+    const settled = await Promise.allSettled(writes);
+    const rejected = settled.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected'
+    );
+    if (rejected) throw rejected.reason;
   }
 
   private async runUiSessionAttempt(
@@ -1882,21 +1945,85 @@ export class AutomationRunService {
       throw new Error('CapCut password is not available');
     }
 
-    const accountId = thread.accountId;
     let invocationOpen = true;
-
-    const onAcceptedProof = async (proof: UnsettledTaskProof): Promise<void> => {
-      if (!invocationOpen) {
-        throw new Error('INVOCATION_CLOSED');
-      }
-      if (this.iterationOwners.get(accountId) !== thread.ownerToken) {
-        throw new Error('STALE_ACK_PROOF_OWNER');
-      }
-      await this.persistAcceptedProofs(thread, [proof]);
+    const invocationWrites = new Set<Promise<void>>();
+    const ownWrite = (operation: Promise<void>): Promise<void> => {
+      invocationWrites.add(operation);
+      void operation.catch(() => undefined);
+      return operation;
     };
 
+    const assertInvocation = (): void => {
+      if (!invocationOpen) throw new Error('INVOCATION_CLOSED');
+      this.assertProofOwner(thread);
+      if (thread.session !== session) throw new Error('STALE_CHECKPOINT_SESSION');
+    };
+
+    const onAcceptedProof = (proof: UnsettledTaskProof): Promise<void> => {
+      return ownWrite(
+        (async () => {
+          assertInvocation();
+          await this.persistAcceptedProofs(thread, [proof]);
+        })()
+      );
+    };
+
+    const onTaskCheckpoint = (checkpoint: {
+      rows: CapcutAccountResult['tasks'];
+      receipt: CapcutVerificationReceipt;
+      unsettledProofs: readonly UnsettledTaskProof[];
+    }): Promise<void> => {
+      return ownWrite(
+        (async () => {
+          assertInvocation();
+          if (this.deps.taskProgress) {
+            await this.deps.taskProgress.record(thread.accountId, checkpoint);
+            if (checkpoint.unsettledProofs) {
+              for (const item of checkpoint.unsettledProofs) {
+                const key = JSON.stringify([item.key, item.proof.opId, item.proof.at]);
+                thread.acceptedProofWrites.set(key, Promise.resolve());
+              }
+            }
+            for (const row of checkpoint.rows) {
+              if (!row.opId || !row.provedAt) continue;
+              const at = Date.parse(row.provedAt);
+              if (!Number.isFinite(at)) continue;
+              const key = JSON.stringify([row.key, row.opId, at]);
+              if (!thread.acceptedProofWrites.has(key)) {
+                thread.acceptedProofWrites.set(key, Promise.resolve());
+              }
+            }
+          }
+
+          if (this.telemetry) {
+            this.recordEvidence({
+              schemaVersion: 1,
+              runId: thread.runId,
+              workerAlias: thread.workerAlias,
+              sessionAlias: session.alias,
+              accountAlias: thread.accountAlias,
+              at: new Date().toISOString(),
+              type: 'task-checkpoint',
+              fresh: checkpoint.receipt.fresh,
+              final: checkpoint.receipt.final,
+              observedAt: checkpoint.receipt.observedAt,
+              requiredAfter: checkpoint.receipt.requiredAfter,
+              serverTotal: checkpoint.receipt.serverTotal,
+              serverDone: checkpoint.receipt.serverDone,
+              tasks: checkpoint.rows.map((row) => ({
+                key: EvidenceTaskKeySchema.parse(row.key),
+                status: row.status
+              }))
+            });
+          }
+        })()
+      );
+    };
+
+    let runnerError: unknown = null;
+    let result: CapcutUiAccountResult | undefined;
     try {
-      return await uiRunner.runAccount({
+      result = await uiRunner.runAccount({
         page: session.page,
         context: session.context,
         email: thread.email,
@@ -1920,59 +2047,35 @@ export class AutomationRunService {
         skipWithoutTrial: config.skipWithoutTrial,
         unsettledProofs,
         onAcceptedProof,
-        onTaskCheckpoint: async (checkpoint: {
-          rows: CapcutAccountResult['tasks'];
-          receipt: CapcutVerificationReceipt;
-          unsettledProofs: readonly UnsettledTaskProof[];
-        }) => {
-          if (thread.session !== session) {
-            this.log(
-              'WARNING',
-              thread.email,
-              'Nhiệm vụ',
-              `Bỏ qua checkpoint muộn từ session cũ ${session.alias} (hiện tại: ${thread.session?.alias ?? 'none'}).`,
-              thread.accountId
-            );
-            return;
-          }
-
-          if (this.deps.taskProgress) {
-            await this.deps.taskProgress.record(thread.accountId, checkpoint);
-            if (checkpoint.unsettledProofs) {
-              for (const item of checkpoint.unsettledProofs) {
-                const key = JSON.stringify([item.key, item.proof.opId, item.proof.at]);
-                thread.acceptedProofWrites.set(key, Promise.resolve());
-              }
-            }
-          }
-
-          if (this.telemetry) this.recordEvidence({
-              schemaVersion: 1,
-              runId: thread.runId,
-              workerAlias: thread.workerAlias,
-              sessionAlias: session.alias,
-              accountAlias: thread.accountAlias,
-              at: new Date().toISOString(),
-              type: 'task-checkpoint',
-              fresh: checkpoint.receipt.fresh,
-              final: checkpoint.receipt.final,
-              observedAt: checkpoint.receipt.observedAt,
-              requiredAfter: checkpoint.receipt.requiredAfter,
-              serverTotal: checkpoint.receipt.serverTotal,
-              serverDone: checkpoint.receipt.serverDone,
-              tasks: checkpoint.rows.map((row) => ({
-                key: EvidenceTaskKeySchema.parse(row.key),
-                status: row.status
-              }))
-            });
-        },
+        onTaskCheckpoint,
         isExpectedClose: () => session.stopRequested,
         log: (status: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR', step: string, message: string) =>
           this.log(status, thread.email, step, message, thread.accountId)
       });
+    } catch (err: unknown) {
+      runnerError = err;
     } finally {
       invocationOpen = false;
+      const allWrites = Array.from(
+        new Set([...invocationWrites, ...thread.acceptedProofWrites.values()])
+      );
+      const settled = await Promise.allSettled(allWrites);
+      const drainRejected = settled.find(
+        (r): r is PromiseRejectedResult => r.status === 'rejected'
+      );
+      if (drainRejected) {
+        if (
+          !runnerError ||
+          !(runnerError instanceof AutomationTerminalError && runnerError.state === 'failed')
+        ) {
+          runnerError = drainRejected.reason;
+        }
+      }
     }
+    if (runnerError) {
+      throw runnerError;
+    }
+    return result!;
   }
 
   private deriveStopMessage(signal?: AbortSignal, err?: unknown): string {
@@ -2260,10 +2363,9 @@ export class AutomationRunService {
         return this.classifyUiResult(thread, result, config);
       }
     } catch (err: unknown) {
-      const isCleanupSafetyAbort = (err instanceof AutomationTerminalError && err.reason.code === 'RESOURCE_CLEANUP_FAILED') ||
-        (iterationSignal.reason instanceof AutomationTerminalError && iterationSignal.reason.reason.code === 'RESOURCE_CLEANUP_FAILED');
-      const isTerminalFailure = err instanceof AutomationTerminalError && err.state === 'failed' && !isCleanupSafetyAbort;
-      if (!isTerminalFailure && (iterationSignal.aborted || this.runAbort?.signal.aborted)) {
+      const isIndependentFailure = err instanceof AutomationTerminalError &&
+        err.state === 'failed' && err.reason.code !== 'RESOURCE_CLEANUP_FAILED';
+      if (!isIndependentFailure && (iterationSignal.aborted || this.runAbort?.signal.aborted)) {
         return {
           kind: 'stopped',
           status: 'stopped',
@@ -2473,13 +2575,12 @@ export class AutomationRunService {
               }
               if (!thread.outcome) {
                 const iterationSig = this.iterationAbort.get(thread.accountId)?.signal;
-                const isCleanupSafetyAbort = (err instanceof AutomationTerminalError && err.reason.code === 'RESOURCE_CLEANUP_FAILED') ||
-                  (iterationSig?.reason instanceof AutomationTerminalError && iterationSig.reason.reason.code === 'RESOURCE_CLEANUP_FAILED');
-                const terminalFailure = err instanceof AutomationTerminalError && err.state === 'failed' && !isCleanupSafetyAbort;
+                const isIndependentFailure = err instanceof AutomationTerminalError &&
+                  err.state === 'failed' && err.reason.code !== 'RESOURCE_CLEANUP_FAILED';
                 const wasAborted = this.runAbort?.signal.aborted === true || iterationSig?.aborted === true;
                 this.recordOutcome(
                   thread,
-                  !terminalFailure && wasAborted
+                  !isIndependentFailure && wasAborted
                     ? { kind: 'stopped', status: 'stopped', step: this.deriveStopMessage(iterationSig, err) }
                     : { kind: 'failed', status: 'error', step: 'Lỗi khi khởi chạy hoặc xử lý' }
                 );
@@ -2798,6 +2899,17 @@ export class AutomationRunService {
         'Còn scheduler/session chưa xác nhận thu hồi; không thể bắt đầu phiên mới.'
       ));
     }
+    if (config.emailSource.mode === 'pasted-existing' || config.password.mode === 'per-account') {
+      const parsed = AutomationRunConfigSchema.safeParse(config);
+      if (!parsed.success) {
+        return Promise.reject(new ProviderError(
+          'CONFIG_ERROR',
+          'Cấu hình tài khoản dán không hợp lệ: ' +
+            parsed.error.issues.map((issue) => issue.message).join('; ')
+        ));
+      }
+      config = parsed.data;
+    }
     const runId = this.nextId();
     this.lastSummary = null;
     const workerTarget = (config.mailLimit ?? 0) > 0 ? Math.min(config.threadCount, config.mailLimit!) : config.threadCount;
@@ -2823,7 +2935,7 @@ export class AutomationRunService {
     this.mailboxAcquisitions = 0;
     this.accountSequence = 0;
     this.sessionSequences.clear();
-    this.evidenceMode = config.emailSource.mode === 'existing' ? 'resume' : 'new';
+    this.evidenceMode = (config.emailSource.mode === 'existing' || config.emailSource.mode === 'pasted-existing') ? 'resume' : 'new';
     this.evidenceStage = config.rolloutStage ?? null;
     this.sourceForEvidence = null;
     this.activeProfileCount = 0;
@@ -2929,8 +3041,105 @@ export class AutomationRunService {
     runSignal: AbortSignal,
     logResetTicket?: StartLogResetTicket
   ): Promise<{ runId: string; clearedThrough?: number }> {
-    const workerTarget = (config.mailLimit ?? 0) > 0 ? Math.min(config.threadCount, config.mailLimit!) : config.threadCount;
+    let workerTarget = (config.mailLimit ?? 0) > 0 ? Math.min(config.threadCount, config.mailLimit!) : config.threadCount;
     runSignal.throwIfAborted();
+
+    let source: AutomationWorkSource | undefined;
+    let readiness: SourceReadiness | undefined;
+
+    if (config.emailSource.mode === 'pasted-existing') {
+      if (!this.deps.accounts.findByEmail) {
+        const err = new AutomationTerminalError(
+          'blocked',
+          { code: 'PROVIDER_CONFIG_ERROR' },
+          'Hệ thống lưu trữ tài khoản chưa hỗ trợ tra cứu email cho danh sách tài khoản CapCut dán có sẵn.'
+        );
+        this.publish('blocked', err.message, { terminalReason: err.reason });
+        throw err;
+      }
+
+      const normalizedResult = normalizePastedCapcutEntries(config.emailSource.entries);
+      if (normalizedResult.issues.length > 0) {
+        const msg = formatPastedCapcutIssues(normalizedResult.issues);
+        const err = new AutomationTerminalError('blocked', { code: 'PROVIDER_CONFIG_ERROR' }, msg);
+        this.publish('blocked', err.message, { terminalReason: err.reason });
+        throw err;
+      }
+
+      const selectedEntries = (config.mailLimit ?? 0) > 0
+        ? normalizedResult.entries.slice(0, config.mailLimit)
+        : normalizedResult.entries;
+
+      const multiMatchLines: string[] = [];
+      const activeLines: string[] = [];
+      for (const entry of selectedEntries) {
+        const matches = this.deps.accounts.findByEmail(entry.email);
+        if (matches.length > 1) {
+          multiMatchLines.push(`dòng ${entry.line} (${entry.email}) trùng với ${matches.length} bản ghi trong cơ sở dữ liệu`);
+        } else if (matches.length === 1 && this.isAccountActive(matches[0].id)) {
+          activeLines.push(`dòng ${entry.line} (${entry.email})`);
+        }
+      }
+
+      if (multiMatchLines.length > 0) {
+        const msg = `Phát hiện xung đột tài khoản trong cơ sở dữ liệu: ${multiMatchLines.join('; ')}. Vui lòng kiểm tra lại trang Tài khoản.`;
+        const err = new AutomationTerminalError('blocked', { code: 'PROVIDER_CONFIG_ERROR' }, msg);
+        this.publish('blocked', err.message, { terminalReason: err.reason });
+        throw err;
+      }
+
+      if (activeLines.length > 0) {
+        const msg = `Tài khoản đang được xử lý bởi tác vụ khác: ${activeLines.join(', ')}.`;
+        const err = new AutomationTerminalError('blocked', { code: 'PROVIDER_CONFIG_ERROR' }, msg);
+        this.publish('blocked', err.message, { terminalReason: err.reason });
+        throw err;
+      }
+
+      source = this.deps.workSources.create(
+        config,
+        runId,
+        (event) => {
+          this.recordEvidence({
+            schemaVersion: 1, runId, at: new Date().toISOString(), type: 'purchase',
+            provider: event.provider, outcome: event.outcome,
+            attempted: event.stats.attempted, confirmed: event.stats.confirmed,
+            ambiguous: event.stats.ambiguous, budget: event.stats.budget
+          });
+        },
+        this.deps.mutationContext,
+        (message) => {
+          this.log('INFO', 'system', 'Email', message);
+          this.publish(this.progress.state, message);
+        }
+      );
+      this.sourceForEvidence = source;
+      try {
+        readiness = await measureStage(
+          'source-preflight',
+          () => source!.prepare(workerTarget, runSignal),
+          (message) => this.log('INFO', 'system', 'Timing', message)
+        );
+      } catch (err: unknown) {
+        runSignal.throwIfAborted();
+        if (err instanceof AutomationTerminalError) {
+          this.publish(err.state, err.message, { terminalReason: err.reason });
+          throw err;
+        }
+        if (err instanceof ProviderError) {
+          const code = err.code === 'AUTH_ERROR' ? 'PROVIDER_AUTH_REQUIRED' : 'PROVIDER_CONFIG_ERROR';
+          this.publish('blocked', err.message, { terminalReason: { code } });
+          this.log('ERROR', 'system', 'Run', err.message);
+          throw err;
+        }
+        const message = err instanceof Error ? err.message : 'Không chuẩn bị được phiên chạy.';
+        const terminalErr = new AutomationTerminalError('failed', { code: 'INTERNAL_ERROR' }, message);
+        this.publish('failed', message, { terminalReason: terminalErr.reason });
+        this.log('ERROR', 'system', 'Run', message);
+        throw terminalErr;
+      }
+      workerTarget = readiness.workerTarget;
+      this.publish(this.progress.state, this.progress.message, { workerTarget });
+    }
 
     if (config.missionTransport === 'http-only') {
       const runner = this.deps.httpOnlyRunner;
@@ -3017,8 +3226,10 @@ export class AutomationRunService {
     }
 
     if (config.proxy.mode === 'proxykey') {
+      this.deps.proxies.resetIdlePreflightCache?.();
       this.deps.proxies.configure?.({ keys: config.proxy.keys, region: config.proxy.region });
-      const slots = await this.deps.proxies.availableSlots?.();
+      const readPromise = Promise.resolve(this.deps.proxies.availableSlots?.());
+      const slots = await abortable(readPromise, runSignal);
       runSignal.throwIfAborted();
       if (slots !== null && slots !== undefined && slots < workerTarget) {
         const err = new AutomationTerminalError(
@@ -3044,38 +3255,39 @@ export class AutomationRunService {
       workerTarget, maxBillablePurchases: config.maxBillablePurchases ?? 0
     });
     this.recordResourceSnapshot();
-    const source = this.deps.workSources.create(
-      config,
-      runId,
-      (event) => {
-        this.recordEvidence({
-          schemaVersion: 1, runId, at: new Date().toISOString(), type: 'purchase',
-          provider: event.provider, outcome: event.outcome,
-          attempted: event.stats.attempted, confirmed: event.stats.confirmed,
-          ambiguous: event.stats.ambiguous, budget: event.stats.budget
-        });
-      },
-      this.deps.mutationContext,
-      (message) => {
-        this.log('INFO', 'system', 'Email', message);
-        this.publish(this.progress.state, message);
-      }
-    );
-    this.sourceForEvidence = source;
-    let readiness: SourceReadiness;
-    try {
-      readiness = await measureStage(
-        'source-preflight',
-        () => source.prepare(workerTarget, runSignal),
-        (message) => this.log('INFO', 'system', 'Timing', message)
+
+    if (!source) {
+      source = this.deps.workSources.create(
+        config,
+        runId,
+        (event) => {
+          this.recordEvidence({
+            schemaVersion: 1, runId, at: new Date().toISOString(), type: 'purchase',
+            provider: event.provider, outcome: event.outcome,
+            attempted: event.stats.attempted, confirmed: event.stats.confirmed,
+            ambiguous: event.stats.ambiguous, budget: event.stats.budget
+          });
+        },
+        this.deps.mutationContext,
+        (message) => {
+          this.log('INFO', 'system', 'Email', message);
+          this.publish(this.progress.state, message);
+        }
       );
-    } catch (err: unknown) {
-      runSignal.throwIfAborted();
-      if (err instanceof AutomationTerminalError) {
-        this.publish(err.state, err.message, { terminalReason: err.reason });
-        throw err;
-      }
-      if (err instanceof ProviderError) {
+      this.sourceForEvidence = source;
+      try {
+        readiness = await measureStage(
+          'source-preflight',
+          () => source!.prepare(workerTarget, runSignal),
+          (message) => this.log('INFO', 'system', 'Timing', message)
+        );
+      } catch (err: unknown) {
+        runSignal.throwIfAborted();
+        if (err instanceof AutomationTerminalError) {
+          this.publish(err.state, err.message, { terminalReason: err.reason });
+          throw err;
+        }
+        if (err instanceof ProviderError) {
         const code = err.code === 'AUTH_ERROR' ? 'PROVIDER_AUTH_REQUIRED' : 'PROVIDER_CONFIG_ERROR';
         this.publish('blocked', err.message, { terminalReason: { code } });
         this.log('ERROR', 'system', 'Run', err.message);
@@ -3091,6 +3303,7 @@ export class AutomationRunService {
       this.log('ERROR', 'system', 'Run', message);
       throw terminalErr;
     }
+  }
 
     runSignal.throwIfAborted();
     let clearedThrough: number | undefined;
@@ -3109,6 +3322,16 @@ export class AutomationRunService {
         throw terminalErr;
       }
 
+    }
+
+    if (!readiness) {
+      const err = new AutomationTerminalError(
+        'failed',
+        { code: 'INTERNAL_ERROR' },
+        'Preflight readiness was not established.'
+      );
+      this.publish('failed', err.message, { terminalReason: err.reason });
+      throw err;
     }
 
     this.publish('running', 'Đang chạy ' + readiness.workerTarget + ' luồng...', {

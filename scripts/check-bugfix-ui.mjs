@@ -247,6 +247,44 @@ async function run() {
     }
     console.log('✓ Sequence 6 passed: Legacy provider preserved on note edit');
 
+    // Sequence 7: AutomationConfigGrid manual paste UI & per-account password
+    console.log('Running Sequence 7: Dashboard manual paste UI & per-account password notice');
+
+    // Check initial state: manual mode by default
+    await page.waitForSelector('text=Tài khoản CapCut');
+    await page.waitForSelector('text=Dán tài khoản có sẵn');
+    await page.waitForSelector('text=Dùng mật khẩu CapCut ở từng dòng dán; không tạo mật khẩu mới.');
+
+    // Check textarea placeholder
+    const textarea = page.locator('[data-testid="dashboard-config-fixture"] textarea[placeholder*="mật khẩu CapCut"]');
+    await textarea.waitFor({ state: 'visible' });
+
+    // Type invalid account format (missing pipe)
+    await textarea.fill('invalid-line-without-pipe');
+    await page.waitForSelector("text=thiếu dấu '|' phân cách");
+    console.log('✓ Sequence 7a passed: Syntax error detected and displayed with line details');
+
+    // Type valid accounts with one duplicate
+    await textarea.fill('alpha@example.com|passAlpha123\nalpha@example.com|passAlpha123\nbeta@example.com|passBeta456');
+    await page.waitForSelector('text=Đã nhận 2 tài khoản hợp lệ');
+    await page.waitForSelector('text=đã lọc 1 dòng trùng');
+    await page.waitForSelector('text=Dữ liệu trong bảng Tài khoản là dữ liệu đã lưu và không tự ghi đè.');
+    console.log('✓ Sequence 7b passed: Valid entries parsed, deduplicated, and displayed with safety notice');
+
+    // Switch to API Thuê Mail tab
+    const apiTabBtn = page.locator('[data-testid="dashboard-config-fixture"] button:has-text("API Thuê Mail")');
+    await apiTabBtn.click();
+    await page.waitForSelector('text=Nguồn Email');
+    await page.waitForSelector('text=Ngẫu nhiên (Random)');
+    console.log('✓ Sequence 7c passed: Switching to API mode restores API panel title and password generator');
+
+    // Switch back to "Dán tài khoản có sẵn"
+    const manualTabBtn = page.locator('[data-testid="dashboard-config-fixture"] button:has-text("Dán tài khoản có sẵn")');
+    await manualTabBtn.click();
+    await page.waitForSelector('text=Tài khoản CapCut');
+    await page.waitForSelector('text=Dùng mật khẩu CapCut ở từng dòng dán; không tạo mật khẩu mới.');
+    console.log('✓ Sequence 7 passed: Mounted Dashboard manual paste tab verified in Electron');
+
     if (pageErrors.length > 0) {
       throw new Error(`Captured ${pageErrors.length} page errors during test!`);
     }

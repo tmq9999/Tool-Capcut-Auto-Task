@@ -353,5 +353,89 @@ describe('AutomationEvidenceEventSchema', () => {
       expect(valid.data.emailSource.accountIds).toEqual(['acc-1', 'acc-2', 'acc-3']);
     }
   });
-});
 
+  describe('pasted-existing and per-account source validation', () => {
+    const validPastedConfig = {
+      ...baseConfig,
+      maxBillablePurchases: 0,
+      emailSource: {
+        mode: 'pasted-existing' as const,
+        entries: [
+          { line: 1, email: 'a@example.com', capcutPassword: 'p1' },
+          { line: 2, email: 'b@example.com', capcutPassword: 'p2' }
+        ]
+      },
+      password: { mode: 'per-account' as const }
+    };
+
+    it('accepts valid pasted-existing with per-account password', () => {
+      const parsed = AutomationRunConfigSchema.safeParse(validPastedConfig);
+      expect(parsed.success).toBe(true);
+    });
+
+    it('enforces iff: pasted-existing requires per-account password and vice versa', () => {
+      // pasted-existing with random password -> reject
+      expect(
+        AutomationRunConfigSchema.safeParse({
+          ...validPastedConfig,
+          password: { mode: 'random', length: 12, uppercase: true, numbers: true, special: false }
+        }).success
+      ).toBe(false);
+
+      // api source with per-account password -> reject
+      expect(
+        AutomationRunConfigSchema.safeParse({
+          ...baseConfig,
+          password: { mode: 'per-account' }
+        }).success
+      ).toBe(false);
+    });
+
+    it('rejects http-only mission transport for pasted-existing', () => {
+      expect(
+        AutomationRunConfigSchema.safeParse({
+          ...validPastedConfig,
+          missionTransport: 'http-only'
+        }).success
+      ).toBe(false);
+    });
+
+    it('rejects rollout, approvedMailboxes, and stopAfter for pasted-existing', () => {
+      expect(
+        AutomationRunConfigSchema.safeParse({
+          ...validPastedConfig,
+          rolloutStage: 3
+        }).success
+      ).toBe(false);
+
+      expect(
+        AutomationRunConfigSchema.safeParse({
+          ...validPastedConfig,
+          approvedMailboxes: 5
+        }).success
+      ).toBe(false);
+
+      expect(
+        AutomationRunConfigSchema.safeParse({
+          ...validPastedConfig,
+          stopAfter: 5
+        }).success
+      ).toBe(false);
+    });
+
+    it('rejects pasted-existing when entries have conflicting duplicates', () => {
+      expect(
+        AutomationRunConfigSchema.safeParse({
+          ...validPastedConfig,
+          emailSource: {
+            mode: 'pasted-existing',
+            entries: [
+              { line: 1, email: 'a@example.com', capcutPassword: 'passA' },
+              { line: 2, email: 'A@example.com', capcutPassword: 'passB' }
+            ]
+          }
+        }).success
+      ).toBe(false);
+    });
+  });
+});

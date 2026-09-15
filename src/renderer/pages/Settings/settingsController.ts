@@ -502,3 +502,257 @@ export class SettingsController {
     this.listeners.clear();
   }
 }
+
+export interface TestConnectionOutcome {
+  service: KnownServiceName;
+  code: string;
+  message: string;
+}
+
+export class SettingsTestCoordinator {
+  private testTokens: Partial<Record<KnownServiceName, number>> = {};
+  private draftRevisions: Partial<Record<KnownServiceName, number>> = {};
+  private activeTesting: Partial<Record<KnownServiceName, boolean>> = {};
+  private activeService: KnownServiceName | null = null;
+  private currentResult: TestConnectionOutcome | null = null;
+  private currentEpoch: number = 0;
+  private listeners = new Set<() => void>();
+
+  constructor(private bridge: ISettingsBridge) {}
+
+  setEpoch(epoch: number): void {
+    this.currentEpoch = epoch;
+  }
+
+  getTesting(): Partial<Record<KnownServiceName, boolean>> {
+    return { ...this.activeTesting };
+  }
+
+  isServiceTesting(service: KnownServiceName): boolean {
+    return !!this.activeTesting[service];
+  }
+
+  getResult(): TestConnectionOutcome | null {
+    return this.currentResult;
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private notify(): void {
+    for (const listener of this.listeners) {
+      try {
+        listener();
+      } catch {
+        // observer isolation
+      }
+    }
+  }
+
+  invalidate(service: KnownServiceName): void {
+    this.activeService = service;
+    this.testTokens[service] = (this.testTokens[service] ?? 0) + 1;
+    this.draftRevisions[service] = (this.draftRevisions[service] ?? 0) + 1;
+    if (this.currentResult?.service === service) {
+      this.currentResult = null;
+    }
+    if (this.activeTesting[service]) {
+      this.activeTesting[service] = false;
+    }
+    this.notify();
+  }
+
+  invalidateAll(): void {
+    const services: KnownServiceName[] = ['gmail94', 'dongvanfb', 'kiotproxy', 'gologin', 'multilogin'];
+    for (const s of services) {
+      this.invalidate(s);
+    }
+  }
+
+  async testConnection(
+    serviceName: KnownServiceName,
+    controllerState: SettingsState,
+    epoch: number = this.currentEpoch
+  ): Promise<TestConnectionOutcome | null> {
+    if (this.activeTesting[serviceName]) {
+      return null;
+    }
+
+    this.activeService = serviceName;
+    const token = (this.testTokens[serviceName] ?? 0) + 1;
+    this.testTokens[serviceName] = token;
+    const revision = this.draftRevisions[serviceName] ?? 0;
+
+    const ownsResult = (): boolean =>
+      this.testTokens[serviceName] === token &&
+      (this.draftRevisions[serviceName] ?? 0) === revision &&
+      this.currentEpoch === epoch &&
+      this.activeService === serviceName;
+
+    this.activeTesting[serviceName] = true;
+    this.notify();
+
+    try {
+      if (!this.bridge.credentials?.test) {
+        const fallback: TestConnectionOutcome = {
+          service: serviceName,
+          code: 'ERR_BRIDGE_UNAVAILABLE',
+          message: 'Dịch vụ kiểm tra không khả dụng.',
+        };
+        if (ownsResult()) {
+          this.currentResult = fallback;
+          this.notify();
+        }
+        return fallback;
+      }
+
+      const status = controllerState.credentialStatuses[serviceName];
+      const simpleDraft =
+        serviceName !== 'multilogin'
+          ? (controllerState.drafts as unknown as Record<string, SimpleDraft>)[serviceName]
+          : undefined;
+      const multiloginDraft = controllerState.drafts.multilogin;
+
+      let draftSecret: string | undefined;
+      let mlDraft:
+        | { mode: 'token' | 'credentials'; automationToken?: string; email?: string; password?: string }
+        | undefined;
+
+      if (serviceName === 'multilogin') {
+        if (multiloginDraft.action === 'replace') {
+          if (multiloginDraft.auth.mode === 'token') {
+            if (!multiloginDraft.auth.automationToken?.trim()) {
+              const errOutcome: TestConnectionOutcome = {
+                service: serviceName,
+                code: 'CONFIG_ERROR',
+                message: 'Ô automation token đang trống. Vui lòng nhập token trước khi kiểm tra.',
+              };
+              if (ownsResult()) {
+                this.currentResult = errOutcome;
+                this.notify();
+              }
+              return errOutcome;
+            }
+            mlDraft = { mode: 'token', automationToken: multiloginDraft.auth.automationToken.trim() };
+          } else {
+            if (!multiloginDraft.auth.email?.trim() || !multiloginDraft.auth.password?.trim()) {
+              const errOutcome: TestConnectionOutcome = {
+                service: serviceName,
+                code: 'CONFIG_ERROR',
+                message: 'Vui lòng nhập đầy đủ Email và Mật khẩu Multilogin trước khi kiểm tra.',
+              };
+              if (ownsResult()) {
+                this.currentResult = errOutcome;
+                this.notify();
+              }
+              return errOutcome;
+            }
+            mlDraft = {
+              mode: 'credentials',
+              email: multiloginDraft.auth.email.trim(),
+              password: multiloginDraft.auth.password.trim(),
+            };
+          }
+        } else if (multiloginDraft.action === 'clear') {
+          const errOutcome: TestConnectionOutcome = {
+            service: serviceName,
+            code: 'CONFIG_ERROR',
+            message: 'Cấu hình Multilogin đã bị xóa (chưa lưu). Vui lòng nhập thông tin mới.',
+          };
+          if (ownsResult()) {
+            this.currentResult = errOutcome;
+            this.notify();
+          }
+          return errOutcome;
+        } else if (!status?.isConfigured) {
+          const errOutcome: TestConnectionOutcome = {
+            service: serviceName,
+            code: 'CONFIG_ERROR',
+            message: 'Chưa thiết lập thông tin Multilogin. Vui lòng nhập token hoặc email/mật khẩu.',
+          };
+          if (ownsResult()) {
+            this.currentResult = errOutcome;
+            this.notify();
+          }
+          return errOutcome;
+        }
+      } else {
+        if (simpleDraft?.action === 'replace') {
+          draftSecret = simpleDraft.value.trim();
+          if (!draftSecret) {
+            const errOutcome: TestConnectionOutcome = {
+              service: serviceName,
+              code: 'CONFIG_ERROR',
+              message: 'Ô nhập API key đang trống. Vui lòng nhập key trước khi kiểm tra.',
+            };
+            if (ownsResult()) {
+              this.currentResult = errOutcome;
+              this.notify();
+            }
+            return errOutcome;
+          }
+        } else if (simpleDraft?.action === 'clear') {
+          const errOutcome: TestConnectionOutcome = {
+            service: serviceName,
+            code: 'CONFIG_ERROR',
+            message: 'API key đã bị xóa (chưa lưu). Vui lòng nhập key mới trước khi kiểm tra.',
+          };
+          if (ownsResult()) {
+            this.currentResult = errOutcome;
+            this.notify();
+          }
+          return errOutcome;
+        } else if (!status?.isConfigured) {
+          const errOutcome: TestConnectionOutcome = {
+            service: serviceName,
+            code: 'CONFIG_ERROR',
+            message: 'Chưa thiết lập API key cho dịch vụ này. Vui lòng nhập key vào ô bên cạnh.',
+          };
+          if (ownsResult()) {
+            this.currentResult = errOutcome;
+            this.notify();
+          }
+          return errOutcome;
+        }
+      }
+
+      const payload = {
+        serviceName,
+        draftSecret,
+        multiloginDraft: mlDraft,
+      };
+
+      try {
+        const res = await this.bridge.credentials.test(payload);
+        if (!ownsResult()) return null;
+
+        const outcome: TestConnectionOutcome = res.success
+          ? { service: serviceName, code: res.data.code, message: res.data.message }
+          : { service: serviceName, code: res.error.code, message: res.error.message };
+
+        this.currentResult = outcome;
+        this.notify();
+        return outcome;
+      } catch {
+        if (!ownsResult()) return null;
+        const errOutcome: TestConnectionOutcome = {
+          service: serviceName,
+          code: 'ERR_PERSISTENCE_FAILED',
+          message: 'Không thể kiểm tra kết nối dịch vụ.',
+        };
+        this.currentResult = errOutcome;
+        this.notify();
+        return errOutcome;
+      }
+    } finally {
+      if (this.testTokens[serviceName] === token) {
+        this.activeTesting[serviceName] = false;
+        this.notify();
+      }
+    }
+  }
+}

@@ -145,8 +145,10 @@ export const DashboardPage: React.FC = () => {
             .map((account) => account.id);
 
     if (targetIds.length > 0) {
-      void controller.removeAccounts(targetIds).then(() => {
-        setRowSelection({});
+      void controller.removeAccounts(targetIds).then((committed) => {
+        if (committed) {
+          setRowSelection({});
+        }
       });
     }
   };

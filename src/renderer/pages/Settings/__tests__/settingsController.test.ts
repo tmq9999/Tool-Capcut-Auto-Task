@@ -1,11 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   SettingsController,
+  SettingsTestCoordinator,
   type ISettingsBridge,
   type MultiloginDraft,
 } from '../settingsController';
 import { DEFAULT_APP_SETTINGS } from '../../../../shared/settings/default-settings';
-import type { CredentialStatusDTO } from '../../../../shared/schemas/diagnostics.schema';
+import type { CredentialStatusDTO, SanitizedDiagnosticResult } from '../../../../shared/schemas/diagnostics.schema';
 import type { SettingsSaveRequestDTO } from '../../../../shared/schemas/settings-save.schema';
 import type { IpcEnvelope } from '../../../../shared/schemas/ipc-envelope.schema';
 
@@ -577,5 +578,215 @@ describe('T09: Settings hydration and committed boot prefs', () => {
   });
 });
 
+describe('SettingsTestCoordinator connection test draft isolation (G11)', () => {
+  function createTestDeferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
 
+  it('keeps B fail when A test resolves late (A pending -> edit B -> B test -> B fail -> late A success)', async () => {
+    const testSpy = vi.fn();
+    const { bridge, saveSpy } = createMockBridge();
+    bridge.credentials = { test: testSpy };
 
+    type TestReq = Parameters<NonNullable<NonNullable<ISettingsBridge['credentials']>['test']>>[0];
+    const deferredA = createTestDeferred<IpcEnvelope<SanitizedDiagnosticResult>>();
+    const deferredB = createTestDeferred<IpcEnvelope<SanitizedDiagnosticResult>>();
+
+    testSpy.mockImplementation((req: TestReq) => {
+      const service = typeof req === 'string' ? req : req.serviceName;
+      if (service === 'gmail94') return deferredA.promise;
+      if (service === 'kiotproxy') return deferredB.promise;
+      return Promise.reject(new Error('unknown service'));
+    });
+
+    const controller = new SettingsController(bridge);
+    await controller.load();
+    const coordinator = new SettingsTestCoordinator(bridge);
+    coordinator.setEpoch(1);
+
+    // 1. A test pending
+    const testAPromise = coordinator.testConnection('gmail94', controller.getState(), 1);
+    expect(coordinator.isServiceTesting('gmail94')).toBe(true);
+
+    // 2. Edit B
+    coordinator.invalidate('kiotproxy');
+    controller.setSimpleDraft('kiotproxy', { action: 'replace', value: 'new-proxy-key' });
+
+    // 3. B test
+    const testBPromise = coordinator.testConnection('kiotproxy', controller.getState(), 1);
+    expect(coordinator.isServiceTesting('kiotproxy')).toBe(true);
+
+    // 4. B fail
+    deferredB.resolve({
+      success: false,
+      error: { code: 'AUTH_FAILED', message: 'KiotProxy API key invalid' },
+    });
+    await testBPromise;
+
+    expect(coordinator.isServiceTesting('kiotproxy')).toBe(false);
+    expect(coordinator.getResult()).toEqual({
+      service: 'kiotproxy',
+      code: 'AUTH_FAILED',
+      message: 'KiotProxy API key invalid',
+    });
+
+    // 5. Late A success
+    deferredA.resolve({
+      success: true,
+      data: { code: 'OK', message: 'Gmail94 key healthy', timestamp: '2026-09-15T00:00:00.000Z' },
+    });
+    await testAPromise;
+
+    // Must KEEP B fail!
+    expect(coordinator.getResult()).toEqual({
+      service: 'kiotproxy',
+      code: 'AUTH_FAILED',
+      message: 'KiotProxy API key invalid',
+    });
+    expect(coordinator.isServiceTesting('gmail94')).toBe(false);
+
+    // Assert save was never called
+    expect(saveSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores A result when editing toward B without test', async () => {
+    const testSpy = vi.fn();
+    const { bridge } = createMockBridge();
+    bridge.credentials = { test: testSpy };
+
+    const deferredA = createTestDeferred<IpcEnvelope<SanitizedDiagnosticResult>>();
+    testSpy.mockReturnValueOnce(deferredA.promise);
+
+    const controller = new SettingsController(bridge);
+    await controller.load();
+    const coordinator = new SettingsTestCoordinator(bridge);
+    coordinator.setEpoch(1);
+
+    // A test pending
+    const testAPromise = coordinator.testConnection('gmail94', controller.getState(), 1);
+    expect(coordinator.isServiceTesting('gmail94')).toBe(true);
+
+    // Edit toward B without testing B
+    coordinator.invalidate('kiotproxy');
+    controller.setSimpleDraft('kiotproxy', { action: 'replace', value: 'proxy-key-1' });
+
+    // Late A success
+    deferredA.resolve({
+      success: true,
+      data: { code: 'OK', message: 'Gmail94 key healthy', timestamp: '2026-09-15T00:00:00.000Z' },
+    });
+    await testAPromise;
+
+    // Result should be ignored because focus switched to B
+    expect(coordinator.getResult()).toBeNull();
+  });
+
+  it('ignores A result when editing A draft while A test is pending', async () => {
+    const testSpy = vi.fn();
+    const { bridge } = createMockBridge();
+    bridge.credentials = { test: testSpy };
+
+    const deferredA = createTestDeferred<IpcEnvelope<SanitizedDiagnosticResult>>();
+    testSpy.mockReturnValueOnce(deferredA.promise);
+
+    const controller = new SettingsController(bridge);
+    await controller.load();
+    const coordinator = new SettingsTestCoordinator(bridge);
+    coordinator.setEpoch(1);
+
+    // A test pending
+    const testAPromise = coordinator.testConnection('gmail94', controller.getState(), 1);
+
+    // User edits A draft
+    coordinator.invalidate('gmail94');
+    controller.setSimpleDraft('gmail94', { action: 'replace', value: 'modified-key' });
+
+    // Late A success
+    deferredA.resolve({
+      success: true,
+      data: { code: 'OK', message: 'Old key was healthy', timestamp: '2026-09-15T00:00:00.000Z' },
+    });
+    await testAPromise;
+
+    // Ignored because A draft changed
+    expect(coordinator.getResult()).toBeNull();
+  });
+
+  it('ignores test result when effect epoch changes (unmount/reopen)', async () => {
+    const testSpy = vi.fn();
+    const { bridge } = createMockBridge();
+    bridge.credentials = { test: testSpy };
+
+    const deferredA = createTestDeferred<IpcEnvelope<SanitizedDiagnosticResult>>();
+    testSpy.mockReturnValueOnce(deferredA.promise);
+
+    const controller = new SettingsController(bridge);
+    await controller.load();
+    const coordinator = new SettingsTestCoordinator(bridge);
+    coordinator.setEpoch(1);
+
+    // Start test in epoch 1
+    const testAPromise = coordinator.testConnection('gmail94', controller.getState(), 1);
+
+    // Unmount / remount occurs -> epoch 2
+    coordinator.setEpoch(2);
+
+    deferredA.resolve({
+      success: true,
+      data: { code: 'OK', message: 'healthy', timestamp: '2026-09-15T00:00:00.000Z' },
+    });
+    await testAPromise;
+
+    expect(coordinator.getResult()).toBeNull();
+  });
+
+  it('rejects duplicate test invocation on same unchanged draft while pending', async () => {
+    const testSpy = vi.fn();
+    const { bridge } = createMockBridge();
+    bridge.credentials = { test: testSpy };
+
+    const deferred = createTestDeferred<IpcEnvelope<SanitizedDiagnosticResult>>();
+    testSpy.mockReturnValue(deferred.promise);
+
+    const controller = new SettingsController(bridge);
+    await controller.load();
+    const coordinator = new SettingsTestCoordinator(bridge);
+    coordinator.setEpoch(1);
+
+    const call1 = coordinator.testConnection('gmail94', controller.getState(), 1);
+    expect(coordinator.isServiceTesting('gmail94')).toBe(true);
+
+    // Call 2 on same unchanged draft
+    const call2 = coordinator.testConnection('gmail94', controller.getState(), 1);
+    expect(await call2).toBeNull();
+    expect(testSpy).toHaveBeenCalledTimes(1);
+
+    deferred.resolve({ success: true, data: { code: 'OK', message: 'ok', timestamp: '2026-09-15T00:00:00.000Z' } });
+    await call1;
+  });
+
+  it('safely handles IPC throw without unhandled rejection and without leaking secrets', async () => {
+    const testSpy = vi.fn().mockRejectedValueOnce(new Error('Network bridge failure with secret 123456'));
+    const { bridge } = createMockBridge();
+    bridge.credentials = { test: testSpy };
+
+    const controller = new SettingsController(bridge);
+    await controller.load();
+    const coordinator = new SettingsTestCoordinator(bridge);
+    coordinator.setEpoch(1);
+
+    const result = await coordinator.testConnection('gmail94', controller.getState(), 1);
+    expect(result).toEqual({
+      service: 'gmail94',
+      code: 'ERR_PERSISTENCE_FAILED',
+      message: 'Không thể kiểm tra kết nối dịch vụ.',
+    });
+    expect(coordinator.isServiceTesting('gmail94')).toBe(false);
+  });
+});

@@ -69,20 +69,39 @@ export const MIN_TRIAL_DAYS = 7;
  * Code chạy trong trang được truyền dưới dạng CHUỖI để tránh esbuild chèn
  * `__name` (đã gặp lỗi "__name is not defined" trước đây).
  */
-const READ_TRIAL = `(() => {
+export const READ_TRIAL = `(() => {
   var NL = String.fromCharCode(10);
-  var card = document.querySelector('[class*="subscriptionProductSection-pro"]');
-  if (!card) {
-    // Dự phòng: tìm thẻ nào có tên gói Pro và mẫu "for N days"
-    var all = [].slice.call(document.querySelectorAll('[class*="subscriptionProduct"]'));
-    for (var i = 0; i < all.length; i++) {
-      var t = all[i].innerText || '';
-      if (/\\bPro\\b/.test(t) && /for\\s+\\d+\\s+days?/i.test(t)) { card = all[i]; break; }
+  function visible(el) {
+    if (!el || el.closest('[hidden], [inert]')) return false;
+    var s = window.getComputedStyle ? window.getComputedStyle(el) : (el.style || {});
+    if (s && (s.display === 'none' || s.visibility === 'hidden' || s.visibility === 'collapse')) return false;
+    var rects = el.getClientRects ? el.getClientRects() : [];
+    if (rects.length > 0) {
+      var r = rects[0];
+      if (r.width > 0 && r.height > 0) return true;
     }
+    if (el.offsetWidth > 0 || el.offsetHeight > 0) return true;
+    var docBody = document.body;
+    var bodyHasLayout = docBody && ((docBody.getClientRects && docBody.getClientRects().length > 0) || docBody.offsetWidth > 0);
+    if (!bodyHasLayout) {
+      return true;
+    }
+    return false;
   }
-  if (!card) return { found: false };
 
-  var text = (card.innerText || '').split(NL).map(function (s) { return s.trim(); }).filter(Boolean);
+  var owners = Array.prototype.slice.call(
+    document.querySelectorAll('[class*="subscriptionModal-wrapper"]')
+  ).filter(visible);
+  if (owners.length !== 1) return { found: false, reason: 'PRICING_OWNER_UNKNOWN' };
+  var owner = owners[0];
+
+  var cards = Array.prototype.slice.call(
+    owner.querySelectorAll('[class*="subscriptionProductSection-pro"]')
+  ).filter(visible);
+  if (cards.length !== 1) return { found: false, reason: 'PRO_CARD_UNKNOWN' };
+  var card = cards[0];
+
+  var text = (card.innerText || card.textContent || '').split(NL).map(function (s) { return s.trim(); }).filter(Boolean);
   var joined = text.join(' | ');
 
   var dm = /for\\s+(\\d+)\\s+days?/i.exec(joined);
@@ -90,11 +109,11 @@ const READ_TRIAL = `(() => {
   var prices = text.filter(function (s) { return /[0-9][0-9,.]*\\s*[₫$]|^[₫$]/.test(s); });
 
   var btn = null;
-  var cands = [].slice.call(document.querySelectorAll('button, [role="button"]'));
+  var cands = Array.prototype.slice.call(owner.querySelectorAll('button, [role="button"]')).filter(visible);
   for (var j = 0; j < cands.length; j++) {
-    if (/start free trial|free trial/i.test(cands[j].innerText || '')) {
-      var r = cands[j].getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) { btn = true; break; }
+    if (/start free trial|free trial/i.test(cands[j].innerText || cands[j].textContent || '')) {
+      btn = true;
+      break;
     }
   }
 
@@ -202,7 +221,17 @@ export async function openUpgradeModal(
 
   for (const [sel, label] of entries) {
     const el = page.locator(sel).first();
-    if ((await el.count().catch(() => 0)) === 0) continue;
+    const count = await boundedDomRead(
+      () => el.count(),
+      'trial:entry-count',
+      1000,
+      signal
+    ).catch((error: unknown) => {
+      signal.throwIfAborted();
+      if (isDomReadTimeout(error)) throw error;
+      return 0;
+    });
+    if (count === 0) continue;
 
     // `[data-id=...]` là div rỗng bọc ngoài; click vào chính nó vẫn nổi bọt
     // xuống component React bên trong, nên dùng force thay vì đòi visible.
@@ -289,24 +318,36 @@ export async function checkProTrial(
   }
   signal.throwIfAborted();
   if (!surveyCleared) {
-    return fallback('Khảo sát onboarding vẫn che trang', await dump(page, 'upgrade_modal_missing'));
+    return fallback('Khảo sát onboarding vẫn che trang', await dump(page, 'upgrade_modal_missing', signal));
   }
 
   if (!(await openUpgradeModal(page, log, ui, signal))) {
-    return fallback('không mở được modal nâng cấp', await dump(page, 'upgrade_modal_missing'));
+    return fallback('không mở được modal nâng cấp', await dump(page, 'upgrade_modal_missing', signal));
   }
 
-  const raw = (await page.evaluate(READ_TRIAL).catch(() => null)) as {
+  signal.throwIfAborted();
+  const raw = (await boundedDomRead(
+    () => page.evaluate(READ_TRIAL),
+    'trial:pro-card-read',
+    5000,
+    signal
+  ).catch((error: unknown) => {
+    signal.throwIfAborted();
+    if (isDomReadTimeout(error)) throw error;
+    return null;
+  })) as {
     found?: boolean;
     days?: number;
     listPrice?: string;
     trialPrice?: string;
     hasStartButton?: boolean;
     raw?: string;
+    reason?: string;
   } | null;
+  signal.throwIfAborted();
 
   if (!raw || !raw.found) {
-    return fallback('không thấy thẻ gói Pro trong modal', await dump(page, 'pro_card_missing'));
+    return fallback('không thấy thẻ gói Pro trong modal', await dump(page, 'pro_card_missing', signal));
   }
 
   const days = Number(raw.days ?? 0);

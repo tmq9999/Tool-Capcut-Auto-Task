@@ -23,6 +23,7 @@ export interface EmailProviderPanelProps {
   testResult: { service: string; code: string; message: string } | null;
   customEmail: CustomEmailSettingsDTO;
   onCustomEmailChange: (patch: Partial<CustomEmailSettingsDTO>) => void;
+  isTesting?: Partial<Record<KnownServiceName, boolean>>;
 }
 
 export const EmailProviderPanel: React.FC<EmailProviderPanelProps> = ({
@@ -33,6 +34,7 @@ export const EmailProviderPanel: React.FC<EmailProviderPanelProps> = ({
   testResult,
   customEmail,
   onCustomEmailChange,
+  isTesting,
 }) => {
   const gmailStatus = credentialStatuses.gmail94;
   const dongvanStatus = credentialStatuses.dongvanfb;
@@ -118,9 +120,10 @@ export const EmailProviderPanel: React.FC<EmailProviderPanelProps> = ({
               variant="surface"
               size="md"
               onClick={() => onTestConnection('gmail94')}
+              disabled={isTesting?.gmail94}
               className="whitespace-nowrap shrink-0"
             >
-              Kiểm tra API
+              {isTesting?.gmail94 ? 'Đang kiểm tra...' : 'Kiểm tra API'}
             </Button>
             {renderStatusBadge(gmailStatus)}
           </div>
@@ -194,9 +197,10 @@ export const EmailProviderPanel: React.FC<EmailProviderPanelProps> = ({
               variant="surface"
               size="md"
               onClick={() => onTestConnection('dongvanfb')}
+              disabled={isTesting?.dongvanfb}
               className="whitespace-nowrap shrink-0"
             >
-              Kiểm tra API
+              {isTesting?.dongvanfb ? 'Đang kiểm tra...' : 'Kiểm tra API'}
             </Button>
             {renderStatusBadge(dongvanStatus)}
           </div>

@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { ExportDialog } from '@renderer/pages/Accounts/ExportDialog';
 import { TaskProgressDialog } from '@renderer/pages/Accounts/TaskProgressDialog';
 import { EditAccountDrawer } from '@renderer/pages/Accounts/EditAccountDrawer';
+import { AutomationConfigGrid } from '@renderer/pages/Dashboard/AutomationConfigGrid';
+import { DEFAULT_AUTOMATION_CONFIG, type AutomationConfigState } from '@renderer/pages/Dashboard/automationConfig';
 import '@renderer/styles/index.css';
 import type { AccountExportRequestDTO } from '@shared/schemas/account-export.schema';
 import type { ExportOutcome } from '@renderer/pages/Accounts/accountsController';
@@ -40,6 +42,7 @@ export function FixtureApp() {
 
   const [editOpen, setEditOpen] = useState(false);
   const [savedAccount, setSavedAccount] = useState<Account | null>(null);
+  const [automationConfig, setAutomationConfig] = useState<AutomationConfigState>(DEFAULT_AUTOMATION_CONFIG);
   const legacyAccount: Account = {
     id: 'acc-legacy-1',
     email: 'legacy@domain.test',
@@ -275,6 +278,22 @@ export function FixtureApp() {
           setEditOpen(false);
         }}
       />
+
+      <div className="pt-4 border-t border-panel-border mt-4" data-testid="dashboard-config-fixture">
+        <h2 className="text-sm font-semibold mb-2">Dashboard Config Mounted Test</h2>
+        <AutomationConfigGrid
+          config={automationConfig}
+          onChange={(patch) => setAutomationConfig((prev) => ({ ...prev, ...patch }))}
+          emailProviders={[
+            { provider: 'gmail94', isConfigured: true, apiKey: 'KEY-GMAIL94', maskedHint: '••••••••' }
+          ]}
+          customEmail={{
+            domain: 'custom.test',
+            apiBaseUrl: 'http://custom.test',
+            senderFilter: ''
+          }}
+        />
+      </div>
     </div>
   );
 }

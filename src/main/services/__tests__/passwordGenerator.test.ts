@@ -59,4 +59,10 @@ describe('generateCapcutPassword', () => {
     const generated = new Set(Array.from({ length: 20 }, () => generateCapcutPassword(config)));
     expect(generated.size).toBeGreaterThan(1);
   });
+
+  it('throws PASSWORD_GENERATION_NOT_ALLOWED when invoked in per-account mode', () => {
+    expect(() => generateCapcutPassword({ mode: 'per-account' })).toThrow(
+      'PASSWORD_GENERATION_NOT_ALLOWED'
+    );
+  });
 });

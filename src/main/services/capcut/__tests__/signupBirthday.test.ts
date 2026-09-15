@@ -16,6 +16,11 @@ interface BirthdayFixtureOwnershipControls {
   optionCountGate?: Promise<void>;
   onOptionCount?: () => void;
   monthAriaControls?: string | null;
+  dayAriaControls?: string | null;
+  monthTriggerId?: string | null;
+  dayTriggerId?: string | null;
+  unrelatedPanelVisible?: boolean;
+  hasMonthPanel?: boolean;
   ariaControlsError?: Error;
   multipleVisiblePanels?: boolean;
 }
@@ -185,6 +190,10 @@ function createBirthdayTestPage(initialConfig: Partial<BirthdayFixtureState> = {
         if (state.monthAriaControls !== undefined) return state.monthAriaControls;
         return 'birthday-month-dropdown';
       }
+      if (attr === 'id') {
+        if (state.monthTriggerId !== undefined) return state.monthTriggerId;
+        return 'birthday-month-trigger-id';
+      }
       return null;
     }),
     click: vi.fn(async () => {
@@ -204,7 +213,14 @@ function createBirthdayTestPage(initialConfig: Partial<BirthdayFixtureState> = {
     first: () => daySelectorLoc,
     isVisible: vi.fn(async () => true),
     getAttribute: vi.fn(async (attr: string) => {
-      if (attr === 'aria-controls') return 'birthday-day-dropdown';
+      if (attr === 'aria-controls') {
+        if (state.dayAriaControls !== undefined) return state.dayAriaControls;
+        return 'birthday-day-dropdown';
+      }
+      if (attr === 'id') {
+        if (state.dayTriggerId !== undefined) return state.dayTriggerId;
+        return 'birthday-day-trigger-id';
+      }
       return null;
     }),
     click: vi.fn(async () => {
@@ -307,6 +323,46 @@ function createBirthdayTestPage(initialConfig: Partial<BirthdayFixtureState> = {
           last: () => daySelectorLoc,
           isVisible: vi.fn(async () => true)
         };
+      }
+      if (sel.includes('aria-labelledby')) {
+        if (state.multipleVisiblePanels) {
+          const panel = createContainerLocator('month');
+          return {
+            ...panel,
+            count: vi.fn(async () => 2),
+            first: () => panel
+          };
+        }
+        const match = /aria-labelledby~="([^"]+)"/.exec(sel);
+        const token = match ? match[1].replace(/\\/g, '') : '';
+        const currentTriggerId = state.open === 'day'
+          ? (state.dayTriggerId !== undefined ? state.dayTriggerId : 'birthday-day-trigger-id')
+          : (state.monthTriggerId !== undefined ? state.monthTriggerId : 'birthday-month-trigger-id');
+        if (state.hasMonthPanel !== false && token && currentTriggerId && token === currentTriggerId) {
+          return createContainerLocator(state.open === 'day' ? 'day' : 'month');
+        }
+        const emptyLoc: Record<string, unknown> = {
+          ...dummyLoc,
+          count: vi.fn(async () => 0),
+          first: () => emptyLoc,
+          isVisible: vi.fn(async () => false)
+        };
+        return emptyLoc;
+      }
+      if (state.unrelatedPanelVisible && (sel.includes('.lv-select-dropdown') || sel.includes('[role="listbox"]') || sel.includes('.semi-select-option-list')) && !sel.includes('option')) {
+        const unrelatedLoc: Record<string, unknown> = {
+          page: () => page,
+          first: () => unrelatedLoc,
+          count: vi.fn(async () => 1),
+          isVisible: vi.fn(async () => true),
+          locator: (childSel: string) => {
+            if (childSel.includes('lv-select-option') || childSel.includes('[role="option"]')) {
+              return createOptionsListLocator([{ text: 'June', value: 6, owner: 'other', visible: true }]);
+            }
+            return dummyLoc;
+          }
+        };
+        return unrelatedLoc;
       }
       if (state.multipleVisiblePanels && (sel.includes('.lv-select-dropdown') || sel.includes('[role="listbox"]') || sel.includes('.semi-select-option-list'))) {
         const panel = createContainerLocator('month');
@@ -742,6 +798,135 @@ describe('F07-A: Signup Birthday Form Selection & Readback Verification', () => 
 
       expect(state.optionClicks).toContain('month:July');
       expect(state.optionClicks).toContain('day:25');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('R05 (F03): absent aria-controls + absent triggerId throws SIGNUP_BIRTHDAY_MONTH_OWNER_MISSING without clicking options', async () => {
+    const { page, state } = createBirthdayTestPage({
+      monthAriaControls: null,
+      monthTriggerId: null,
+    });
+    const abort = new AbortController();
+    const ui = createDirectUiInteraction(abort.signal);
+
+    vi.useFakeTimers();
+    try {
+      const running = signupCapcut(page, {} as BrowserContext, {
+        email: 'test@example.com',
+        password: 'Password123!'
+      }, {
+        ui,
+        signal: abort.signal,
+        birthday: intendedBirthday,
+        log: () => {}
+      });
+
+      const assertion = expect(running).rejects.toThrow('SIGNUP_BIRTHDAY_MONTH_OWNER_MISSING');
+      await vi.advanceTimersByTimeAsync(30000);
+      await assertion;
+
+      expect(state.optionClicks.length).toBe(0);
+      expect(state.continueClicks).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('R06 (F03): absent aria-controls + preexisting unrelated listbox panel throws SIGNUP_BIRTHDAY_MONTH_OWNER_MISSING when triggerId does not match', async () => {
+    const { page, state } = createBirthdayTestPage({
+      monthAriaControls: null,
+      monthTriggerId: 'birthday-month-trigger-id',
+      hasMonthPanel: false,
+      unrelatedPanelVisible: true,
+    });
+    const abort = new AbortController();
+    const ui = createDirectUiInteraction(abort.signal);
+
+    vi.useFakeTimers();
+    try {
+      const running = signupCapcut(page, {} as BrowserContext, {
+        email: 'test@example.com',
+        password: 'Password123!'
+      }, {
+        ui,
+        signal: abort.signal,
+        birthday: intendedBirthday,
+        log: () => {}
+      });
+
+      const assertion = expect(running).rejects.toThrow('SIGNUP_BIRTHDAY_MONTH_OWNER_MISSING');
+      await vi.advanceTimersByTimeAsync(30000);
+      await assertion;
+
+      expect(state.optionClicks.length).toBe(0);
+      expect(state.continueClicks).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('R07 (F03): absent aria-controls + panel matched via aria-labelledby containing triggerId succeeds', async () => {
+    const { page, state } = createBirthdayTestPage({
+      monthAriaControls: null,
+      monthTriggerId: 'birthday-month-trigger-id',
+      dayAriaControls: null,
+      dayTriggerId: 'birthday-day-trigger-id',
+    });
+    const abort = new AbortController();
+    const ui = createDirectUiInteraction(abort.signal);
+
+    vi.useFakeTimers();
+    try {
+      const running = signupCapcut(page, {} as BrowserContext, {
+        email: 'test@example.com',
+        password: 'Password123!'
+      }, {
+        ui,
+        signal: abort.signal,
+        birthday: intendedBirthday,
+        log: () => {}
+      });
+
+      const assertion = expect(running).rejects.toThrow('AFTER_BIRTHDAY_CONTINUE_SENTINEL');
+      await vi.advanceTimersByTimeAsync(30000);
+      await assertion;
+
+      expect(state.selectedMonth).toBe(7);
+      expect(state.selectedDay).toBe(25);
+      expect(state.continueClicks).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('R08 (F03): absent aria-controls + multiple panels matching triggerId throws SIGNUP_BIRTHDAY_MONTH_OWNER_AMBIGUOUS', async () => {
+    const { page, state } = createBirthdayTestPage({
+      monthAriaControls: null,
+      monthTriggerId: 'birthday-month-trigger-id',
+      multipleVisiblePanels: true,
+    });
+    const abort = new AbortController();
+    const ui = createDirectUiInteraction(abort.signal);
+
+    vi.useFakeTimers();
+    try {
+      const running = signupCapcut(page, {} as BrowserContext, {
+        email: 'test@example.com',
+        password: 'Password123!'
+      }, {
+        ui,
+        signal: abort.signal,
+        birthday: intendedBirthday,
+        log: () => {}
+      });
+
+      const assertion = expect(running).rejects.toThrow('SIGNUP_BIRTHDAY_MONTH_OWNER_AMBIGUOUS');
+      await vi.advanceTimersByTimeAsync(30000);
+      await assertion;
+
+      expect(state.continueClicks).toBe(0);
     } finally {
       vi.useRealTimers();
     }

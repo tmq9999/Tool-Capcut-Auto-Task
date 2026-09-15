@@ -72,23 +72,60 @@ describe('DEFAULT_AUTOMATION_CONFIG', () => {
 });
 
 describe('toRunConfig', () => {
-  it('preserves manual textarea positions so validation reports original line numbers', () => {
+  it('maps manual mode to pasted-existing and per-account with parsed entries', () => {
     const result = toRunConfig(state({
-      emailList: 'good@example.com|pw\n\nnot-an-email\nlast@example.com\n'
+      emailSourceMode: 'manual',
+      emailList: 'User1@gmail.com|pass1\nuser2@gmail.com|pass2\n'
     }));
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.config.emailSource).toEqual({
-      mode: 'manual',
+      mode: 'pasted-existing',
       entries: [
-        'good@example.com|pw',
-        '',
-        'not-an-email',
-        'last@example.com',
-        ''
+        { line: 1, email: 'User1@gmail.com', capcutPassword: 'pass1' },
+        { line: 2, email: 'user2@gmail.com', capcutPassword: 'pass2' }
       ]
     });
+    expect(result.config.password).toEqual({
+      mode: 'per-account'
+    });
+  });
+
+  it('rejects manual mode with friendly message and line numbers if pasted text contains format issues', () => {
+    const result = toRunConfig(state({
+      emailSourceMode: 'manual',
+      emailList: 'user1@gmail.com|pass1\nnot-an-email\nuser2@gmail.com|pass2'
+    }));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain('Dòng 2');
+    expect(result.message).toContain("thiếu dấu '|'");
+  });
+
+  it('rejects manual mode if same email has conflicting passwords', () => {
+    const result = toRunConfig(state({
+      emailSourceMode: 'manual',
+      emailList: 'user1@gmail.com|passA\nuser1@gmail.com|passB'
+    }));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain('xung đột với dòng');
+  });
+
+  it('does not reject manual mode when passwordMode is custom but customPassword is blank', () => {
+    const result = toRunConfig(state({
+      emailSourceMode: 'manual',
+      emailList: 'user1@gmail.com|pass1',
+      passwordMode: 'custom',
+      customPassword: ''
+    }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.config.password).toEqual({ mode: 'per-account' });
   });
 
   it('maps an API run to the selected email provider without an OTP slug', () => {
@@ -177,9 +214,9 @@ describe('toRunConfig', () => {
     });
   });
 
-  it('carries the password policy through', () => {
+  it('carries the password policy through for api runs', () => {
     const result = toRunConfig(state({
-      emailList: 'a@x.com|p',
+      emailSourceMode: 'api',
       passwordMode: 'random',
       passwordLength: 16,
       includeUppercase: true,
@@ -200,9 +237,9 @@ describe('toRunConfig', () => {
 });
 
 describe('toRunConfig validation', () => {
-  it('rejects a custom password with no value', () => {
+  it('rejects a custom password with no value when using api mode', () => {
     const result = toRunConfig(state({
-      emailList: 'a@x.com|p',
+      emailSourceMode: 'api',
       passwordMode: 'custom',
       customPassword: '   '
     }));
@@ -212,9 +249,9 @@ describe('toRunConfig validation', () => {
     expect(result.message).toContain('mật khẩu');
   });
 
-  it('accepts a custom password once a value is entered', () => {
+  it('accepts a custom password once a value is entered when using api mode', () => {
     const result = toRunConfig(state({
-      emailList: 'a@x.com|p',
+      emailSourceMode: 'api',
       passwordMode: 'custom',
       customPassword: 'Str0ng!Pass'
     }));

@@ -2,6 +2,13 @@ import { z } from 'zod';
 import type {
   AutomationRunConfigDTO
 } from '../../shared/schemas/automation.schema';
+import type {
+  PastedCapcutCredential
+} from '../../shared/schemas/pasted-capcut.schema';
+import {
+  normalizePastedCapcutEntries,
+  formatPastedCapcutIssues
+} from '../../shared/schemas/pasted-capcut.schema';
 import type { EmailSourceProvider } from '../../shared/schemas/provider.schema';
 import { ProviderError } from '../providers/ProviderError';
 import type { ObservationScope } from '../providers/ObservedHttpClient';
@@ -17,6 +24,15 @@ import type {
 } from './EmailPurchaseService';
 
 export type WorkSourceKind = 'finite' | 'continuous';
+
+export interface PastedExistingWorkItem {
+  kind: 'pasted-existing';
+  sourceId: string;
+  email: string;
+  emailProvider: 'manual';
+  capcutPassword: string;
+  line: number;
+}
 
 export type AutomationWorkItem =
   | {
@@ -36,7 +52,8 @@ export type AutomationWorkItem =
       email: string;
       emailProvider: string;
       capcutPassword: string;
-    };
+    }
+  | PastedExistingWorkItem;
 
 export interface SourceReadiness {
   workerTarget: number;
@@ -181,6 +198,60 @@ class ManualWorkSource implements AutomationWorkSource {
   purchaseStats(): BillablePurchaseStats { return noPurchases(); }
 }
 
+class PastedExistingWorkSource implements AutomationWorkSource {
+  readonly kind = 'finite' as const;
+  private queue: PastedExistingWorkItem[] = [];
+
+  constructor(
+    private readonly entries: PastedCapcutCredential[],
+    private readonly limit = 0
+  ) {}
+
+  async prepare(initialConcurrency: number, _signal?: AbortSignal): Promise<SourceReadiness> {
+    const normalized = normalizePastedCapcutEntries(this.entries);
+    if (normalized.issues.length > 0) {
+      throw new ProviderError(
+        'CONFIG_ERROR',
+        formatPastedCapcutIssues(normalized.issues)
+      );
+    }
+    if (normalized.entries.length === 0) {
+      throw new ProviderError('CONFIG_ERROR', 'Danh sách email thủ công đang trống.');
+    }
+
+    this.queue = normalized.entries.map((entry) => ({
+      kind: 'pasted-existing',
+      sourceId: 'pasted:' + entry.line,
+      email: entry.email,
+      emailProvider: 'manual',
+      capcutPassword: entry.capcutPassword,
+      line: entry.line
+    }));
+
+    if (this.limit > 0) {
+      this.queue = this.queue.slice(0, this.limit);
+    }
+
+    return { workerTarget: Math.min(initialConcurrency, this.queue.length) };
+  }
+
+  async next(_workerId: string, signal?: AbortSignal): Promise<AutomationWorkItem | null> {
+    if (signal?.aborted) return null;
+    return this.queue.shift() ?? null;
+  }
+
+  commit(): void {}
+  release(): void {}
+
+  purchaseStats(): BillablePurchaseStats {
+    return noPurchases();
+  }
+
+  isExhausted(): boolean {
+    return this.queue.length === 0;
+  }
+}
+
 class ContinuousEmailWorkSource implements AutomationWorkSource {
   readonly kind = 'continuous' as const;
   private session: EmailAcquisitionSession | null = null;
@@ -302,6 +373,9 @@ export function createAutomationWorkSourceFactory(
       }
       if (config.emailSource.mode === 'manual') {
         return new ManualWorkSource(config.emailSource.entries, config.mailLimit ?? 0);
+      }
+      if (config.emailSource.mode === 'pasted-existing') {
+        return new PastedExistingWorkSource(config.emailSource.entries, config.mailLimit ?? 0);
       }
       const provider: EmailSourceProvider =
         config.emailSource.mode === 'custom'

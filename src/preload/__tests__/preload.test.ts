@@ -54,7 +54,7 @@ describe('Preload Bridge (Task 2.1.3 RED)', () => {
     expect(typeof bridge.platform).toBe('string');
     expect(bridge.platform.length).toBeGreaterThan(0);
     expect(typeof bridge.version).toBe('string');
-    expect(bridge.version).toBe('3.0.3');
+    expect(bridge.version).toBe('3.0.4');
     expect(typeof bridge.ping).toBe('function');
 
     expect(bridge.settings).toBeDefined();

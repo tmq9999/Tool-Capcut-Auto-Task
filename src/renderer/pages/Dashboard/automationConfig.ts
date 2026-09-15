@@ -11,6 +11,10 @@ import {
   AutomationConfigSettingsSchema,
   type AutomationConfigSettingsDTO
 } from '../../../shared/schemas/settings.schema';
+import {
+  parsePastedCapcutText,
+  formatPastedCapcutIssues
+} from '../../../shared/schemas/pasted-capcut.schema';
 
 /**
  * UI-shaped automation configuration. The Dashboard panels edit this directly;
@@ -122,18 +126,36 @@ function splitLines(value: string): string[] {
  * instead of throwing, so the Dashboard can show it inline.
  */
 export function toRunConfig(state: AutomationConfigState): RunConfigResult {
-  const manualEntries = state.emailList.split(/\r?\n/);
-  const hasManualEntry = manualEntries.some(
-    (line) => line.trim().length > 0
-  );
+  let parsedPastedEntries: Array<{ email: string; capcutPassword: string }> = [];
 
-  if (state.emailSourceMode === 'manual' && !hasManualEntry) {
-    return {
-      ok: false,
-      message:
-        'Hãy nhập danh sách email theo định dạng email|password, ' +
-        'hoặc chuyển sang chế độ API.'
-    };
+  if (state.emailSourceMode === 'manual') {
+    if (state.emailList.trim().length === 0) {
+      return {
+        ok: false,
+        message:
+          'Hãy nhập danh sách tài khoản theo định dạng email|mật khẩu CapCut, ' +
+          'hoặc chuyển sang chế độ API.'
+      };
+    }
+
+    const parsed = parsePastedCapcutText(state.emailList);
+    if (parsed.issues.length > 0) {
+      return {
+        ok: false,
+        message: formatPastedCapcutIssues(parsed.issues)
+      };
+    }
+
+    if (parsed.entries.length === 0) {
+      return {
+        ok: false,
+        message:
+          'Hãy nhập danh sách tài khoản theo định dạng email|mật khẩu CapCut, ' +
+          'hoặc chuyển sang chế độ API.'
+      };
+    }
+
+    parsedPastedEntries = parsed.entries;
   }
 
   if (state.emailSourceMode === 'custom') {
@@ -143,7 +165,11 @@ export function toRunConfig(state: AutomationConfigState): RunConfigResult {
     };
   }
 
-  if (state.passwordMode === 'custom' && state.customPassword.trim().length === 0) {
+  if (
+    state.emailSourceMode !== 'manual' &&
+    state.passwordMode === 'custom' &&
+    state.customPassword.trim().length === 0
+  ) {
     return { ok: false, message: 'Hãy nhập mật khẩu CapCut khi dùng chế độ tự đặt mật khẩu.' };
   }
 
@@ -165,7 +191,7 @@ export function toRunConfig(state: AutomationConfigState): RunConfigResult {
       // Không gửi `service`: slug OTP là hằng của site (`CAPCUT_OTP_SERVICE`) và
       // do main process quyết, nên giá trị cũ trong app_settings không theo vào.
       ? { mode: 'api' as const, provider: state.emailApiProvider }
-      : { mode: 'manual' as const, entries: manualEntries },
+      : { mode: 'pasted-existing' as const, entries: parsedPastedEntries },
     /**
      * Vùng CHỈ đi kèm chế độ proxy key, và `random` thì không sinh khoá `region`
      * (để KiotProxy tự chọn — đúng đường đang chạy được). Proxy dán tay
@@ -178,22 +204,24 @@ export function toRunConfig(state: AutomationConfigState): RunConfigResult {
           ...(state.proxyRegion === 'random' ? {} : { region: state.proxyRegion })
         }
       : { mode: 'direct' as const, entries: splitLines(state.proxyList) },
-    password: state.passwordMode === 'custom'
-      ? {
-          mode: 'custom' as const,
-          value: state.customPassword.trim(),
-          length: state.passwordLength,
-          uppercase: state.includeUppercase,
-          numbers: state.includeNumbers,
-          special: state.includeSpecial
-        }
-      : {
-          mode: 'random' as const,
-          length: state.passwordLength,
-          uppercase: state.includeUppercase,
-          numbers: state.includeNumbers,
-          special: state.includeSpecial
-        },
+    password: state.emailSourceMode === 'manual'
+      ? { mode: 'per-account' as const }
+      : state.passwordMode === 'custom'
+        ? {
+            mode: 'custom' as const,
+            value: state.customPassword.trim(),
+            length: state.passwordLength,
+            uppercase: state.includeUppercase,
+            numbers: state.includeNumbers,
+            special: state.includeSpecial
+          }
+        : {
+            mode: 'random' as const,
+            length: state.passwordLength,
+            uppercase: state.includeUppercase,
+            numbers: state.includeNumbers,
+            special: state.includeSpecial
+          },
     testDurationMs: DEFAULT_TEST_RUN_DURATION_MS
   };
 

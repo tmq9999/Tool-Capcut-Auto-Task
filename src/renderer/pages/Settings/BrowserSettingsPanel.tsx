@@ -27,6 +27,7 @@ export interface BrowserSettingsPanelProps {
   onSetMultiloginDraft: (draft: MultiloginDraft) => void;
   onTestConnection: (service: KnownServiceName) => void;
   testResult: { service: string; code: string; message: string } | null;
+  isTesting?: Partial<Record<KnownServiceName, boolean>>;
 }
 
 export const BrowserSettingsPanel: React.FC<BrowserSettingsPanelProps> = ({
@@ -38,6 +39,7 @@ export const BrowserSettingsPanel: React.FC<BrowserSettingsPanelProps> = ({
   onSetMultiloginDraft,
   onTestConnection,
   testResult,
+  isTesting,
 }) => {
   const [multiloginMode, setMultiloginMode] = useState<'token' | 'credentials'>('token');
   const [multiloginEmail, setMultiloginEmail] = useState('');
@@ -242,9 +244,10 @@ export const BrowserSettingsPanel: React.FC<BrowserSettingsPanelProps> = ({
                     variant="surface"
                     size="md"
                     onClick={() => onTestConnection('gologin')}
+                    disabled={isTesting?.gologin}
                     className="whitespace-nowrap shrink-0"
                   >
-                    Kiểm tra API
+                    {isTesting?.gologin ? 'Đang kiểm tra...' : 'Kiểm tra API'}
                   </Button>
                 </div>
               </div>
@@ -390,8 +393,9 @@ export const BrowserSettingsPanel: React.FC<BrowserSettingsPanelProps> = ({
                   variant="surface"
                   size="md"
                   onClick={() => onTestConnection('multilogin')}
+                  disabled={isTesting?.multilogin}
                 >
-                  Kiểm tra kết nối
+                  {isTesting?.multilogin ? 'Đang kiểm tra...' : 'Kiểm tra kết nối'}
                 </Button>
               </div>
 

@@ -429,4 +429,67 @@ describe('AutomationWorkSource', () => {
 
     await expect(source2.prepare(1, new AbortController().signal)).rejects.toThrow();
   });
+
+  describe('PastedExistingWorkSource', () => {
+    it('emits login-only work items without opening a mailbox session', async () => {
+      const source = createAutomationWorkSourceFactory(fakeEmailService).create({
+        ...CONFIG,
+        emailSource: {
+          mode: 'pasted-existing',
+          entries: [
+            { line: 1, email: 'a@example.test', capcutPassword: ' A|B ' },
+            { line: 2, email: 'b@example.test', capcutPassword: 'P2' }
+          ]
+        },
+        password: { mode: 'per-account' },
+        mailLimit: 1,
+        maxBillablePurchases: 0
+      }, 'run-paste');
+      const signal = new AbortController().signal;
+      expect(await source.prepare(10, signal)).toEqual({ workerTarget: 1 });
+      expect(await source.next('worker-1', signal)).toMatchObject({
+        kind: 'pasted-existing',
+        sourceId: 'pasted:1',
+        email: 'a@example.test',
+        emailProvider: 'manual',
+        capcutPassword: ' A|B ',
+        line: 1
+      });
+      expect(await source.next('worker-2', signal)).toBeNull();
+      expect(fakeEmailService.openCalls).toHaveLength(0);
+      expect(source.purchaseStats()).toEqual({ budget: 0, attempted: 0, confirmed: 0, ambiguous: 0 });
+    });
+
+    it('rejects during prepare if entries contain conflicting duplicate passwords', async () => {
+      const source = createAutomationWorkSourceFactory(fakeEmailService).create({
+        ...CONFIG,
+        emailSource: {
+          mode: 'pasted-existing',
+          entries: [
+            { line: 1, email: 'a@example.test', capcutPassword: 'pass1' },
+            { line: 2, email: 'A@example.test', capcutPassword: 'pass2' }
+          ]
+        },
+        password: { mode: 'per-account' },
+        maxBillablePurchases: 0
+      }, 'run-conflict');
+      await expect(source.prepare(2, new AbortController().signal)).rejects.toThrow();
+    });
+
+    it('returns null on next when signal is aborted', async () => {
+      const source = createAutomationWorkSourceFactory(fakeEmailService).create({
+        ...CONFIG,
+        emailSource: {
+          mode: 'pasted-existing',
+          entries: [{ line: 1, email: 'a@example.test', capcutPassword: 'p1' }]
+        },
+        password: { mode: 'per-account' },
+        maxBillablePurchases: 0
+      }, 'run-abort');
+      const controller = new AbortController();
+      await source.prepare(2, controller.signal);
+      controller.abort();
+      expect(await source.next('worker-1', controller.signal)).toBeNull();
+    });
+  });
 });

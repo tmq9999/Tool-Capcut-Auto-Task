@@ -1,8 +1,9 @@
+import vm from 'node:vm';
 import { describe, it, expect, vi } from 'vitest';
 import type { BrowserContext, Page, Locator } from 'playwright-core';
 
 import { createDirectUiInteraction } from '../uiInteractionScheduler';
-import { checkProTrial, isEligible, MIN_TRIAL_DAYS, type TrialInfo } from '../trial';
+import { checkProTrial, isEligible, MIN_TRIAL_DAYS, READ_TRIAL, type TrialInfo } from '../trial';
 import { DomReadTimeoutError } from '../cancellation';
 
 vi.mock('../diag', () => ({ dump: vi.fn(async () => 'trial-read-dump') }));
@@ -153,6 +154,275 @@ describe('checkProTrial DOM boundary', () => {
       hasStartButton: true,
     });
     expect(isEligible(result)).toBe(true);
+  });
+
+  it('R03 (F02): stops during the actual Pro-card read when AbortSignal is aborted', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const reason = new Error('STOP_DURING_PRO_CARD_READ');
+    let entered = false;
+    let resolveRead!: (value: unknown) => void;
+    const page = trialPage(null);
+    vi.mocked(page.evaluate).mockImplementation(() => {
+      entered = true;
+      return new Promise((resolve) => {
+        resolveRead = resolve;
+      });
+    });
+    const pending = checkProTrial(
+      page,
+      {} as BrowserContext,
+      () => {},
+      createDirectUiInteraction(controller.signal),
+      controller.signal
+    );
+    let settled = false;
+    let rejection: unknown;
+    void pending.then(
+      () => {
+        settled = true;
+      },
+      (error) => {
+        settled = true;
+        rejection = error;
+      }
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(entered).toBe(true);
+      controller.abort(reason);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(true);
+      expect(rejection).toBe(reason);
+    } finally {
+      controller.abort(reason);
+      resolveRead?.({ found: true, days: 7 });
+      await Promise.allSettled([pending]);
+      vi.useRealTimers();
+    }
+  });
+
+  describe('R04 (F02): evaluates actual READ_TRIAL on DOM fixtures with pricing owner scoping', () => {
+    interface MockNode {
+      className: string;
+      style: Record<string, string>;
+      hidden?: boolean;
+      inert?: boolean;
+      innerText: string;
+      textContent: string;
+      tagName: string;
+      children: MockNode[];
+      parent: MockNode | null;
+      rect: { width: number; height: number };
+    }
+
+    function makeMockNode(opts: {
+      className?: string;
+      style?: Record<string, string>;
+      hidden?: boolean;
+      inert?: boolean;
+      text?: string;
+      tagName?: string;
+      rect?: { width: number; height: number };
+      children?: MockNode[];
+    }): MockNode {
+      const node: MockNode = {
+        className: opts.className ?? '',
+        style: opts.style ?? {},
+        hidden: opts.hidden,
+        inert: opts.inert,
+        innerText: opts.text ?? '',
+        textContent: opts.text ?? '',
+        tagName: (opts.tagName ?? 'div').toUpperCase(),
+        children: opts.children ?? [],
+        parent: null,
+        rect: opts.rect ?? { width: 100, height: 50 },
+      };
+      for (const child of node.children) {
+        child.parent = node;
+      }
+      return node;
+    }
+
+    function queryMockNodes(root: MockNode, sel: string): MockNode[] {
+      const results: MockNode[] = [];
+      function walk(n: MockNode) {
+        let match = false;
+        if (sel.includes('[class*="subscriptionModal-wrapper"]') && n.className.includes('subscriptionModal-wrapper')) {
+          match = true;
+        }
+        if (sel.includes('[class*="subscriptionProductSection-pro"]') && n.className.includes('subscriptionProductSection-pro')) {
+          match = true;
+        }
+        if (sel.includes('button') && (n.tagName === 'BUTTON' || sel.includes('[role="button"]'))) {
+          match = true;
+        }
+        if (match) results.push(n);
+        for (const c of n.children) walk(c);
+      }
+      for (const c of root.children) walk(c);
+      return results;
+    }
+
+    function wrapMockNode(n: MockNode): unknown {
+      const wrapped: Record<string, unknown> = {
+        className: n.className,
+        style: n.style,
+        innerText: n.innerText,
+        textContent: n.textContent,
+        tagName: n.tagName,
+        closest: (sel: string) => {
+          let cur: MockNode | null = n;
+          while (cur) {
+            if (sel.includes('[hidden]') && (cur.hidden || cur.style.display === 'none')) return wrapMockNode(cur);
+            if (sel.includes('[inert]') && cur.inert) return wrapMockNode(cur);
+            cur = cur.parent;
+          }
+          return null;
+        },
+        getClientRects: () => [n.rect],
+        getBoundingClientRect: () => n.rect,
+        querySelectorAll: (sel: string) => queryMockNodes(n, sel).map(wrapMockNode),
+      };
+      return wrapped;
+    }
+
+    function runReadTrial(root: MockNode): Record<string, unknown> {
+      const docMock = {
+        body: {
+          getClientRects: () => [{ width: 1920, height: 1080 }],
+          offsetWidth: 1920,
+          offsetHeight: 1080,
+        },
+        querySelectorAll: (sel: string) => queryMockNodes(root, sel).map(wrapMockNode),
+      };
+      const winMock = {
+        getComputedStyle: (el: { style?: Record<string, string> }) => ({
+          display: el.style?.display ?? 'block',
+          visibility: el.style?.visibility ?? 'visible',
+        }),
+      };
+      return vm.runInNewContext(READ_TRIAL, {
+        document: docMock,
+        window: winMock,
+        getComputedStyle: winMock.getComputedStyle,
+        Array,
+        String,
+        RegExp,
+        parseInt,
+        Boolean,
+        Number,
+      }) as Record<string, unknown>;
+    }
+
+    it('hidden stale Pro 7 + current visible Pro 3: scopes to visible modal owner and reads 3 days', () => {
+      const staleModal = makeMockNode({
+        className: 'subscriptionModal-wrapper',
+        style: { display: 'none' },
+        hidden: true,
+        children: [
+          makeMockNode({
+            className: 'subscriptionProductSection-pro',
+            text: 'Pro\n222,000₫\n0₫\nfor 7 days',
+            children: [
+              makeMockNode({ tagName: 'button', text: 'Start free trial' }),
+            ],
+          }),
+        ],
+      });
+      const activeModal = makeMockNode({
+        className: 'subscriptionModal-wrapper',
+        style: { display: 'block' },
+        children: [
+          makeMockNode({
+            className: 'subscriptionProductSection-pro',
+            text: 'Pro\n222,000₫\n0₫\nfor 3 days',
+            children: [
+              makeMockNode({ tagName: 'button', text: 'Start free trial' }),
+            ],
+          }),
+        ],
+      });
+      const root = makeMockNode({ children: [staleModal, activeModal] });
+      const result = runReadTrial(root);
+
+      expect(result.found).toBe(true);
+      expect(result.days).toBe(3);
+      expect(result.listPrice).toBe('222,000₫');
+      expect(result.trialPrice).toBe('0₫');
+      expect(result.hasStartButton).toBe(true);
+    });
+
+    it('single visible modal owner with Pro 7: reads 7 days correctly', () => {
+      const modal = makeMockNode({
+        className: 'subscriptionModal-wrapper',
+        style: { display: 'block' },
+        children: [
+          makeMockNode({
+            className: 'subscriptionProductSection-pro',
+            text: 'Pro\n222,000₫\n0₫\nfor 7 days',
+            children: [
+              makeMockNode({ tagName: 'button', text: 'Start free trial' }),
+            ],
+          }),
+        ],
+      });
+      const result = runReadTrial(makeMockNode({ children: [modal] }));
+
+      expect(result.found).toBe(true);
+      expect(result.days).toBe(7);
+      expect(result.listPrice).toBe('222,000₫');
+      expect(result.trialPrice).toBe('0₫');
+      expect(result.hasStartButton).toBe(true);
+    });
+
+    it('two active visible modal owners: returns found: false with PRICING_OWNER_UNKNOWN', () => {
+      const modal1 = makeMockNode({ className: 'subscriptionModal-wrapper', style: { display: 'block' } });
+      const modal2 = makeMockNode({ className: 'subscriptionModal-wrapper', style: { display: 'block' } });
+      const result = runReadTrial(makeMockNode({ children: [modal1, modal2] }));
+
+      expect(result.found).toBe(false);
+      expect(result.reason).toBe('PRICING_OWNER_UNKNOWN');
+    });
+
+    it('unrelated CTA outside pricing owner is not mixed into modal ctas', () => {
+      const outsideButton = makeMockNode({ tagName: 'button', text: 'Start free trial' });
+      const modalWithoutButton = makeMockNode({
+        className: 'subscriptionModal-wrapper',
+        style: { display: 'block' },
+        children: [
+          makeMockNode({
+            className: 'subscriptionProductSection-pro',
+            text: 'Pro\n222,000₫\n0₫\nfor 7 days',
+            children: [],
+          }),
+        ],
+      });
+      const result = runReadTrial(makeMockNode({ children: [outsideButton, modalWithoutButton] }));
+
+      expect(result.found).toBe(true);
+      expect(result.days).toBe(7);
+      expect(result.hasStartButton).toBe(false);
+    });
+
+    it('modal owner visible but no visible pro card: returns found: false with PRO_CARD_UNKNOWN', () => {
+      const modalEmpty = makeMockNode({
+        className: 'subscriptionModal-wrapper',
+        style: { display: 'block' },
+        children: [
+          makeMockNode({
+            className: 'subscriptionProductSection-pro',
+            style: { display: 'none' },
+            hidden: true,
+            text: 'Pro\n222,000₫\n0₫\nfor 7 days',
+          }),
+        ],
+      });
+      const result = runReadTrial(makeMockNode({ children: [modalEmpty] }));
+
+      expect(result.found).toBe(false);
+      expect(result.reason).toBe('PRO_CARD_UNKNOWN');
+    });
   });
 });
 

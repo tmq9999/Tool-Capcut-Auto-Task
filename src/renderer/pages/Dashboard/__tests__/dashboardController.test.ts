@@ -35,14 +35,15 @@ function account(id: string): AccountListItemDTO {
   };
 }
 
-function log(id: string): CanonicalRuntimeLog {
+function log(id: string, overrides: Partial<CanonicalRuntimeLog> = {}): CanonicalRuntimeLog {
   return {
     id,
     email: 'a@x.com',
     step: 'Browser',
     status: 'INFO',
     message: 'msg ' + id,
-    createdAt: '2026-09-01T10:00:00.000Z'
+    createdAt: '2026-09-01T10:00:00.000Z',
+    ...overrides
   };
 }
 
@@ -739,6 +740,14 @@ describe('DashboardController.removeAccounts', () => {
     expect(removed).toBe(false);
     expect(bridge.removed).toEqual([]);
   });
+
+  it('F14 (G10): catches rejected IPC transport in removeAccounts and records error', async () => {
+    bridge.accounts.remove = async () => { throw new Error('DEMO_IPC_DISCONNECTED'); };
+    const controller = new DashboardController(bridge);
+    const ok = await controller.removeAccounts(['acc-1']);
+    expect(ok).toBe(false);
+    expect(controller.getState().error).toBe('DEMO_IPC_DISCONNECTED');
+  });
 });
 
 describe('DashboardController.stopThread', () => {
@@ -747,6 +756,14 @@ describe('DashboardController.stopThread', () => {
     const controller = new DashboardController(bridge);
     await expect(controller.stopThread('acc-1')).resolves.toBe(false);
     expect(controller.getState().error).toContain('dừng');
+  });
+
+  it('F14 (G10): catches rejected IPC transport in stopThread and records error', async () => {
+    bridge.run.stopThread = async () => { throw new Error('DEMO_IPC_DISCONNECTED'); };
+    const controller = new DashboardController(bridge);
+    const ok = await controller.stopThread('acc-1');
+    expect(ok).toBe(false);
+    expect(controller.getState().error).toBe('DEMO_IPC_DISCONNECTED');
   });
   it('stops one thread and refreshes the running list', async () => {
     bridge.runningThreads = [
@@ -1631,6 +1648,102 @@ describe('T07-B: Logs Reset Synchronization', () => {
       await starting;
       await flush();
       expect(controller.getState().error).toBe('NEW-RUN-ERROR');
+      controller.dispose();
+    });
+
+    it('F11 (G09): same-epoch read race ignores older slow history read that resolves after newer read', async () => {
+      let resolveFirstList!: (res: unknown) => void;
+      const firstListPromise = new Promise((r) => { resolveFirstList = r; });
+      let listCalls = 0;
+      bridge.logs.list = vi.fn(async () => {
+        listCalls++;
+        if (listCalls === 1) {
+          return firstListPromise as never;
+        }
+        return {
+          success: true as const,
+          data: {
+            items: [log('same-id', { message: 'NEW-VERSION' })],
+            total: 1
+          }
+        };
+      });
+
+      const controller = new DashboardController(bridge);
+      controller.attach();
+      const firstLoad = controller.load();
+      await flush();
+
+      // Second load starts in same epoch and finishes first
+      const secondLoad = controller.load();
+      await secondLoad;
+      expect(controller.getState().logs[0]?.message).toBe('NEW-VERSION');
+
+      // Now first load (slow) resolves with old data
+      resolveFirstList({
+        success: true,
+        data: {
+          items: [log('same-id', { message: 'OLD-VERSION' })],
+          total: 1
+        }
+      });
+      await firstLoad;
+
+      // Must NOT overwrite with OLD-VERSION
+      expect(controller.getState().logs[0]?.message).toBe('NEW-VERSION');
+      controller.dispose();
+    });
+
+    it('F11 (G09): authoritative empty SQL removes deleted persisted rows instead of keeping state.logs', async () => {
+      bridge.logs.list = async () => ({
+        success: true,
+        data: { items: [log('old-persisted')], total: 1 }
+      });
+      const controller = new DashboardController(bridge);
+      controller.attach();
+      await controller.load();
+      expect(controller.getState().logs.map((l) => l.id)).toEqual(['old-persisted']);
+
+      // Main clears/deletes DB rows, now returns empty
+      bridge.logs.list = async () => ({
+        success: true,
+        data: { items: [], total: 0 }
+      });
+      await controller.load();
+
+      // State logs MUST be empty, not keeping old-persisted
+      expect(controller.getState().logs).toEqual([]);
+      controller.dispose();
+    });
+
+    it('F11 (G09): live entry streamSequence is preserved across SQL fetches missing streamSequence', async () => {
+      bridge.logs.list = async () => ({
+        success: true,
+        data: { items: [], total: 0 }
+      });
+      const controller = new DashboardController(bridge);
+      controller.attach();
+      await controller.load();
+
+      // Live push arrives with streamSequence 12
+      bridge.pushLog({ ...log('row-1'), streamSequence: 12 });
+      expect(controller.getState().logs[0]?.streamSequence).toBe(12);
+
+      // Subsequent SQL list returns row-1 without streamSequence (or undefined)
+      bridge.logs.list = async () => ({
+        success: true,
+        data: { items: [{ ...log('row-1'), streamSequence: undefined }], total: 1 }
+      });
+      await controller.load();
+
+      // Reset arrives with clearedThrough 10
+      bridge.pushReset({ clearedThrough: 10 });
+      await flush();
+
+      // row-1 MUST survive because sequence 12 > 10 was retained
+      expect(controller.getState().logs.map((l) => l.id)).toEqual(['row-1']);
+      expect(controller.getState().logs[0]?.streamSequence).toBe(12);
+
       controller.dispose();
     });
   });

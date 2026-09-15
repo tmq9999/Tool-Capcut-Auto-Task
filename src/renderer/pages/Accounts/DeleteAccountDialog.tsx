@@ -8,6 +8,7 @@ export interface DeleteAccountDialogProps {
   onClose: () => void;
   onConfirmDelete: () => void;
   selectedCount: number;
+  isDeleting?: boolean;
 }
 
 export const DeleteAccountDialog: React.FC<DeleteAccountDialogProps> = ({
@@ -15,21 +16,20 @@ export const DeleteAccountDialog: React.FC<DeleteAccountDialogProps> = ({
   onClose,
   onConfirmDelete,
   selectedCount,
+  isDeleting = false,
 }) => {
   const footer = (
     <>
-      <Button variant="secondary" size="md" onClick={onClose}>
+      <Button variant="secondary" size="md" onClick={onClose} disabled={isDeleting}>
         Hủy
       </Button>
       <Button
         variant="danger"
         size="md"
-        onClick={() => {
-          onConfirmDelete();
-          onClose();
-        }}
+        disabled={isDeleting}
+        onClick={onConfirmDelete}
       >
-        Xác nhận xóa
+        {isDeleting ? 'Đang xóa...' : 'Xác nhận xóa'}
       </Button>
     </>
   );

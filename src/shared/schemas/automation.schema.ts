@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PastedCapcutSourceSchema } from './pasted-capcut.schema';
 import { EmailApiProviderEnum } from './provider.schema';
 
 /**
@@ -60,7 +61,8 @@ export const EmailSourceConfigSchema = z.discriminatedUnion('mode', [
       (items) => new Set(items).size === items.length,
       { message: 'Danh sách accountIds không được chứa giá trị trùng' }
     )
-  }).strict()
+  }).strict(),
+  PastedCapcutSourceSchema
 ]);
 export type EmailSourceConfig = z.infer<typeof EmailSourceConfigSchema>;
 
@@ -110,6 +112,9 @@ export const PasswordConfigSchema = z.discriminatedUnion('mode', [
     uppercase: z.boolean(),
     numbers: z.boolean(),
     special: z.boolean()
+  }).strict(),
+  z.object({
+    mode: z.literal('per-account')
   }).strict()
 ]);
 export type PasswordConfig = z.infer<typeof PasswordConfigSchema>;
@@ -156,6 +161,21 @@ export const AutomationRunConfigSchema = z.object({
     const reject = (field: string, message: string): void => {
       ctx.addIssue({ code: 'custom', path: [field], message });
     };
+    const pasted = config.emailSource.mode === 'pasted-existing';
+    if (pasted !== (config.password.mode === 'per-account')) {
+      reject('password', 'Nguồn dán tài khoản có sẵn phải dùng mật khẩu theo từng dòng.');
+    }
+    if (pasted) {
+      if (config.missionTransport === 'http-only') {
+        reject('missionTransport', 'Nguồn dán tài khoản có sẵn không hỗ trợ HTTP-only.');
+      }
+      if (config.approvedMailboxes !== undefined) {
+        reject('approvedMailboxes', 'Nguồn dán tài khoản có sẵn không nhận approvedMailboxes.');
+      }
+      if (config.stopAfter !== undefined) {
+        reject('stopAfter', 'Nguồn dán tài khoản có sẵn không nhận stopAfter.');
+      }
+    }
     if (config.emailSource.mode === 'api') {
       if (config.maxBillablePurchases === undefined) {
         reject('maxBillablePurchases', 'Phải chỉ định giới hạn mua hộp thư.');

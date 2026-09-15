@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type {
+  AccountIdentity,
   AccountRepository,
   SecretBufferOp,
   UpdateAccountRecordInput
@@ -67,6 +68,10 @@ export class AccountService {
       notes: input.notes ?? null
     });
     return { id };
+  }
+
+  findByEmail(email: string): AccountIdentity[] {
+    return this.repo.findByEmail(email);
   }
 
   list(filter: AccountFilterDTO): { items: AccountListItemDTO[]; total: number } {
@@ -148,3 +153,5 @@ export class AccountService {
     };
   }
 }
+
+export type { AccountIdentity } from '../repositories/AccountRepository';

@@ -8,7 +8,13 @@ class FakeManager implements IProxyLeaseSource {
   public acquires = 0;
   public releaseAllCalls = 0;
   public acquireSignals: Array<AbortSignal | undefined> = [];
+  public availableSlotsCalls = 0;
   constructor(public readonly token: string, public readonly keys?: string[]) {}
+
+  async availableSlots(): Promise<number | null> {
+    this.availableSlotsCalls += 1;
+    return this.keys ? this.keys.length : null;
+  }
 
   async acquire(signal?: AbortSignal): Promise<AcquiredProxyLease> {
     this.acquires += 1;
@@ -287,5 +293,76 @@ describe('LazyProxyLeaseSource với danh sách key chỉ định', () => {
     source.configure({ keys: ['K2'] });
     await source.acquire();
     expect(built.map((x) => x.keys)).toEqual([['K1'], ['K2']]);
+  });
+
+  describe('resetIdlePreflightCache', () => {
+    it('resets cached manager when idle so preflight / availableSlots picks up new token and inventory', async () => {
+      const built: FakeManager[] = [];
+      let token = 'TOKEN-INITIAL';
+      const source = new LazyProxyLeaseSource(
+        { readSimpleKey: () => token },
+        (options: ProxyLeaseManagerOptions) => {
+          const manager = new FakeManager(options.apiToken, options.keys);
+          built.push(manager);
+          return manager;
+        }
+      );
+
+      source.configure({ keys: ['K1'] });
+      expect(await source.availableSlots()).toBe(1);
+      expect(built).toHaveLength(1);
+      expect(built[0].token).toBe('TOKEN-INITIAL');
+
+      // Operator changes token in settings
+      token = 'TOKEN-NEW';
+      source.resetIdlePreflightCache();
+
+      // Next preflight creates a new manager with new token
+      expect(await source.availableSlots()).toBe(1);
+      expect(built).toHaveLength(2);
+      expect(built[1].token).toBe('TOKEN-NEW');
+    });
+
+    it('refuses to reset preflight cache while leases are active', async () => {
+      const built: FakeManager[] = [];
+      const source = new LazyProxyLeaseSource(
+        { readSimpleKey: () => 'TOKEN' },
+        (options: ProxyLeaseManagerOptions) => {
+          const manager = new FakeManager(options.apiToken, options.keys);
+          built.push(manager);
+          return manager;
+        }
+      );
+
+      source.configure({ keys: ['K1'] });
+      const lease = await source.acquire();
+      expect(() => source.resetIdlePreflightCache()).toThrow('CANNOT_RESET_PROXY_PREFLIGHT_WHILE_OWNED');
+      expect(built).toHaveLength(1);
+
+      await source.release(lease);
+      expect(() => source.resetIdlePreflightCache()).not.toThrow();
+    });
+
+    it('refuses to reset preflight cache when cleanupState is releasing or failed', async () => {
+      let failRelease = false;
+      class FlakyManager extends FakeManager {
+        override async releaseAll(): Promise<void> {
+          if (failRelease) throw new Error('Release failed');
+          return super.releaseAll();
+        }
+      }
+
+      const source = new LazyProxyLeaseSource(
+        { readSimpleKey: () => 'TOKEN' },
+        (options: ProxyLeaseManagerOptions) => new FlakyManager(options.apiToken, options.keys)
+      );
+
+      await source.acquire();
+      failRelease = true;
+      await expect(source.releaseAll()).rejects.toThrow('Release failed');
+
+      // Cleanup failed
+      expect(() => source.resetIdlePreflightCache()).toThrow('CANNOT_RESET_PROXY_PREFLIGHT_WHILE_OWNED');
+    });
   });
 });
