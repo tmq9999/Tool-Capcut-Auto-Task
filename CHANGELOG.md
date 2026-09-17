@@ -6,6 +6,60 @@ theo [SemVer](https://semver.org/lang/vi/).
 Lịch sử trước `2.4.0` không được dựng lại ở đây vì repo không có git history —
 chỉ ghi những gì có bằng chứng trong mã nguồn, log chạy thật và báo cáo nghiệm thu.
 
+## [3.0.4] — 2026-09-17
+
+Bản phát hành nâng cấp toàn diện và hoàn thiện tính năng **Nạp tài khoản Dán sẵn (Pasted Account Parser & Hardened Admission)**, tối ưu hóa triệt để khả năng phòng chống Race Condition trong xác thực tài khoản, đọc ưu đãi Pro Trial và dropdown ngày sinh, bảo vệ quyền sở hữu bằng chứng nhiệm vụ (Proof Ownership), cách ly observer LogBus và khắc phục các vấn đề đồng bộ giao diện trên Dashboard, Accounts, Logs và Settings.
+
+### Added
+
+- **Hỗ trợ nạp danh sách tài khoản CapCut dán sẵn nâng cao (Pasted Existing Accounts — G01):**
+  - Bổ sung bộ phân tích cú pháp chuỗi tài khoản `email|passwordCapcut` chuyên dụng tại `pasted-capcut.schema.ts`.
+  - Tự động chuẩn hóa và trim email nhưng **bảo toàn nguyên vẹn 100% mật khẩu thô** (giữ trọn ký tự đặc biệt, khoảng trắng đầu/cuối và các ký tự pipe `|` phụ trong mật khẩu).
+  - Báo lỗi cú pháp chính xác theo từng số dòng thực tế (`line-indexed error report`), loại bỏ lỗi hiển thị cảnh báo `EMPTY_INPUT` sai vị trí dòng.
+  - Tự động khử trùng lặp nguyên tử theo email chuẩn hóa và mật khẩu chính xác; kiểm tra và chặn batch ngay từ đầu nếu phát hiện xung đột mật khẩu trên cùng một địa chỉ email.
+  - Tích hợp kiểm tra điều kiện nạp (admission restrictions) trực tiếp tại ranh giới service của `pasted-existing`, ngăn ngừa việc bỏ qua chính sách mật khẩu, transport HTTP-only hoặc hạn mức ngân sách.
+  - Hỗ trợ tái sử dụng tài khoản đã tồn tại trong CSDL cục bộ (chế độ readonly lookup); luồng chạy chuyển thẳng vào đăng nhập existing-only, không yêu cầu OTP và không kích hoạt mua hộp thư JIT.
+- **Làm mới bộ đệm Preflight Proxy khi bắt đầu phiên mới (Idle Proxy Preflight Cache Refresh — G05):**
+  - Tự động xóa cache preflight cũ tại ranh giới khởi chạy phiên mới của `LazyProxyLeaseSource` khi người dùng cập nhật token hoặc danh sách key KiotProxy.
+  - Ngăn ngừa tình trạng giữ cache lỗi của phiên trước dẫn đến báo lỗi sai lệch `AUTH_ERROR` hoặc `PROXY_CAPACITY_UNAVAILABLE`.
+- **Mở rộng bộ kiểm thử tích hợp thực tế toàn diện (Full-Scale Integration Test Suite — G12):**
+  - Xây dựng bộ kiểm thử tích hợp thực tế với SQLite `better-sqlite3` thật, kiểm chứng chu trình tái sử dụng tài khoản, nạp pasted-existing và các oracle thu hồi tài nguyên khắt khe khi gặp lỗi ngắt quãng.
+  - Nâng quy mô kiểm thử tự động của dự án lên **2.377 tests (175 test files) pass 100%** và **95 selector assertions**.
+
+### Changed
+
+- **Chuẩn hóa quy trình xác thực trạng thái tài khoản (Auth State Document Bounding — G02):**
+  - Thu thập và kiểm tra toàn bộ dữ liệu trạng thái xác thực trong cùng một ngữ cảnh document (`same-document facts reading`).
+  - Thiết lập rào chắn điều hướng (navigation fence) và định danh document, ngăn chặn tình trạng chuyển trang hoặc mở tab ngoài làm sai lệch kết luận đăng nhập thành công `hasAuthenticatedWorkspace`.
+  - Giới hạn tìm kiếm trường nhập mật khẩu vào đúng form xác thực đang hiển thị (`visible input matches`), không lấy phần tử ẩn đầu tiên của toàn trang.
+- **Giới hạn thời gian và phạm vi đọc ưu đãi Pro Trial (Bounded Trial Read & Scope — G03):**
+  - Tích hợp thời hạn tối đa (deadline) và AbortSignal cho bước đọc ưu đãi trial trong `trial.ts`. Rethrow tín hiệu ngắt ngay lập tức khi nhận lệnh dừng, không để worker bị giữ quá hạn.
+  - Thu hẹp phạm vi tìm kiếm thẻ Pro card vào đúng container bảng giá đang active (`active pricing wrapper`), loại bỏ rủi ro đọc nhầm các thẻ Pro cũ bị ẩn hoặc ưu đãi stale từ DOM trước đó.
+- **Xác thực quyền sở hữu dropdown Ngày sinh (Birthday Dropdown Owner Verification — G04):**
+  - Xác minh liên kết giữa dropdown và control chọn ngày sinh bằng `aria-controls`, exact ID hoặc xác thực newly-opened panel.
+  - Ném lỗi rõ ràng `OWNER_MISSING` / `OWNER_AMBIGUOUS` khi không thể chứng minh listbox thuộc về form đăng ký, tuyệt đối không click mù vào các panel không liên quan.
+
+### Fixed
+
+- **Cách ly Observer trong LogBus chống ngắt quãng chuỗi thông báo (LogBus Observer Isolation — G06):**
+  - Tách biệt từng observer khi dispatch sự kiện log. Một listener ném ngoại lệ không làm gián đoạn các observer khác và không làm đứt chuỗi flush log xuống SQLite.
+- **Bảo vệ quyền sở hữu bằng chứng & Phân cấp lỗi lưu trữ CSDL (Proof Ownership & Persistence Hierarchy — G07):**
+  - Giám sát chặt chẽ iteration owner token cho mọi thao tác ghi checkpoint và proof writer; xả an toàn toàn bộ bằng chứng hợp lệ trước khi giải phóng luồng.
+  - Ưu tiên ghi nhận trung thực lỗi lưu bằng chứng phụ trợ (`TASK_CHECKPOINT_PERSISTENCE_FAILED`) thay vì suy luận thành dừng luồng thông thường từ tín hiệu abort.
+- **Đóng băng chẩn đoán dừng Profile khi đã khóa Timeout (Freeze Locked Stop Diagnostics — G08):**
+  - Khi quy trình dừng profile Multilogin đã khóa timeout (`cdp-teardown`/`remoteConfirmed`), ngăn chặn các phản hồi từ chối muộn (late rejection) từ remote API làm thay đổi chẩn đoán lỗi gốc hoặc phát sinh kết quả giả.
+- **Đồng bộ Lịch sử Log trên Dashboard & Ngăn ngừa Race Condition (Dashboard Log Sync — G09):**
+  - Sử dụng request token và authoritative history để đồng bộ log Dashboard; ngăn chặn các yêu cầu đọc log cũ resolve sau ghi đè lên dữ liệu mới hoặc làm xáo trộn thứ tự dòng nhật ký.
+  - Cải tiến tính năng xóa log trên trang Logs với cơ chế monotonic cutoff, không xóa nhầm trạng thái lỗi hoặc trạng thái tải của lượt refresh mới.
+- **Bảo toàn mật khẩu khi Thêm/Sửa Tài khoản & Xử lý Lỗi Mutation (Accounts UI Refinements — G10):**
+  - Sửa drawer Add/Edit Account để bảo toàn nguyên vẹn mật khẩu người dùng nhập (loại bỏ việc tự động trim làm mất ký tự khoảng trắng có chủ đích của mật khẩu).
+  - Chuẩn hóa xử lý lỗi IPC mutation: hiển thị thông báo lỗi rõ ràng khi tạo/sửa/xóa tài khoản thất bại và giữ nguyên input/selection để người dùng thử lại thay vì đóng form âm thầm.
+- **Cách ly Draft Test Connection trong Settings theo Per-Service Token (G11):**
+  - Gắn request token, draft revision và effect generation riêng cho từng nhà cung cấp (Multilogin, KiotProxy, Gmail94, DongVanFB) trong Settings.
+  - Ngăn chặn kết quả kiểm tra kết nối của cấu hình cũ hiển thị đè lên draft cấu hình mới vừa nhập khi người dùng thao tác nhanh.
+
+---
+
 ## [3.0.3] — 2026-09-11
 
 Bản phát hành chuyên sâu nâng cấp **Độ ổn định và Khả năng phục hồi (Resilience & Evidence Reconciliation)** của hệ thống tự động hóa đa luồng, giải quyết triệt để các vấn đề rò rỉ hoặc mất mát bằng chứng nhiệm vụ khi dừng luồng, tách biệt rõ ràng phân cấp lỗi lưu trữ CSDL, kiểm soát an toàn tuyệt đối trạng thái đóng profile trình duyệt và chuẩn hóa thời gian đối soát dữ liệu theo chuẩn ISO UTC.
